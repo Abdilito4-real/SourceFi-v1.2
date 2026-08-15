@@ -1,0 +1,16 @@
+node_modules
+.next
+.env
+.env.local
+
+.vercel
+.env*
+
+# Generated at build time by @ducanh2912/next-pwa (workbox-webpack-plugin) —
+# regenerated on every `next build`, not source.
+public/sw.js
+public/sw.js.map
+public/swe-worker*.js
+public/swe-worker*.js.map
+public/workbox-*.js
+public/workbox-*.js.map

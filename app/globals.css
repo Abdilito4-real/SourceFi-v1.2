@@ -1,0 +1,209 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * SourceFi design tokens
+ * ------------------------------------------------------------------
+ * Two palettes, one role vocabulary. Rebrand-I (light, navy sidebar +
+ * gold accent) lives on :root as the default; Rebrand-II (dark, green
+ * accent) overrides every token under [data-theme="dark"]. Values were
+ * pixel-sampled from the approved mockups (Rebrand-I.png / Rebrand-II.png)
+ * and then nudged where needed to clear WCAG AA — see the contrast notes
+ * inline below for the pairs that required adjustment.
+ *
+ * Nothing outside this block should ever contain a hex value. Components
+ * reference the Tailwind color names in tailwind.config.js (bg-surface,
+ * text-secondary, border-strong, …), which resolve to these variables.
+ */
+
+:root {
+  /* Rebrand-I — light surface, navy sidebar, gold accent */
+  --color-bg: #f6f2ea;
+  --color-surface: #ffffff;
+  --color-surface-elevated: #ffffff;
+  --color-surface-sunken: #eef0f2;
+  --color-border: #e1dbcf;
+  --color-border-strong: #8f887a; /* 3.15:1 on --color-bg, 3.52:1 on white — clears non-text 3:1 */
+
+  --color-text-primary: #12161f;
+  --color-text-secondary: #5b6472; /* 5.36:1 on --color-bg, 5.98:1 on white */
+  --color-text-tertiary: #7a8390;
+  --color-text-inverse: #ffffff;
+
+  --color-accent: #c9963c; /* gold — for fills/borders/icons, NOT text on light (2.65:1, fails AA) */
+  --color-accent-soft: #f1e4c7;
+  --color-accent-text: #7a5720; /* darkened gold for text/links — 6.54:1 on white */
+  --color-accent-contrast: #12161f; /* text to place on a filled gold surface — 6.82:1 */
+
+  --color-success: #10bc7c;
+  --color-success-soft: #e3f3ec;
+  --color-success-text: #0a7a54; /* raw success green is 2.47:1 on white and fails as text */
+
+  --color-warning: #c9963c;
+  --color-warning-soft: #f1e4c7;
+  --color-warning-text: #8a6425; /* 5.34:1 on white */
+
+  --color-danger: #d64545;
+  --color-danger-soft: #fbeae9;
+  --color-danger-text: #b8342f; /* raw danger is 4.38:1, under 4.5 — darkened for text use */
+
+  --color-focus-ring: #7a5720; /* 6.54:1 on white, 5.86:1 on --color-bg */
+
+  /* The sidebar is the one surface that stays dark in light mode too —
+     that's the Rebrand-I mockup, not a bug. */
+  --color-nav-bg: #0b1b38;
+  --color-nav-text: #ffffff;
+  --color-nav-text-muted: #9aa5b8; /* 6.88:1 on --color-nav-bg */
+  --color-nav-active-bg: #edece9;
+  --color-nav-text-active: #12161f; /* 14.47:1 on --color-nav-active-bg */
+
+  --shadow-sm: 0 1px 2px rgba(18, 22, 31, 0.06), 0 1px 1px rgba(18, 22, 31, 0.04);
+  --shadow-md: 0 8px 20px rgba(18, 22, 31, 0.1);
+  --shadow-lg: 0 16px 40px rgba(18, 22, 31, 0.16);
+
+  --font-display: "Libre Baskerville", Georgia, serif;
+  --font-body: "Space Grotesk", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  /* Rebrand-II — dark surface, mint-green accent */
+  --color-bg: #080f14;
+  --color-surface: #0d1b22;
+  --color-surface-elevated: #142b33;
+  --color-surface-sunken: #071115;
+  --color-border: #1e3b45;
+  --color-border-strong: #3a6874; /* 3.13:1 on --color-bg */
+
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #8da2a6; /* 7.21:1 on --color-bg */
+  --color-text-tertiary: #7a8599;
+  --color-text-inverse: #080f14;
+
+  --color-accent: #10bc7c;
+  --color-accent-soft: rgba(16, 188, 124, 0.12);
+  --color-accent-text: #10bc7c; /* 7.81:1 on --color-bg */
+  --color-accent-contrast: #080f14; /* text placed on a filled green surface */
+
+  --color-success: #10bc7c;
+  --color-success-soft: rgba(16, 188, 124, 0.12);
+  --color-success-text: #10bc7c;
+
+  --color-warning: #e3a63e; /* distinct from success — see note in constants.js migration */
+  --color-warning-soft: rgba(227, 166, 62, 0.12);
+  --color-warning-text: #e3a63e;
+
+  --color-danger: #e05a47;
+  --color-danger-soft: rgba(224, 90, 71, 0.12);
+  --color-danger-text: #e05a47; /* 5.26:1 on --color-bg */
+
+  --color-focus-ring: #10bc7c;
+
+  --color-nav-bg: #080f14; /* sidebar blends into the page in dark mode, per the mockup */
+  --color-nav-text: #8da2a6;
+  --color-nav-text-muted: #7a8599;
+  --color-nav-active-bg: rgba(16, 188, 124, 0.12);
+  --color-nav-text-active: #10bc7c;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 8px 20px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.45);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Visible keyboard focus everywhere, independent of mouse hover styles. */
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes backdropFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.modal-backdrop {
+  animation: backdropFade 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.modal-content {
+  animation: fadeIn 240ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.pulse-dot {
+  animation: breathe 1.8s infinite ease-in-out;
+}
+
+/* Respect the user's OS-level motion preference: kill animation/transition
+   duration everywhere instead of hand-picking which ones to spare. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
