@@ -1,7 +1,7 @@
 // tests/authz.test.ts
 //
 // Stage 4's explicit deliverable: prove a buyer session cannot reach any
-// sourcer- or admin-only action, including by manipulating the client.
+// supplier- or admin-only action, including by manipulating the client.
 // "Manipulating the client" is modeled here as trying every input the
 // browser actually controls — the session cookie's own claims, and
 // whatever a forged request body might claim about role/email — and
@@ -24,7 +24,7 @@ import { getSupabaseServerClient } from "../lib/supabaseServer";
 import { requireSession, requireRole } from "../lib/authz";
 
 const BUYER_SESSION: SessionClaims = { privyUserId: "did:privy:buyer123", userRowId: 1, email: "buyer@example.com" };
-const SOURCER_SESSION: SessionClaims = { privyUserId: "did:privy:sourcer456", userRowId: 2, email: "sourcer@example.com" };
+const SUPPLIER_SESSION: SessionClaims = { privyUserId: "did:privy:supplier456", userRowId: 2, email: "supplier@example.com" };
 
 const BUYER_ROW: UserRow = {
   id: 1,
@@ -34,12 +34,12 @@ const BUYER_ROW: UserRow = {
   privy_user_id: "did:privy:buyer123",
 };
 
-const SOURCER_ROW: UserRow = {
+const SUPPLIER_ROW: UserRow = {
   id: 2,
-  email: "sourcer@example.com",
-  username: "sourcer_user",
-  role: "sourcer",
-  privy_user_id: "did:privy:sourcer456",
+  email: "supplier@example.com",
+  username: "supplier_user",
+  role: "supplier",
+  privy_user_id: "did:privy:supplier456",
 };
 
 const ADMIN_ROW: UserRow = {
@@ -96,11 +96,11 @@ describe("requireSession", () => {
 });
 
 describe("requireRole — the actual boundary the client cannot cross", () => {
-  it("blocks a buyer session from a sourcer-only action (403)", async () => {
+  it("blocks a buyer session from a supplier-only action (403)", async () => {
     vi.mocked(readSessionFromCookieStore).mockResolvedValue(BUYER_SESSION);
     mockSupabaseReturning(BUYER_ROW);
 
-    const result = await requireRole(["sourcer"]);
+    const result = await requireRole(["supplier"]);
     expect(result).toBeInstanceOf(Response);
     expect((result as Response).status).toBe(403);
   });
@@ -114,9 +114,9 @@ describe("requireRole — the actual boundary the client cannot cross", () => {
     expect((result as Response).status).toBe(403);
   });
 
-  it("blocks a sourcer session from an admin-only action (403)", async () => {
-    vi.mocked(readSessionFromCookieStore).mockResolvedValue(SOURCER_SESSION);
-    mockSupabaseReturning(SOURCER_ROW);
+  it("blocks a supplier session from an admin-only action (403)", async () => {
+    vi.mocked(readSessionFromCookieStore).mockResolvedValue(SUPPLIER_SESSION);
+    mockSupabaseReturning(SUPPLIER_ROW);
 
     const result = await requireRole(["admin"]);
     expect(result).toBeInstanceOf(Response);
@@ -150,7 +150,7 @@ describe("requireRole — the actual boundary the client cannot cross", () => {
     });
     mockSupabaseReturning(ADMIN_ROW);
 
-    const result = await requireRole(["sourcer", "admin"]);
+    const result = await requireRole(["supplier", "admin"]);
     expect(result).not.toBeInstanceOf(Response);
   });
 

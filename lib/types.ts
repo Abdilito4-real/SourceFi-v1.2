@@ -359,6 +359,7 @@ export type DisputeCategory =
   | "damaged_in_transit"
   | "other";
 export type DisputeStatus = "open" | "under_review" | "resolved_buyer" | "resolved_supplier" | "resolved_split";
+export type DisputeRuling = "buyer" | "supplier";
 
 /** dispute_type is the field that keeps "buyer rejected the proof before
  * any money moved" and "buyer has a problem after settlement" from being

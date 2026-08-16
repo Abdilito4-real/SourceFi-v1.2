@@ -1,18 +1,23 @@
 // app/api/admin/users/[id]/role/route.ts
 //
 // The entire replacement for the old "Sourcer Access" self-service
-// password gate: granting the sourcer (or admin) role is now admin-only,
+// password gate: granting the supplier (or admin) role is now admin-only,
 // database-backed, and audit-logged. There is deliberately no path to
 // this role anywhere in the client UI except through an authenticated
 // admin session — see the Stage 4 audit note in
 // supabase/migrations/0001_stage4_auth.sql for how the first admin gets
-// bootstrapped (a direct DB write, on purpose).
+// bootstrapped (a direct DB write, on purpose). Note: granting 'supplier'
+// here does NOT create a supplier_profiles row or set a verification
+// expiry — that only happens through the real verification flow
+// (app/api/admin/supplier-verification/[id]/route.ts). This endpoint is
+// for role correction/admin bootstrapping, not a supplier-onboarding
+// shortcut.
 import { getSupabaseServerClient } from "../../../../../../lib/supabaseServer";
 import { requireRole, logAudit } from "../../../../../../lib/authz";
 import { checkRateLimit, recordFailure, recordSuccess, rateLimitKey } from "../../../../../../lib/rateLimit";
 import type { Role } from "../../../../../../lib/types";
 
-const VALID_ROLES: Role[] = ["buyer", "sourcer", "admin"];
+const VALID_ROLES: Role[] = ["buyer", "supplier", "admin"];
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireRole(["admin"]);

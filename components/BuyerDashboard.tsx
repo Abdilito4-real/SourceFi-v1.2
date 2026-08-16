@@ -2,30 +2,43 @@
 
 // components/BuyerDashboard.tsx
 //
-// Real route (/buyer), real dashboard — three sections (Overview,
-// Materials, Requests) behind a persistent sidebar, replacing the old
-// single-page App.tsx's one long scroll gated by a role pill.
+// Real route (/buyer) — Overview, Suppliers, Orders, Materials.
+// Marketplace pivot: no more "post a request and a sourcer claims it" —
+// the buyer picks a currently-verified supplier directly and creates an
+// order against them (design doc Section 0). No wallet/crypto UI
+// anywhere here — Fund Order is a single button, NGN in, NGN shown
+// (design doc Section 3).
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Info, ArrowRight, Layers, Coins, Building2, Package, HardHat, LayoutGrid, FileText, History, X, Wallet2, ChevronRight } from "lucide-react";
+import { Loader2, Info, ArrowRight, Layers, Coins, Building2, Package, HardHat, LayoutGrid, FileText, History, X, ChevronRight, Store, ShieldCheck } from "lucide-react";
 
-import { materialLibrary, sendUsdcOnArc } from "../lib/constants";
-import { toMinorUnits, fromMinorUnits, formatMoney } from "../lib/money";
+import { materialLibrary } from "../lib/constants";
+import { formatMoney } from "../lib/money";
 import { useSession } from "./SessionProvider";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
-import RequestCard from "./RequestCard";
-import FundingModal from "./FundingModal";
-import RequestDetailsModal from "./RequestDetailsModal";
+import OrderCard from "./OrderCard";
+import OrderDetailsModal from "./OrderDetailsModal";
 import Button from "./ui/Button";
 import { Card } from "./ui/Card";
 import Modal from "./ui/Modal";
 import StatCard from "./ui/StatCard";
-import { Label, Input } from "./ui/Field";
+import { Label, Input, Textarea } from "./ui/Field";
 import Select from "./ui/Select";
 import { useToast } from "./ui/Toast";
-import type { Material, SourcingRequest, SourcingRequestRow, Currency } from "../lib/types";
+import type { Material, OrderRow } from "../lib/types";
 
-type Section = "overview" | "materials" | "requests";
+type Section = "overview" | "suppliers" | "orders" | "materials";
+
+interface SupplierListing {
+  id: number;
+  business_name: string;
+  business_location: string;
+  what_they_sell: string;
+  rating_average: number | null;
+  rating_count: number;
+}
+
+const TERMINAL_STATUSES = new Set(["settled", "refunded", "cancelled", "expired"]);
 
 function materialIcon(id: string) {
   if (id === "earthblocks" || id === "hempcrete") return <Building2 size={20} className="text-accent-text" />;
@@ -37,18 +50,10 @@ function materialIcon(id: string) {
 
 function MaterialCard({ material, onOpen }: { material: Material; onOpen: (m: Material) => void }) {
   return (
-    <Card
-      interactive
-      onClick={() => onOpen(material)}
-      className="flex cursor-pointer flex-col gap-4 p-5"
-    >
+    <Card interactive onClick={() => onOpen(material)} className="flex cursor-pointer flex-col gap-4 p-5">
       <div className="flex items-start justify-between gap-2">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft">
-          {materialIcon(material.id)}
-        </div>
-        <span className="rounded bg-accent-soft px-2 py-1 text-right text-[10.5px] font-bold leading-tight text-accent-text">
-          {material.savings}
-        </span>
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft">{materialIcon(material.id)}</div>
+        <span className="rounded bg-accent-soft px-2 py-1 text-right text-[10.5px] font-bold leading-tight text-accent-text">{material.savings}</span>
       </div>
       <div>
         <h3 className="mb-1 font-display text-lg italic leading-tight text-text-primary">{material.name}</h3>
@@ -62,7 +67,7 @@ function MaterialCard({ material, onOpen }: { material: Material; onOpen: (m: Ma
   );
 }
 
-function MaterialDetail({ material, onClose, onRequestThis }: { material: Material; onClose: () => void; onRequestThis: (m: Material) => void }) {
+function MaterialDetail({ material, onClose, onFindSuppliers }: { material: Material; onClose: () => void; onFindSuppliers: (m: Material) => void }) {
   return (
     <Modal open onClose={onClose} size="sm">
       <div className="mb-3.5 flex items-center justify-between">
@@ -82,71 +87,90 @@ function MaterialDetail({ material, onClose, onRequestThis }: { material: Materi
         <span className="rounded bg-surface-sunken px-2 py-1 text-xs font-semibold text-text-primary">{material.savings}</span>
         <span className="rounded bg-surface-sunken px-2 py-1 text-xs font-semibold text-text-primary">{material.metrics}</span>
       </div>
-      <Button fullWidth onClick={() => onRequestThis(material)}>
-        Create sourcing mandate
+      <Button fullWidth onClick={() => onFindSuppliers(material)}>
+        Find verified suppliers <ArrowRight size={14} />
       </Button>
     </Modal>
   );
 }
 
-interface NewRequestModalProps {
+function SupplierCard({ supplier, onOrder }: { supplier: SupplierListing; onOrder: (s: SupplierListing) => void }) {
+  return (
+    <Card className="flex flex-col gap-3 p-5">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-text">
+          <Store size={18} />
+        </div>
+        <span className="flex items-center gap-1 rounded-pill bg-success-soft px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-success-text">
+          <ShieldCheck size={11} /> Verified
+        </span>
+      </div>
+      <div>
+        <h3 className="font-display text-lg italic leading-tight text-text-primary">{supplier.business_name}</h3>
+        <div className="mt-0.5 text-xs text-text-tertiary">{supplier.business_location}</div>
+      </div>
+      <p className="line-clamp-2 text-sm leading-relaxed text-text-secondary">{supplier.what_they_sell}</p>
+      <div className="mt-auto flex items-center justify-between pt-1">
+        <span className="text-xs font-semibold text-text-secondary">
+          {supplier.rating_count > 0 ? `★ ${supplier.rating_average?.toFixed(1)} (${supplier.rating_count})` : "No ratings yet"}
+        </span>
+        <Button size="sm" onClick={() => onOrder(supplier)}>
+          Create order
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+interface NewOrderModalProps {
   onClose: () => void;
-  onSubmit: (form: { title: string; budgetAmount: string; budgetCurrency: Currency; location: string; category: string }) => void | Promise<void>;
-  prefill: Material | null;
+  onSubmit: (form: { supplierId: number; title: string; amount: string; deliveryLocation: string; quantity: string; description: string }) => void | Promise<void>;
+  supplier: SupplierListing;
   submitting: boolean;
 }
 
-function NewRequestModal({ onClose, onSubmit, prefill, submitting }: NewRequestModalProps) {
-  const [title, setTitle] = useState(prefill ? `Procure ${prefill.name}` : "");
-  const [budgetAmount, setBudgetAmount] = useState("");
-  const [budgetCurrency, setBudgetCurrency] = useState<Currency>("USD");
-  const [location, setLocation] = useState("");
-  const [category, setCategory] = useState(prefill ? prefill.id : "earthblocks");
+function NewOrderModal({ onClose, onSubmit, supplier, submitting }: NewOrderModalProps) {
+  const [title, setTitle] = useState("");
+  const [amount, setAmount] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [deliveryLocation, setDeliveryLocation] = useState("");
+  const [description, setDescription] = useState("");
 
-  const validBudget = budgetAmount.trim() !== "" && !isNaN(Number(budgetAmount)) && Number(budgetAmount) >= 0;
+  const validAmount = amount.trim() !== "" && !isNaN(Number(amount)) && Number(amount) > 0;
 
   const handleFormSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!validBudget) return;
-    onSubmit({ title, budgetAmount, budgetCurrency, location, category });
+    if (!validAmount) return;
+    onSubmit({ supplierId: supplier.id, title, amount, deliveryLocation, quantity, description });
   };
 
   return (
-    <Modal open onClose={onClose} title="New sourcing mandate" size="sm">
+    <Modal open onClose={onClose} title={`Order from ${supplier.business_name}`} size="sm">
       <form onSubmit={handleFormSubmit} className="flex flex-col gap-3.5">
         <div>
-          <Label htmlFor="new-req-title">Material title</Label>
-          <Input id="new-req-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. 500 units of compressed earth blocks" required />
+          <Label htmlFor="new-order-title">What are you ordering?</Label>
+          <Input id="new-order-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. 500 units of compressed earth blocks" required />
         </div>
         <div className="flex gap-3">
           <div className="flex-1">
-            <Label htmlFor="new-req-budget">Estimated budget</Label>
-            <Input id="new-req-budget" inputMode="decimal" value={budgetAmount} onChange={(e) => setBudgetAmount(e.target.value)} placeholder="e.g. 2500" required />
+            <Label htmlFor="new-order-amount">Order amount (₦)</Label>
+            <Input id="new-order-amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 500000" required />
           </div>
-          <div className="w-28">
-            <Label htmlFor="new-req-currency">Currency</Label>
-            <Select id="new-req-currency" value={budgetCurrency} onChange={(e) => setBudgetCurrency(e.target.value as Currency)}>
-              <option value="USD">USD</option>
-              <option value="NGN">NGN</option>
-            </Select>
+          <div className="flex-1">
+            <Label htmlFor="new-order-quantity">Quantity</Label>
+            <Input id="new-order-quantity" value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder="e.g. 500 units" />
           </div>
         </div>
         <div>
-          <Label htmlFor="new-req-location">Delivery location</Label>
-          <Input id="new-req-location" value={location} onChange={(e) => setLocation(e.target.value)} placeholder="e.g. Lagos, NG" required />
+          <Label htmlFor="new-order-location">Delivery location</Label>
+          <Input id="new-order-location" value={deliveryLocation} onChange={(e) => setDeliveryLocation(e.target.value)} placeholder="e.g. Lekki, Lagos" required />
         </div>
         <div>
-          <Label htmlFor="new-req-category">Sourcing category</Label>
-          <Select id="new-req-category" value={category} onChange={(e) => setCategory(e.target.value)}>
-            {materialLibrary.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </Select>
+          <Label htmlFor="new-order-desc">Notes (optional)</Label>
+          <Textarea id="new-order-desc" value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
-        <Button type="submit" fullWidth loading={submitting} disabled={submitting || !(title.trim() && validBudget && location.trim())}>
-          {submitting ? "Broadcasting…" : "Broadcast mandate request"}
+        <Button type="submit" fullWidth loading={submitting} disabled={submitting || !(title.trim() && validAmount && deliveryLocation.trim())}>
+          {submitting ? "Creating…" : "Create order"}
         </Button>
       </form>
     </Modal>
@@ -156,163 +180,85 @@ function NewRequestModal({ onClose, onSubmit, prefill, submitting }: NewRequestM
 export default function BuyerDashboard() {
   const router = useRouter();
   const { notify } = useToast();
-  const {
-    checkingSession,
-    user,
-    requests,
-    setRequests,
-    loadingRequests,
-    walletBalance,
-    web3ConnectedAddress,
-    wallets,
-    canBeSourcer,
-    signingOut,
-    handleSignOut,
-    login,
-  } = useSession();
+  const { checkingSession, user, orders, setOrders, loadingOrders, canBeSupplier, signingOut, handleSignOut } = useSession();
 
   const [section, setSection] = useState<Section>("overview");
   const [tab, setTab] = useState<"active" | "history">("active");
-  const [selected, setSelected] = useState<SourcingRequest | null>(null);
-  const [showNew, setShowNew] = useState(false);
-  const [creatingRequest, setCreatingRequest] = useState(false);
-  const [showFunding, setShowFunding] = useState(false);
+  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  const [suppliers, setSuppliers] = useState<SupplierListing[]>([]);
+  const [loadingSuppliers, setLoadingSuppliers] = useState(true);
+  const [orderingSupplier, setOrderingSupplier] = useState<SupplierListing | null>(null);
+  const [creatingOrder, setCreatingOrder] = useState(false);
   const [viewingMaterial, setViewingMaterial] = useState<Material | null>(null);
-  const [requestPrefill, setRequestPrefill] = useState<Material | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [auditNotes, setAuditNotes] = useState("");
-  const [verificationOtp, setVerificationOtp] = useState("");
 
-  // Deep-link guard: someone bookmarking /buyer while signed out or mid-
-  // onboarding lands back at the gate instead of an empty/broken dashboard.
+  const isBuyer = user?.role === "buyer";
+
   useEffect(() => {
     if (checkingSession) return;
     if (!user) router.replace("/");
   }, [checkingSession, user, router]);
 
-  // POST /api/requests is requireRole(["buyer"])-checked server-side — that
-  // stays the real boundary, unchanged. This is purely a UX fix: a
-  // sourcer/admin account (which also lands on /buyer, since anyone can
-  // browse it) could previously fill out the entire New Request form only
-  // to get a confusing 403 after submitting. Gating the entry point means
-  // they find out before typing anything, not after.
-  const isBuyer = user?.role === "buyer";
-  const openNewRequestModal = (prefill: Material | null = null) => {
-    if (!isBuyer) {
-      notify("error", "Posting a request needs the buyer role on this account.");
-      return;
-    }
-    setRequestPrefill(prefill);
-    setShowNew(true);
-  };
+  useEffect(() => {
+    if (!user) return;
+    setLoadingSuppliers(true);
+    fetch("/api/suppliers")
+      .then((res) => res.json())
+      .then((data) => setSuppliers(data.suppliers || []))
+      .catch(() => notify("error", "Failed to load suppliers."))
+      .finally(() => setLoadingSuppliers(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
 
-  const activeCount = requests.filter((r) => r.status !== "escrow_released").length;
-  const escrowValueMinor = requests.filter((r) => r.status === "escrow").reduce((acc, r) => acc + r.sourcingFeeMinor + r.platformFeeMinor, 0);
-  const completedCount = requests.filter((r) => r.status === "escrow_released").length;
+  const activeCount = orders.filter((o) => !TERMINAL_STATUSES.has(o.status)).length;
+  const completedCount = orders.filter((o) => o.status === "settled").length;
+  const inEscrowMinor = orders
+    .filter((o) => o.status === "funded" || o.status === "fulfilling" || o.status === "proof_submitted")
+    .reduce((acc, o) => acc + o.amount_minor, 0);
 
   const tabbed = useMemo(
-    () => (tab === "active" ? requests.filter((r) => r.status !== "escrow_released") : requests.filter((r) => r.status === "escrow_released")),
-    [requests, tab]
+    () => (tab === "active" ? orders.filter((o) => !TERMINAL_STATUSES.has(o.status)) : orders.filter((o) => TERMINAL_STATUSES.has(o.status))),
+    [orders, tab]
   );
 
   const navItems: NavItem[] = [
     { key: "overview", label: "Overview", icon: <LayoutGrid size={16} />, active: section === "overview", onClick: () => setSection("overview") },
+    { key: "suppliers", label: "Suppliers", icon: <Store size={16} />, active: section === "suppliers", onClick: () => setSection("suppliers") },
+    { key: "orders", label: "Orders", icon: <FileText size={16} />, active: section === "orders", onClick: () => setSection("orders"), badge: activeCount },
     { key: "materials", label: "Materials", icon: <Package size={16} />, active: section === "materials", onClick: () => setSection("materials") },
-    {
-      key: "requests",
-      label: "Requests",
-      icon: <FileText size={16} />,
-      active: section === "requests",
-      onClick: () => setSection("requests"),
-      badge: activeCount,
-    },
   ];
 
-  const handleSubmitRequest = async (form: { title: string; budgetAmount: string; budgetCurrency: Currency; location: string; category: string }) => {
-    setCreatingRequest(true);
+  const openOrderModal = (supplier: SupplierListing) => {
+    if (!isBuyer) {
+      notify("error", "Creating an order needs the buyer role on this account.");
+      return;
+    }
+    setOrderingSupplier(supplier);
+  };
+
+  const handleCreateOrder = async (form: { supplierId: number; title: string; amount: string; deliveryLocation: string; quantity: string; description: string }) => {
+    setCreatingOrder(true);
     try {
-      const res = await fetch("/api/requests", {
+      const res = await fetch("/api/orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),
       });
       const data = await res.json();
-      if (!res.ok || !data.request) throw new Error(data.error || "Failed to create sourcing request.");
-      setRequests((prev) => [toSourcingRequest(data.request as SourcingRequestRow), ...prev]);
-      notify("success", "Sourcing request broadcast to verified partners.");
-      setShowNew(false);
-      setSection("requests");
+      if (!res.ok || !data.order) throw new Error(data.error || "Failed to create order.");
+      setOrders((prev) => [data.order as OrderRow, ...prev]);
+      notify("success", "Order created — fund it to get started.");
+      setOrderingSupplier(null);
+      setSection("orders");
+      setSelectedOrderId(data.order.id);
     } catch (err) {
-      notify("error", err instanceof Error ? err.message : "Failed to create sourcing request.");
+      notify("error", err instanceof Error ? err.message : "Failed to create order.");
     } finally {
-      setCreatingRequest(false);
+      setCreatingOrder(false);
     }
-  };
-
-  const handleExecuteVerifyAndDeposit = async () => {
-    const activeWallet = wallets?.[0];
-    if (!activeWallet || !selected || !user) return;
-    const escrowAddress = process.env.NEXT_PUBLIC_ESCROW_WALLET_ADDRESS || "";
-    const totalAmount = fromMinorUnits(selected.sourcingFeeMinor + selected.platformFeeMinor);
-    try {
-      setIsSubmitting(true);
-      const txHash = await sendUsdcOnArc(activeWallet, escrowAddress, totalAmount);
-      const res = await fetch("/api/escrow", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "recordDeposit", requestId: selected.dbId, txHash }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Deposit could not be recorded.");
-      setRequests((rs) => rs.map((r) => (r.id === selected.id ? { ...r, status: "escrow" } : r)));
-      setSelected((s) => (s ? { ...s, status: "escrow" } : s));
-      notify("success", "Escrow funded. Verification can now begin.");
-    } catch (err) {
-      notify("error", err instanceof Error ? err.message : "Payment rejected.");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleAdvance = async (req: SourcingRequest, nextStatus: SourcingRequest["status"] | "invite_sent") => {
-    if (!user) return;
-    if (!isBuyer) {
-      notify("error", "That action needs the buyer role on this account.");
-      return;
-    }
-    if (nextStatus === "escrow") {
-      await handleExecuteVerifyAndDeposit();
-      return;
-    }
-    if (nextStatus === "escrow_released") {
-      setIsSubmitting(true);
-      try {
-        const res = await fetch("/api/escrow", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "releaseEscrow", requestId: req.dbId }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Release rejected.");
-        setRequests((rs) => rs.map((r) => (r.id === req.id ? { ...r, status: "escrow_released" } : r)));
-        setSelected((s) => (s ? { ...s, status: "escrow_released" } : s));
-        notify("success", "Escrow released. Funds are on their way to your sourcing partner.");
-      } catch (err) {
-        notify("error", err instanceof Error ? err.message : "Release rejected.");
-      } finally {
-        setIsSubmitting(false);
-      }
-      return;
-    }
-    notify("error", "That action isn't available from the buyer dashboard.");
-  };
-
-  const noop = () => {
-    /* buyer never submits an audit — required by RequestDetailsModal's shared prop shape */
   };
 
   const switchLinks: SwitchLink[] = [
-    ...(canBeSourcer ? [{ label: "Switch to sourcer dashboard", href: "/sourcer" }] : []),
+    ...(canBeSupplier ? [{ label: "Switch to supplier dashboard", href: "/supplier" }] : []),
     ...(user?.role === "admin" ? [{ label: "Admin dashboard", href: "/admin" }] : []),
   ];
 
@@ -332,76 +278,69 @@ export default function BuyerDashboard() {
       user={user}
       onSignOut={handleSignOut}
       signingOut={signingOut}
-      pageTitle={section === "overview" ? `Welcome back, ${user.username || "Buyer"}` : section === "materials" ? "Material library" : "Sourcing requests"}
+      pageTitle={
+        section === "overview" ? `Welcome back, ${user.username || "Buyer"}` : section === "suppliers" ? "Verified suppliers" : section === "materials" ? "Material library" : "Orders"
+      }
       pageSubtitle={
         section === "overview"
           ? "Your procurement activity at a glance."
+          : section === "suppliers"
+          ? "Every supplier here has passed one-time business verification."
           : section === "materials"
           ? "Hard-to-source architectural materials, verified before they leave the warehouse."
           : undefined
-      }
-      accountCluster={
-        <>
-          <div className="rounded-md border border-accent bg-accent-soft px-3 py-1.5 text-xs font-bold text-accent-text">
-            {walletBalance} USD
-          </div>
-          {!web3ConnectedAddress ? (
-            <button
-              type="button"
-              onClick={login}
-              className="rounded-md border border-border-strong px-3 py-1.5 text-xs font-semibold text-text-primary hover:bg-surface-sunken"
-            >
-              Connect wallet
-            </button>
-          ) : (
-            <div title={web3ConnectedAddress} className="rounded-md border border-accent bg-accent-soft px-3 py-1.5 text-xs font-bold text-accent-text">
-              {web3ConnectedAddress.substring(0, 6)}...{web3ConnectedAddress.substring(38)}
-            </div>
-          )}
-        </>
-      }
-      headerAction={
-        <>
-          <Button variant="secondary" onClick={() => setShowFunding(true)}>
-            <Wallet2 size={14} /> Deposit
-          </Button>
-          <span title={isBuyer ? undefined : "Posting a request needs the buyer role on this account."}>
-            <Button disabled={!isBuyer} onClick={() => openNewRequestModal()}>
-              New request <ArrowRight size={14} />
-            </Button>
-          </span>
-        </>
       }
     >
       {section === "overview" && (
         <div className="flex flex-col gap-8">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <StatCard label="Active mandates" value={activeCount} icon={<FileText size={16} />} />
-            <StatCard label="Locked in escrow" value={formatMoney(escrowValueMinor)} icon={<Coins size={16} />} tone="accent" />
+            <StatCard label="Active orders" value={activeCount} icon={<FileText size={16} />} />
+            <StatCard label="In escrow" value={formatMoney(inEscrowMinor, "NGN")} icon={<Coins size={16} />} tone="accent" />
             <StatCard label="Completed" value={completedCount} icon={<History size={16} />} />
           </div>
 
           <div>
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="font-display text-xl italic text-text-primary">Recent activity</h2>
-              <button type="button" onClick={() => setSection("requests")} className="text-sm font-semibold text-accent-text hover:underline">
+              <h2 className="font-display text-xl italic text-text-primary">Recent orders</h2>
+              <button type="button" onClick={() => setSection("orders")} className="text-sm font-semibold text-accent-text hover:underline">
                 View all
               </button>
             </div>
-            {loadingRequests ? (
+            {loadingOrders ? (
               <div className="flex justify-center py-10">
                 <Loader2 size={22} className="spin-icon text-accent" />
               </div>
-            ) : requests.length === 0 ? (
-              <EmptyRequests onNew={isBuyer ? () => openNewRequestModal() : undefined} />
+            ) : orders.length === 0 ? (
+              <EmptyOrders onBrowse={() => setSection("suppliers")} />
             ) : (
               <div className="grid gap-3">
-                {requests.slice(0, 4).map((r) => (
-                  <RequestCard key={r.id} request={r} onOpen={setSelected} />
+                {orders.slice(0, 4).map((o) => (
+                  <OrderCard key={o.id} order={o} onOpen={(order) => setSelectedOrderId(order.id)} />
                 ))}
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {section === "suppliers" && (
+        <div>
+          {loadingSuppliers ? (
+            <div className="flex justify-center py-10">
+              <Loader2 size={22} className="spin-icon text-accent" />
+            </div>
+          ) : suppliers.length === 0 ? (
+            <div className="rounded-[10px] border-[1.5px] border-dashed border-border bg-surface px-5 py-10 text-center">
+              <Info size={24} className="mx-auto mb-2 text-text-tertiary" />
+              <p className="mx-auto max-w-[320px] text-sm text-text-secondary">No verified suppliers yet. Check back soon.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              {suppliers.map((s) => (
+                <SupplierCard key={s.id} supplier={s} onOrder={openOrderModal} />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -413,7 +352,7 @@ export default function BuyerDashboard() {
         </div>
       )}
 
-      {section === "requests" && (
+      {section === "orders" && (
         <div>
           <div className="mb-5 flex w-fit rounded-lg border border-border bg-surface p-1">
             <button
@@ -432,20 +371,20 @@ export default function BuyerDashboard() {
                 tab === "history" ? "bg-accent text-accent-contrast" : "text-text-secondary hover:text-text-primary"
               }`}
             >
-              <History size={13} /> History ({completedCount})
+              <History size={13} /> History
             </button>
           </div>
 
-          {loadingRequests ? (
+          {loadingOrders ? (
             <div className="flex justify-center py-10">
               <Loader2 size={22} className="spin-icon text-accent" />
             </div>
           ) : tabbed.length === 0 ? (
-            <EmptyRequests onNew={isBuyer ? () => openNewRequestModal() : undefined} historyTab={tab === "history"} />
+            <EmptyOrders onBrowse={() => setSection("suppliers")} historyTab={tab === "history"} />
           ) : (
             <div className="grid gap-3">
-              {tabbed.map((r) => (
-                <RequestCard key={r.id} request={r} onOpen={setSelected} />
+              {tabbed.map((o) => (
+                <OrderCard key={o.id} order={o} onOpen={(order) => setSelectedOrderId(order.id)} />
               ))}
             </div>
           )}
@@ -456,84 +395,42 @@ export default function BuyerDashboard() {
         <MaterialDetail
           material={viewingMaterial}
           onClose={() => setViewingMaterial(null)}
-          onRequestThis={(material) => {
+          onFindSuppliers={() => {
             setViewingMaterial(null);
-            openNewRequestModal(material);
+            setSection("suppliers");
           }}
         />
       )}
-      {showNew && (
-        <NewRequestModal onClose={() => setShowNew(false)} onSubmit={handleSubmitRequest} prefill={requestPrefill} submitting={creatingRequest} />
+      {orderingSupplier && (
+        <NewOrderModal onClose={() => setOrderingSupplier(null)} onSubmit={handleCreateOrder} supplier={orderingSupplier} submitting={creatingOrder} />
       )}
-      {showFunding && <FundingModal onClose={() => setShowFunding(false)} accountAddress={web3ConnectedAddress} />}
-      {selected && (
-        <RequestDetailsModal
-          selected={selected}
+      {selectedOrderId && (
+        <OrderDetailsModal
+          orderId={selectedOrderId}
           role="buyer"
-          user={user}
-          auditNotes={auditNotes}
-          setAuditNotes={setAuditNotes}
-          verificationOtp={verificationOtp}
-          setVerificationOtp={setVerificationOtp}
-          onClose={() => setSelected(null)}
-          onAdvance={handleAdvance}
-          onSubmitAudit={noop}
-          isSubmitting={isSubmitting}
-          showNotification={notify}
-          setRequests={setRequests}
-          requests={requests}
           canTransact={isBuyer}
+          onClose={() => setSelectedOrderId(null)}
+          onOrderChange={(order) => setOrders((prev) => prev.map((o) => (o.id === order.id ? order : o)))}
+          showNotification={notify}
         />
       )}
     </DashboardShell>
   );
 }
 
-function EmptyRequests({ onNew, historyTab = false }: { onNew?: () => void; historyTab?: boolean }) {
+function EmptyOrders({ onBrowse, historyTab = false }: { onBrowse?: () => void; historyTab?: boolean }) {
   return (
     <div className="rounded-[10px] border-[1.5px] border-dashed border-border bg-surface px-5 py-10 text-center">
       <Info size={24} className="mx-auto mb-2 text-text-tertiary" />
-      <div className="text-sm font-semibold text-text-primary">{historyTab ? "No completed requests yet" : "No requests yet"}</div>
+      <div className="text-sm font-semibold text-text-primary">{historyTab ? "No completed orders yet" : "No orders yet"}</div>
       <p className="mx-auto mt-1 max-w-[300px] text-xs text-text-secondary">
-        {historyTab
-          ? "Completed sourcing requests will appear here once payouts are disbursed."
-          : onNew
-          ? "Post a new request or browse the material library to get started."
-          : "Browse the material library to see what's sourceable."}
+        {historyTab ? "Completed orders will appear here once they settle." : "Browse verified suppliers to place your first order."}
       </p>
-      {!historyTab && onNew && (
-        <Button size="sm" className="mt-4" onClick={onNew}>
-          New request
+      {!historyTab && onBrowse && (
+        <Button size="sm" className="mt-4" onClick={onBrowse}>
+          Browse suppliers
         </Button>
       )}
     </div>
   );
-}
-
-function toSourcingRequest(r: SourcingRequestRow): SourcingRequest {
-  return {
-    id: r.request_code,
-    dbId: r.id,
-    title: r.title,
-    buyer: r.buyer_email || "",
-    budgetMinor: r.budget_minor,
-    budgetCurrency: r.budget_currency,
-    location: r.location || "Not specified",
-    posted: new Date(r.created_at).toLocaleDateString(),
-    status: r.status,
-    category: r.category || "",
-    sourcer: r.sourcer_email,
-    sourcingFeeMinor: r.sourcing_fee_minor || 0,
-    platformFeeMinor: r.platform_fee_minor || 0,
-    inviteSent: Boolean(r.invite_sent_at),
-    clearedBySourcer: r.cleared_by_sourcer,
-    clearedAt: r.cleared_at,
-    flagged: r.flagged,
-    auditNotes: r.audit_notes,
-    auditImage: r.audit_image,
-    auditBusinessId: r.audit_business_id,
-    depositTxHash: r.deposit_tx_hash,
-    releaseTxHash: r.release_tx_hash,
-    releasedAt: r.released_at,
-  };
 }

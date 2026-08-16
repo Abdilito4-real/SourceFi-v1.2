@@ -13,12 +13,12 @@ import { Label, HelperText, ErrorText, Input, Textarea } from "../../components/
 import Select from "../../components/ui/Select";
 import { Card, CardHeader, CardBody, CardFooter } from "../../components/ui/Card";
 import { Table, Thead, Tbody, Tr, Th, Td } from "../../components/ui/Table";
-import Badge, { STATUS_TONE } from "../../components/ui/Badge";
+import Badge, { ORDER_STATUS_TONE } from "../../components/ui/Badge";
 import Modal from "../../components/ui/Modal";
 import { useToast } from "../../components/ui/Toast";
 import EmptyState from "../../components/ui/EmptyState";
 import Skeleton from "../../components/ui/Skeleton";
-import type { RequestStatus } from "../../lib/types";
+import type { OrderStatus } from "../../lib/types";
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
@@ -85,15 +85,15 @@ interface SampleRow {
   id: string;
   material: string;
   buyer: string;
-  status: RequestStatus;
+  status: OrderStatus;
   fee: string;
 }
 
 const SAMPLE_ROWS: SampleRow[] = [
-  { id: "REQ-482913", material: "BubbleDeck Slabs", buyer: "@lagos_builds", status: "escrow", fee: "45.00" },
-  { id: "REQ-118820", material: "LC3 Cement", buyer: "@kano_materials", status: "verified", fee: "60.00" },
-  { id: "REQ-905517", material: "Compressed Earth Blocks", buyer: "@abuja_dev", status: "open", fee: "—" },
-  { id: "REQ-330214", material: "GFRP Reinforcing Bars", buyer: "@ph_contracts", status: "escrow_released", fee: "80.00" },
+  { id: "ORD-482913", material: "BubbleDeck Slabs", buyer: "@lagos_builds", status: "funded", fee: "45.00" },
+  { id: "ORD-118820", material: "LC3 Cement", buyer: "@kano_materials", status: "proof_submitted", fee: "60.00" },
+  { id: "ORD-905517", material: "Compressed Earth Blocks", buyer: "@abuja_dev", status: "pending_payment", fee: "—" },
+  { id: "ORD-330214", material: "GFRP Reinforcing Bars", buyer: "@ph_contracts", status: "settled", fee: "80.00" },
 ];
 
 export default function DesignSystemPreview() {
@@ -260,16 +260,16 @@ export default function DesignSystemPreview() {
                 <p className="text-sm text-text-secondary">Lagos, NG — posted 2 days ago.</p>
               </CardBody>
               <CardFooter>
-                <Badge tone={STATUS_TONE.escrow}>Funds in escrow</Badge>
-                <span className="text-sm text-text-tertiary">45.00 USD</span>
+                <Badge tone={ORDER_STATUS_TONE.funded}>Funded · awaiting fulfillment</Badge>
+                <span className="text-sm text-text-tertiary">₦45,000.00</span>
               </CardFooter>
             </Card>
             <Card>
               <CardBody>
                 <EmptyState
                   icon={Inbox}
-                  title="No archived requests"
-                  description="Completed sourcing requests will appear here once payouts are disbursed."
+                  title="No archived orders"
+                  description="Completed orders will appear here once they settle."
                 />
               </CardBody>
             </Card>
@@ -278,7 +278,7 @@ export default function DesignSystemPreview() {
 
         <Section title="Status badges">
           <div className="flex flex-wrap gap-2.5">
-            {(Object.entries(STATUS_TONE) as [RequestStatus, (typeof STATUS_TONE)[RequestStatus]][]).map(([status, tone]) => (
+            {(Object.entries(ORDER_STATUS_TONE) as [OrderStatus, (typeof ORDER_STATUS_TONE)[OrderStatus]][]).map(([status, tone]) => (
               <Badge key={status} tone={tone}>
                 {status.replace(/_/g, " ")}
               </Badge>
@@ -290,7 +290,7 @@ export default function DesignSystemPreview() {
           <Table>
             <Thead>
               <Tr>
-                <Th>Request</Th>
+                <Th>Order</Th>
                 <Th>Material</Th>
                 <Th>Buyer</Th>
                 <Th>Status</Th>
@@ -304,9 +304,9 @@ export default function DesignSystemPreview() {
                   <Td>{r.material}</Td>
                   <Td className="text-text-secondary">{r.buyer}</Td>
                   <Td>
-                    <Badge tone={STATUS_TONE[r.status]}>{r.status.replace(/_/g, " ")}</Badge>
+                    <Badge tone={ORDER_STATUS_TONE[r.status]}>{r.status.replace(/_/g, " ")}</Badge>
                   </Td>
-                  <Td>{r.fee} USD</Td>
+                  <Td>₦{r.fee}</Td>
                 </Tr>
               ))}
             </Tbody>

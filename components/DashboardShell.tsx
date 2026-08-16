@@ -32,7 +32,7 @@ export interface SwitchLink {
 }
 
 export interface DashboardShellProps {
-  activeDashboard: "buyer" | "sourcer" | "admin";
+  activeDashboard: "buyer" | "supplier" | "admin";
   /** Which other dashboards this account can jump to — each caller
    * computes its own list from the real, server-verified role (see
    * BuyerDashboard/SourcerDashboard/AdminDashboard), not a single binary

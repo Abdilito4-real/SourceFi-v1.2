@@ -24,7 +24,7 @@ import { isSupplierCurrentlyVerified } from "./supplierVerification";
 import { recordFundingConfirmed, recordEscrowRelease, recordSettlement, recordRefundFromEscrow } from "./ledger";
 import { ORDER_PLATFORM_FEE_MINOR } from "./money";
 import type { PaymentBoundary, PaymentStatusEvent } from "./paymentBoundary";
-import type { DisputeCategory, DisputeType, OrderRow, OrderStatus } from "./types";
+import type { DisputeCategory, DisputeRuling, DisputeType, OrderRow, OrderStatus } from "./types";
 
 // ============================================================================
 // Shared helpers
@@ -549,8 +549,6 @@ export async function reportPostSettlementIssue(
 // ============================================================================
 // Admin dispute resolution
 // ============================================================================
-
-export type DisputeRuling = "buyer" | "supplier";
 
 export interface ResolveDisputeResult {
   autoActionTaken: "refund_initiated" | "release_initiated" | "none";

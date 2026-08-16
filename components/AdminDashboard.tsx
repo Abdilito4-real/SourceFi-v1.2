@@ -2,38 +2,45 @@
 
 // components/AdminDashboard.tsx
 //
-// Real route (/admin) — Overview, Applications, Users. Only reachable if
-// the server-verified role allows it (see the redirect guard below); same
-// as BuyerDashboard/SourcerDashboard, the route existing doesn't grant
+// Real route (/admin) — Overview, Supplier Verification, Orders,
+// Disputes, Users. Only reachable if the server-verified role allows it
+// (see the redirect guard below); the route existing doesn't grant
 // anything — every write here is its own requireRole(["admin"]) check
 // server-side (see app/api/admin/*), this is UX only.
 //
-// This is the one screen in the app that can turn a sourcer_applications
-// row into an actual role change — see CLAUDE.md: "Sourcer role is
-// granted by an admin after vetting. A user cannot self-assign it."
+// "Applications" is repurposed here into "Supplier Verification" — same
+// admin-review shape (see docs/marketplace-payments-design.md Section F:
+// "same card-based review UI as today's ApplicationCard, fields
+// swapped"), but approval now creates/updates a real supplier_profiles
+// row with a 90-day expiry, not just a role flip (see
+// app/api/admin/supplier-verification/[id]/route.ts).
 import React, { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Info, LayoutGrid, ClipboardList, Users as UsersIcon, Check, X, ShieldCheck, UserCog } from "lucide-react";
+import { Loader2, Info, LayoutGrid, ShieldCheck, Users as UsersIcon, Check, X, UserCog, FileText, AlertTriangle } from "lucide-react";
 
 import { useSession } from "./SessionProvider";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
+import OrderCard from "./OrderCard";
+import OrderDetailsModal from "./OrderDetailsModal";
 import StatCard from "./ui/StatCard";
 import Badge, { type BadgeTone } from "./ui/Badge";
 import Button from "./ui/Button";
 import Select from "./ui/Select";
+import { Textarea } from "./ui/Field";
 import { Table, Thead, Tbody, Tr, Th, Td } from "./ui/Table";
 import { useToast } from "./ui/Toast";
-import type { AdminUserRow, ApplicationStatus, Role, SourcerApplicationRow } from "../lib/types";
+import { formatMoney } from "../lib/money";
+import type { AdminUserRow, ApplicationStatus, DisputeRow, DisputeRuling, DisputeStatus, OrderRow, Role, SupplierVerificationApplicationRow } from "../lib/types";
 
-type Section = "overview" | "applications" | "users";
+type Section = "overview" | "verification" | "orders" | "disputes" | "users";
 
 const ROLE_TONE: Record<Role, BadgeTone> = {
   buyer: "neutral",
-  sourcer: "accent",
+  supplier: "accent",
   admin: "success",
 };
 
-const ALL_ROLES: Role[] = ["buyer", "sourcer", "admin"];
+const ALL_ROLES: Role[] = ["buyer", "supplier", "admin"];
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -42,7 +49,7 @@ export default function AdminDashboard() {
 
   const [section, setSection] = useState<Section>("overview");
 
-  const [applications, setApplications] = useState<SourcerApplicationRow[]>([]);
+  const [applications, setApplications] = useState<SupplierVerificationApplicationRow[]>([]);
   const [applicationsStatus, setApplicationsStatus] = useState<ApplicationStatus>("pending");
   const [loadingApplications, setLoadingApplications] = useState(true);
   const [reviewingId, setReviewingId] = useState<number | null>(null);
@@ -51,11 +58,17 @@ export default function AdminDashboard() {
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [changingRoleId, setChangingRoleId] = useState<number | null>(null);
 
+  const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [loadingOrders, setLoadingOrders] = useState(true);
+  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+
+  const [disputes, setDisputes] = useState<(DisputeRow & { order: Pick<OrderRow, "id" | "order_code" | "status" | "amount_minor"> | null; raised_by_email: string | null })[]>([]);
+  const [disputesStatus, setDisputesStatus] = useState<DisputeStatus>("open");
+  const [loadingDisputes, setLoadingDisputes] = useState(true);
+  const [resolvingId, setResolvingId] = useState<number | null>(null);
+
   const isAdmin = user?.role === "admin";
 
-  // Deep-link guard, same pattern as SourcerDashboard's canBeSourcer check
-  // — a UX nicety, not the security boundary. Every actual read/write below
-  // is independently requireRole(["admin"])-checked server-side.
   useEffect(() => {
     if (checkingSession) return;
     if (!user) {
@@ -71,7 +84,7 @@ export default function AdminDashboard() {
     async (status: ApplicationStatus) => {
       setLoadingApplications(true);
       try {
-        const res = await fetch(`/api/admin/sourcer-applications?status=${status}`);
+        const res = await fetch(`/api/admin/supplier-verification?status=${status}`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed to load applications.");
         setApplications(data.applications || []);
@@ -98,6 +111,37 @@ export default function AdminDashboard() {
     }
   }, [notify]);
 
+  const loadOrders = useCallback(async () => {
+    setLoadingOrders(true);
+    try {
+      const res = await fetch("/api/orders");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load orders.");
+      setOrders(data.orders || []);
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to load orders.");
+    } finally {
+      setLoadingOrders(false);
+    }
+  }, [notify]);
+
+  const loadDisputes = useCallback(
+    async (status: DisputeStatus) => {
+      setLoadingDisputes(true);
+      try {
+        const res = await fetch(`/api/admin/disputes?status=${status}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to load disputes.");
+        setDisputes(data.disputes || []);
+      } catch (err) {
+        notify("error", err instanceof Error ? err.message : "Failed to load disputes.");
+      } finally {
+        setLoadingDisputes(false);
+      }
+    },
+    [notify]
+  );
+
   useEffect(() => {
     if (!isAdmin) return;
     loadApplications(applicationsStatus);
@@ -107,13 +151,20 @@ export default function AdminDashboard() {
   useEffect(() => {
     if (!isAdmin) return;
     loadUsers();
+    loadOrders();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin]);
 
-  const handleReview = async (application: SourcerApplicationRow, action: "approve" | "reject") => {
+  useEffect(() => {
+    if (!isAdmin) return;
+    loadDisputes(disputesStatus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, disputesStatus]);
+
+  const handleReview = async (application: SupplierVerificationApplicationRow, action: "approve" | "reject") => {
     setReviewingId(application.id);
     try {
-      const res = await fetch(`/api/admin/sourcer-applications/${application.id}`, {
+      const res = await fetch(`/api/admin/supplier-verification/${application.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
@@ -124,12 +175,9 @@ export default function AdminDashboard() {
       notify(
         "success",
         action === "approve"
-          ? `${application.applicant_username ? "@" + application.applicant_username : application.applicant_email} is now a sourcer.`
+          ? `${application.applicant_username ? "@" + application.applicant_username : application.applicant_email} is now a verified supplier.`
           : "Application rejected."
       );
-      // The applicant's row in the Users table just changed role — refetch
-      // rather than patch it in place so Users stays trustworthy even if
-      // it's never been opened yet this session.
       if (action === "approve") loadUsers();
     } catch (err) {
       notify("error", err instanceof Error ? err.message : "Failed to review application.");
@@ -158,15 +206,49 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleResolveDispute = async (disputeId: number, ruling: DisputeRuling, notes: string) => {
+    setResolvingId(disputeId);
+    try {
+      const res = await fetch(`/api/admin/disputes/${disputeId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ruling, notes }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to resolve dispute.");
+      setDisputes((rows) => rows.filter((d) => d.id !== disputeId));
+      const actionNote =
+        data.autoActionTaken === "refund_initiated"
+          ? " Refund initiated."
+          : data.autoActionTaken === "release_initiated"
+          ? " Release initiated."
+          : " Ruling recorded — no automatic fund movement (order already settled or outside the pre-release window).";
+      notify("success", `Dispute resolved for the ${ruling}.${actionNote}`);
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to resolve dispute.");
+    } finally {
+      setResolvingId(null);
+    }
+  };
+
   const navItems: NavItem[] = [
     { key: "overview", label: "Overview", icon: <LayoutGrid size={16} />, active: section === "overview", onClick: () => setSection("overview") },
     {
-      key: "applications",
-      label: "Applications",
-      icon: <ClipboardList size={16} />,
-      active: section === "applications",
-      onClick: () => setSection("applications"),
+      key: "verification",
+      label: "Supplier verification",
+      icon: <ShieldCheck size={16} />,
+      active: section === "verification",
+      onClick: () => setSection("verification"),
       badge: applicationsStatus === "pending" ? applications.length : undefined,
+    },
+    { key: "orders", label: "Orders", icon: <FileText size={16} />, active: section === "orders", onClick: () => setSection("orders") },
+    {
+      key: "disputes",
+      label: "Disputes",
+      icon: <AlertTriangle size={16} />,
+      active: section === "disputes",
+      onClick: () => setSection("disputes"),
+      badge: disputesStatus === "open" ? disputes.length : undefined,
     },
     { key: "users", label: "Users", icon: <UsersIcon size={16} />, active: section === "users", onClick: () => setSection("users") },
   ];
@@ -181,10 +263,10 @@ export default function AdminDashboard() {
 
   const switchLinks: SwitchLink[] = [
     { label: "Switch to buyer dashboard", href: "/buyer" },
-    { label: "Switch to sourcer dashboard", href: "/sourcer" },
+    { label: "Switch to supplier dashboard", href: "/supplier" },
   ];
 
-  const sourcerCount = users.filter((u) => u.role === "sourcer").length;
+  const supplierCount = users.filter((u) => u.role === "supplier").length;
   const buyerCount = users.filter((u) => u.role === "buyer").length;
 
   return (
@@ -195,33 +277,48 @@ export default function AdminDashboard() {
       user={user}
       onSignOut={handleSignOut}
       signingOut={signingOut}
-      pageTitle={section === "overview" ? "Admin overview" : section === "applications" ? "Sourcer applications" : "Users"}
+      pageTitle={
+        section === "overview"
+          ? "Admin overview"
+          : section === "verification"
+          ? "Supplier verification"
+          : section === "orders"
+          ? "Orders"
+          : section === "disputes"
+          ? "Disputes"
+          : "Users"
+      }
       pageSubtitle={
         section === "overview"
-          ? "Vet sourcing partners and manage account access."
-          : section === "applications"
-          ? "Review who's applying to become a sourcing partner."
+          ? "Verify suppliers, resolve disputes, and manage account access."
+          : section === "verification"
+          ? "Review who's applying for one-time business verification."
+          : section === "orders"
+          ? "Full-platform order visibility."
+          : section === "disputes"
+          ? "Buyer-raised issues, before and after settlement."
           : "Every account on SourceFi and its current role."
       }
     >
       {section === "overview" && (
         <div className="flex flex-col gap-8">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
             <StatCard
-              label="Pending applications"
+              label="Pending verifications"
               value={applicationsStatus === "pending" ? applications.length : "—"}
-              icon={<ClipboardList size={16} />}
+              icon={<ShieldCheck size={16} />}
               tone="accent"
-              hint={applicationsStatus === "pending" ? undefined : "Switch to Applications to view"}
+              hint={applicationsStatus === "pending" ? undefined : "Switch to Verification to view"}
             />
-            <StatCard label="Sourcers" value={loadingUsers ? "—" : sourcerCount} icon={<ShieldCheck size={16} />} />
+            <StatCard label="Open disputes" value={disputesStatus === "open" ? disputes.length : "—"} icon={<AlertTriangle size={16} />} />
+            <StatCard label="Suppliers" value={loadingUsers ? "—" : supplierCount} icon={<UserCog size={16} />} />
             <StatCard label="Buyers" value={loadingUsers ? "—" : buyerCount} icon={<UsersIcon size={16} />} />
           </div>
 
           <div>
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="font-display text-xl italic text-text-primary">Pending applications</h2>
-              <button type="button" onClick={() => setSection("applications")} className="text-sm font-semibold text-accent-text hover:underline">
+              <h2 className="font-display text-xl italic text-text-primary">Pending verification applications</h2>
+              <button type="button" onClick={() => setSection("verification")} className="text-sm font-semibold text-accent-text hover:underline">
                 View all
               </button>
             </div>
@@ -242,7 +339,7 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {section === "applications" && (
+      {section === "verification" && (
         <div>
           <div className="mb-5 flex w-fit rounded-lg border border-border bg-surface p-1">
             {(["pending", "approved", "rejected"] as ApplicationStatus[]).map((s) => (
@@ -273,6 +370,62 @@ export default function AdminDashboard() {
                   application={a}
                   reviewing={reviewingId === a.id}
                   onReview={applicationsStatus === "pending" ? handleReview : undefined}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {section === "orders" && (
+        <div>
+          {loadingOrders ? (
+            <div className="flex justify-center py-10">
+              <Loader2 size={22} className="spin-icon text-accent" />
+            </div>
+          ) : orders.length === 0 ? (
+            <EmptyState message="No orders on the platform yet." />
+          ) : (
+            <div className="grid gap-3">
+              {orders.map((o) => (
+                <OrderCard key={o.id} order={o} onOpen={(order) => setSelectedOrderId(order.id)} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {section === "disputes" && (
+        <div>
+          <div className="mb-5 flex w-fit rounded-lg border border-border bg-surface p-1">
+            {(["open", "under_review", "resolved_buyer", "resolved_supplier", "resolved_split"] as DisputeStatus[]).map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setDisputesStatus(s)}
+                className={`rounded-md px-3 py-1.5 text-xs font-semibold capitalize transition-colors duration-base ease-base ${
+                  disputesStatus === s ? "bg-accent text-accent-contrast" : "text-text-secondary hover:text-text-primary"
+                }`}
+              >
+                {s.replace("_", " ")}
+              </button>
+            ))}
+          </div>
+
+          {loadingDisputes ? (
+            <div className="flex justify-center py-10">
+              <Loader2 size={22} className="spin-icon text-accent" />
+            </div>
+          ) : disputes.length === 0 ? (
+            <EmptyState message={`No ${disputesStatus.replace("_", " ")} disputes.`} />
+          ) : (
+            <div className="grid gap-3">
+              {disputes.map((d) => (
+                <DisputeCard
+                  key={d.id}
+                  dispute={d}
+                  resolving={resolvingId === d.id}
+                  onResolve={disputesStatus === "open" || disputesStatus === "under_review" ? handleResolveDispute : undefined}
                 />
               ))}
             </div>
@@ -336,6 +489,17 @@ export default function AdminDashboard() {
           )}
         </div>
       )}
+
+      {selectedOrderId && (
+        <OrderDetailsModal
+          orderId={selectedOrderId}
+          role="admin"
+          canTransact={false}
+          onClose={() => setSelectedOrderId(null)}
+          onOrderChange={(order) => setOrders((prev) => prev.map((o) => (o.id === order.id ? order : o)))}
+          showNotification={notify}
+        />
+      )}
     </DashboardShell>
   );
 }
@@ -345,9 +509,9 @@ function ApplicationCard({
   reviewing,
   onReview,
 }: {
-  application: SourcerApplicationRow;
+  application: SupplierVerificationApplicationRow;
   reviewing: boolean;
-  onReview?: (application: SourcerApplicationRow, action: "approve" | "reject") => void;
+  onReview?: (application: SupplierVerificationApplicationRow, action: "approve" | "reject") => void;
 }) {
   return (
     <div className="rounded-xl border border-border bg-surface p-5">
@@ -355,11 +519,11 @@ function ApplicationCard({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <UserCog size={15} className="text-text-tertiary" />
-            <span className="font-semibold text-text-primary">
-              {application.applicant_username ? `@${application.applicant_username}` : application.applicant_email}
-            </span>
+            <span className="font-semibold text-text-primary">{application.business_name}</span>
           </div>
-          <div className="mt-0.5 text-xs text-text-tertiary">{application.applicant_email}</div>
+          <div className="mt-0.5 text-xs text-text-tertiary">
+            {application.applicant_username ? `@${application.applicant_username}` : application.applicant_email}
+          </div>
         </div>
         <span className="text-xs text-text-tertiary">{new Date(application.created_at).toLocaleDateString()}</span>
       </div>
@@ -367,15 +531,27 @@ function ApplicationCard({
       <dl className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <div>
           <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Location</dt>
-          <dd className="mt-0.5 text-sm text-text-primary">{application.location || "Not specified"}</dd>
+          <dd className="mt-0.5 text-sm text-text-primary">{application.business_location || "Not specified"}</dd>
         </div>
-        <div className="sm:col-span-2">
-          <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Experience</dt>
-          <dd className="mt-0.5 text-sm text-text-primary">{application.experience || "Not specified"}</dd>
+        <div>
+          <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">CAC number</dt>
+          <dd className="mt-0.5 text-sm text-text-primary">{application.cac_registration_number || "Not provided"}</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Supporting document</dt>
+          <dd className="mt-0.5 text-sm text-text-primary">
+            {application.supporting_document_url ? (
+              <a href={application.supporting_document_url} target="_blank" rel="noopener noreferrer" className="text-accent-text underline">
+                View
+              </a>
+            ) : (
+              "Not provided"
+            )}
+          </dd>
         </div>
         <div className="sm:col-span-3">
-          <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Reason</dt>
-          <dd className="mt-0.5 text-sm leading-relaxed text-text-primary">{application.reason || "Not specified"}</dd>
+          <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">What they sell</dt>
+          <dd className="mt-0.5 text-sm leading-relaxed text-text-primary">{application.what_they_sell || "Not specified"}</dd>
         </div>
       </dl>
 
@@ -387,6 +563,54 @@ function ApplicationCard({
           <Button size="sm" variant="secondary" disabled={reviewing} onClick={() => onReview(application, "reject")}>
             <X size={14} /> Reject
           </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DisputeCard({
+  dispute,
+  resolving,
+  onResolve,
+}: {
+  dispute: DisputeRow & { order: Pick<OrderRow, "id" | "order_code" | "status" | "amount_minor"> | null; raised_by_email: string | null };
+  resolving: boolean;
+  onResolve?: (disputeId: number, ruling: DisputeRuling, notes: string) => void;
+}) {
+  const [notes, setNotes] = useState("");
+
+  return (
+    <div className="rounded-xl border border-border bg-surface p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Badge tone={dispute.dispute_type === "post_settlement_report" ? "warning" : "danger"}>
+              {dispute.dispute_type === "post_settlement_report" ? "Post-settlement report" : "Pre-approval rejection"}
+            </Badge>
+            <span className="text-sm font-semibold text-text-primary">{dispute.order?.order_code || `Order #${dispute.order_id}`}</span>
+          </div>
+          <div className="mt-1 text-xs text-text-tertiary">
+            Raised by {dispute.raised_by_email || "—"} · {dispute.category.replace(/_/g, " ")} ·{" "}
+            {dispute.order ? formatMoney(dispute.order.amount_minor, "NGN") : ""}
+          </div>
+        </div>
+        <span className="text-xs text-text-tertiary">{new Date(dispute.created_at).toLocaleDateString()}</span>
+      </div>
+
+      {dispute.description && <p className="mt-3 text-sm leading-relaxed text-text-secondary">{dispute.description}</p>}
+
+      {onResolve && (
+        <div className="mt-4 flex flex-col gap-2 border-t border-border pt-4">
+          <Textarea placeholder="Resolution notes (required)" value={notes} onChange={(e) => setNotes(e.target.value)} />
+          <div className="flex gap-2">
+            <Button size="sm" variant="primary" loading={resolving} disabled={!notes.trim()} onClick={() => onResolve(dispute.id, "buyer", notes)}>
+              Rule for buyer
+            </Button>
+            <Button size="sm" variant="secondary" disabled={resolving || !notes.trim()} onClick={() => onResolve(dispute.id, "supplier", notes)}>
+              Rule for supplier
+            </Button>
+          </div>
         </div>
       )}
     </div>

@@ -2,50 +2,22 @@
 
 // components/SessionProvider.tsx
 //
-// The session-bootstrap logic (Privy token -> our own cookie), wallet
-// balance polling, idle-timeout sign-out, and the shared requests list
-// used to all live inline in the old single-page App.tsx. Now that the
-// buyer and sourcer dashboards are separate routes, this is the one place
-// that state lives — mounted once in app/(main)/layout.tsx, above every
-// route in the group, so navigating between /buyer and /sourcer doesn't
-// re-run the Privy handshake or refetch everything from scratch.
+// The session-bootstrap logic (Privy token -> our own cookie) and the
+// shared orders list live here — mounted once in app/(main)/layout.tsx,
+// above every route in the group, so navigating between /buyer and
+// /supplier doesn't re-run the Privy handshake or refetch everything from
+// scratch.
+//
+// Marketplace pivot: the old wallet-balance polling (Arc testnet native
+// balance, shown in BuyerDashboard's header) is gone on purpose — the
+// buyer never sees a wallet or a balance now (design doc Section 3: "the
+// buyer should experience this as a normal NGN marketplace payment").
+// Privy's wallet hooks stay (auth still goes through Privy), just not
+// surfaced as a balance anywhere.
 import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from "react";
 import { usePrivy, useWallets, type ConnectedWallet } from "@privy-io/react-auth";
-import { createPublicClient, http, formatUnits } from "viem";
-import { arcTestnet } from "../lib/constants";
 import { useToast } from "./ui/Toast";
-import type { AppUser, Role, SourcingRequest, SourcingRequestRow } from "../lib/types";
-
-/** Maps a raw API row onto the client's display shape. Money stays in
- * minor units end to end — components format it with lib/money's
- * formatMoney at the point of display, never before. */
-function toSourcingRequest(r: SourcingRequestRow): SourcingRequest {
-  return {
-    id: r.request_code,
-    dbId: r.id,
-    title: r.title,
-    buyer: r.buyer_email || "",
-    budgetMinor: r.budget_minor,
-    budgetCurrency: r.budget_currency,
-    location: r.location || "Not specified",
-    posted: new Date(r.created_at).toLocaleDateString(),
-    status: r.status,
-    category: r.category || "",
-    sourcer: r.sourcer_email,
-    sourcingFeeMinor: r.sourcing_fee_minor || 0,
-    platformFeeMinor: r.platform_fee_minor || 0,
-    inviteSent: Boolean(r.invite_sent_at),
-    clearedBySourcer: r.cleared_by_sourcer,
-    clearedAt: r.cleared_at,
-    flagged: r.flagged,
-    auditNotes: r.audit_notes,
-    auditImage: r.audit_image,
-    auditBusinessId: r.audit_business_id,
-    depositTxHash: r.deposit_tx_hash,
-    releaseTxHash: r.release_tx_hash,
-    releasedAt: r.released_at,
-  };
-}
+import type { AppUser, OrderRow } from "../lib/types";
 
 interface SessionContextValue {
   privyReady: boolean;
@@ -59,12 +31,14 @@ interface SessionContextValue {
    * spinner. */
   completingOnboarding: boolean;
   completeOnboarding: (username: string) => Promise<{ success: boolean; error?: string }>;
-  canBeSourcer: boolean;
-  requests: SourcingRequest[];
-  setRequests: React.Dispatch<React.SetStateAction<SourcingRequest[]>>;
-  loadingRequests: boolean;
-  refetchRequests: () => Promise<void>;
-  walletBalance: string;
+  /** Server-verified: role is 'supplier' or 'admin'. A UX hint for which
+   * nav links to show — never the actual authorization boundary, which
+   * every route re-checks via requireRole() server-side regardless. */
+  canBeSupplier: boolean;
+  orders: OrderRow[];
+  setOrders: React.Dispatch<React.SetStateAction<OrderRow[]>>;
+  loadingOrders: boolean;
+  refetchOrders: () => Promise<void>;
   web3ConnectedAddress: string | null;
   wallets: ConnectedWallet[];
   login: () => void;
@@ -94,9 +68,8 @@ export default function SessionProvider({ children }: { children: React.ReactNod
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [completingOnboarding, setCompletingOnboarding] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
-  const [requests, setRequests] = useState<SourcingRequest[]>([]);
-  const [loadingRequests, setLoadingRequests] = useState(true);
-  const [walletBalance, setWalletBalance] = useState("0.00");
+  const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [loadingOrders, setLoadingOrders] = useState(true);
 
   // Stage 4 session bootstrap: exchange a verified Privy access token for
   // our own httpOnly session cookie (POST /api/auth/session), once per
@@ -112,14 +85,6 @@ export default function SessionProvider({ children }: { children: React.ReactNod
       return;
     }
 
-    // Bug this fixes: once the initial (unauthenticated) pass already ran,
-    // checkingSession was sitting at false. When `authenticated` then flips
-    // true, this effect re-runs to do the real work below — but without
-    // this line, RootGate never knew a second, slower phase had started: it
-    // kept rendering SignInScreen's "Continue" button, clickable, for the
-    // entire multi-second POST /api/auth/session. A user (or an impatient
-    // re-click) firing login() a second time mid-flight is exactly what
-    // produced Privy's "already logged in" warning.
     setCheckingSession(true);
 
     let cancelled = false;
@@ -165,35 +130,13 @@ export default function SessionProvider({ children }: { children: React.ReactNod
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, authenticated]);
 
-  useEffect(() => {
-    if (!web3ConnectedAddress) return;
-    let active = true;
-    const publicClient = createPublicClient({ chain: arcTestnet, transport: http("https://rpc.testnet.arc.network") });
-    const fetchBalance = async () => {
-      try {
-        const rawBalance = await publicClient.getBalance({ address: web3ConnectedAddress as `0x${string}` });
-        if (active) {
-          setWalletBalance(parseFloat(formatUnits(rawBalance, 18)).toFixed(2));
-        }
-      } catch (err) {
-        console.warn("Failed to fetch balance:", err);
-      }
-    };
-    fetchBalance();
-    const interval = setInterval(fetchBalance, 15000);
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
-  }, [web3ConnectedAddress]);
-
   const handleSignOut = useCallback(async () => {
     setSigningOut(true);
     try {
       await fetch("/api/auth/session", { method: "DELETE" }).catch(() => {});
       await logout();
       setUser(null);
-      setRequests([]);
+      setOrders([]);
       setNeedsOnboarding(false);
     } finally {
       setSigningOut(false);
@@ -220,23 +163,23 @@ export default function SessionProvider({ children }: { children: React.ReactNod
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authenticated]);
 
-  const refetchRequests = useCallback(async () => {
-    setLoadingRequests(true);
+  const refetchOrders = useCallback(async () => {
+    setLoadingOrders(true);
     try {
-      const res = await fetch("/api/requests");
-      const data: { requests?: SourcingRequestRow[]; error?: string } = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to load sourcing requests.");
-      setRequests((data.requests || []).map(toSourcingRequest));
+      const res = await fetch("/api/orders");
+      const data: { orders?: OrderRow[]; error?: string } = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load orders.");
+      setOrders(data.orders || []);
     } catch (err) {
-      notify("error", err instanceof Error ? err.message : "Failed to load sourcing requests.");
+      notify("error", err instanceof Error ? err.message : "Failed to load orders.");
     } finally {
-      setLoadingRequests(false);
+      setLoadingOrders(false);
     }
   }, [notify]);
 
   useEffect(() => {
     if (!user) return;
-    refetchRequests();
+    refetchOrders();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
@@ -265,10 +208,10 @@ export default function SessionProvider({ children }: { children: React.ReactNod
     [notify]
   );
 
-  // Stage 4: whether the Sourcer dashboard is even reachable depends on the
+  // Whether the Supplier dashboard is even reachable depends on the
   // server-verified role from GET /api/auth/me (user.role), not a
   // client-side flag anyone could set from devtools.
-  const canBeSourcer = user?.role === "sourcer" || user?.role === "admin";
+  const canBeSupplier = user?.role === "supplier" || user?.role === "admin";
 
   const value = useMemo<SessionContextValue>(
     () => ({
@@ -279,12 +222,11 @@ export default function SessionProvider({ children }: { children: React.ReactNod
       needsOnboarding,
       completingOnboarding,
       completeOnboarding,
-      canBeSourcer,
-      requests,
-      setRequests,
-      loadingRequests,
-      refetchRequests,
-      walletBalance,
+      canBeSupplier,
+      orders,
+      setOrders,
+      loadingOrders,
+      refetchOrders,
       web3ConnectedAddress,
       wallets,
       login,
@@ -299,11 +241,10 @@ export default function SessionProvider({ children }: { children: React.ReactNod
       needsOnboarding,
       completingOnboarding,
       completeOnboarding,
-      canBeSourcer,
-      requests,
-      loadingRequests,
-      refetchRequests,
-      walletBalance,
+      canBeSupplier,
+      orders,
+      loadingOrders,
+      refetchOrders,
       web3ConnectedAddress,
       wallets,
       login,

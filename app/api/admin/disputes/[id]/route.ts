@@ -9,7 +9,8 @@
 import { getSupabaseServerClient } from "../../../../../lib/supabaseServer";
 import { requireRole, logAudit } from "../../../../../lib/authz";
 import { getPaymentProvider } from "../../../../../lib/paymentProvider";
-import { resolveDispute, type DisputeRuling } from "../../../../../lib/orderService";
+import { resolveDispute } from "../../../../../lib/orderService";
+import type { DisputeRuling } from "../../../../../lib/types";
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireRole(["admin"]);

@@ -1,7 +1,7 @@
 // components/ui/Badge.tsx
 import React from "react";
 import { cn } from "./cn";
-import type { RequestStatus } from "../../lib/types";
+import type { OrderStatus } from "../../lib/types";
 
 export type BadgeTone = "neutral" | "accent" | "success" | "warning" | "danger";
 
@@ -32,16 +32,29 @@ export default function Badge({ tone = "neutral", className = "", children, ...p
   );
 }
 
-// Maps the sourcing-request lifecycle used throughout the app to a tone.
-// This is the one place that mapping is defined — components import
-// STATUS_TONE rather than re-deciding per status what color means what.
-export const STATUS_TONE: Record<RequestStatus, BadgeTone> = {
-  open: "accent",
-  claimed: "accent",
-  escrow: "warning",
-  verified: "success",
+// Maps the order lifecycle (lib/orderStateMachine.ts) to a tone. This is
+// the one place that mapping is defined — components import
+// ORDER_STATUS_TONE rather than re-deciding per status what color means
+// what.
+export const ORDER_STATUS_TONE: Record<OrderStatus, BadgeTone> = {
+  pending_payment: "neutral",
+  payment_processing: "warning",
+  payment_failed: "danger",
+  converting: "warning",
+  escrow_depositing: "warning",
+  funded: "accent",
+  fulfilling: "accent",
+  proof_submitted: "accent",
+  buyer_approved: "warning",
+  release_submitted: "warning",
+  release_processing: "warning",
   escrow_released: "success",
+  settlement_processing: "warning",
+  settled: "success",
+  rejected: "danger",
   disputed: "danger",
+  refund_processing: "warning",
+  refunded: "neutral",
   cancelled: "neutral",
   expired: "neutral",
 };

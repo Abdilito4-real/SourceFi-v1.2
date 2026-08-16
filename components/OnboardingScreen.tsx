@@ -1,12 +1,18 @@
 // components/OnboardingScreen.tsx
 //
-// The "become a sourcing partner" path here submits an application, not a
-// role — see app/api/sourcer-applications/route.ts. Every account still
-// starts (and stays) buyer until an admin approves it; this screen just
-// decides whether that application gets submitted alongside the normal
-// profile setup, never a role itself.
+// The "become a verified supplier" path here submits a KYB-style
+// verification application, not a role — see
+// app/api/supplier-verification/route.ts. Every account still starts
+// (and stays) buyer until an admin approves it; this screen just decides
+// whether that application gets submitted alongside the normal profile
+// setup, never a role itself. Repurposed from the old "become a sourcing
+// partner" (field-agent) application — see docs/marketplace-payments-design.md
+// Section 0 for why that's a pivot, not a rename: this form now asks what
+// the design doc's verification requirement actually needs (is the
+// business real, where is it, what do they sell), not field-agent
+// experience.
 import React from "react";
-import { HardHat, Package, Wrench, Check } from "lucide-react";
+import { HardHat, Package, Store, Check } from "lucide-react";
 import Button from "./ui/Button";
 import Select from "./ui/Select";
 import { Label, Input, Textarea, ErrorText, HelperText } from "./ui/Field";
@@ -18,9 +24,9 @@ export interface OnboardingForm {
   companyName: string;
   professionalRole: string;
   primaryLocation: string;
-  path: "buyer" | "sourcer";
-  applicationExperience: string;
-  applicationReason: string;
+  path: "buyer" | "supplier";
+  cacRegistrationNumber: string;
+  whatTheySell: string;
 }
 
 export interface OnboardingScreenProps {
@@ -68,7 +74,7 @@ function PathCard({
 }
 
 export default function OnboardingScreen({ form, setForm, error, onSubmit, onSignOut, submitting = false }: OnboardingScreenProps) {
-  const isSourcerPath = form.path === "sourcer";
+  const isSupplierPath = form.path === "supplier";
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-bg p-5">
@@ -86,16 +92,16 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
             <PathCard
               icon={Package}
               title="I'm sourcing materials"
-              desc="Post requests, fund escrow, approve verified deliveries."
-              selected={!isSourcerPath}
+              desc="Order directly from verified suppliers, pay in Naira, approve delivery before funds release."
+              selected={!isSupplierPath}
               onSelect={() => setForm({ ...form, path: "buyer" })}
             />
             <PathCard
-              icon={Wrench}
-              title="I want to become a sourcing partner"
-              desc="Apply to visit suppliers and verify materials in person."
-              selected={isSourcerPath}
-              onSelect={() => setForm({ ...form, path: "sourcer" })}
+              icon={Store}
+              title="I want to sell as a verified supplier"
+              desc="Apply for one-time business verification, then receive and fulfill orders directly."
+              selected={isSupplierPath}
+              onSelect={() => setForm({ ...form, path: "supplier" })}
             />
           </div>
 
@@ -112,7 +118,7 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
           </div>
 
           <div>
-            <Label htmlFor="onboard-fullname">Full name / company alias</Label>
+            <Label htmlFor="onboard-fullname">Full name</Label>
             <Input
               id="onboard-fullname"
               placeholder="e.g. Alhaji Ibrahim Kano"
@@ -122,66 +128,71 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
           </div>
 
           <div>
-            <Label htmlFor="onboard-company">Company name</Label>
+            <Label htmlFor="onboard-company">{isSupplierPath ? "Business name" : "Company name"}</Label>
             <Input
               id="onboard-company"
-              placeholder="e.g. Ibrahim Sourcing & Slabs Ltd"
+              placeholder="e.g. Ibrahim Building Materials Ltd"
               value={form.companyName}
               onChange={(e) => setForm({ ...form, companyName: e.target.value })}
+              required={isSupplierPath}
             />
           </div>
 
           <div className="flex gap-3">
-            <div className="flex-[1.2]">
-              <Label htmlFor="onboard-role">Professional role</Label>
-              <Select
-                id="onboard-role"
-                value={form.professionalRole}
-                onChange={(e) => setForm({ ...form, professionalRole: e.target.value })}
-              >
-                {["Contractor", "Developer", "Specialty Supplier", "Accredited Auditor"].map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </Select>
-            </div>
+            {!isSupplierPath && (
+              <div className="flex-[1.2]">
+                <Label htmlFor="onboard-role">Professional role</Label>
+                <Select
+                  id="onboard-role"
+                  value={form.professionalRole}
+                  onChange={(e) => setForm({ ...form, professionalRole: e.target.value })}
+                >
+                  {["Contractor", "Developer", "Specialty Supplier", "Accredited Auditor"].map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            )}
             <div className="flex-1">
-              <Label htmlFor="onboard-location">{isSourcerPath ? "Base location" : "Primary location"}</Label>
+              <Label htmlFor="onboard-location">{isSupplierPath ? "Business location" : "Primary location"}</Label>
               <Input
                 id="onboard-location"
                 placeholder="e.g. Lagos"
                 value={form.primaryLocation}
                 onChange={(e) => setForm({ ...form, primaryLocation: e.target.value })}
+                required={isSupplierPath}
               />
             </div>
           </div>
 
-          {isSourcerPath && (
+          {isSupplierPath && (
             <div className="flex flex-col gap-4 rounded-xl border border-border bg-surface-sunken p-4">
-              <div className="text-xs font-semibold uppercase tracking-wide text-accent-text">Sourcing partner application</div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-accent-text">Supplier verification application</div>
               <div>
-                <Label htmlFor="onboard-experience">Relevant experience</Label>
-                <Textarea
-                  id="onboard-experience"
-                  placeholder="Sourcing, procurement, or construction-materials experience, if any."
-                  value={form.applicationExperience}
-                  onChange={(e) => setForm({ ...form, applicationExperience: e.target.value })}
+                <Label htmlFor="onboard-cac">CAC registration number (optional)</Label>
+                <Input
+                  id="onboard-cac"
+                  placeholder="e.g. RC1234567"
+                  value={form.cacRegistrationNumber}
+                  onChange={(e) => setForm({ ...form, cacRegistrationNumber: e.target.value })}
                 />
               </div>
               <div>
-                <Label htmlFor="onboard-reason">Why do you want to become a sourcing partner?</Label>
+                <Label htmlFor="onboard-sells">What do you produce or sell?</Label>
                 <Textarea
-                  id="onboard-reason"
-                  placeholder="What materials or regions you know well, and why you'd be a good fit."
-                  value={form.applicationReason}
-                  onChange={(e) => setForm({ ...form, applicationReason: e.target.value })}
+                  id="onboard-sells"
+                  placeholder="e.g. LC3 cement, compressed earth blocks — materials and typical quantities."
+                  value={form.whatTheySell}
+                  onChange={(e) => setForm({ ...form, whatTheySell: e.target.value })}
                   required
                 />
               </div>
               <p className="m-0 text-xs leading-relaxed text-text-tertiary">
-                This submits an application, not a role. An admin reviews it before anything changes on your account —
-                you'll get full buyer access right away either way.
+                An admin reviews this once — confirming your business is real, your location, and what you sell.
+                Verification is valid for 90 days or 20 orders, whichever comes first, then you re-apply the same
+                way. This submits an application, not a role — you'll have full buyer access right away either way.
               </p>
             </div>
           )}
@@ -192,9 +203,13 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
             type="submit"
             fullWidth
             loading={submitting}
-            disabled={submitting || form.username.trim().length < 3 || (isSourcerPath && !form.applicationReason.trim())}
+            disabled={
+              submitting ||
+              form.username.trim().length < 3 ||
+              (isSupplierPath && !(form.companyName.trim() && form.primaryLocation.trim() && form.whatTheySell.trim()))
+            }
           >
-            {submitting ? "Saving…" : isSourcerPath ? "Save profile & submit application" : "Save profile & enter portal"}
+            {submitting ? "Saving…" : isSupplierPath ? "Save profile & apply for verification" : "Save profile & enter portal"}
           </Button>
         </form>
 

@@ -92,8 +92,8 @@ export default function RootGate() {
     professionalRole: "Contractor",
     primaryLocation: "",
     path: "buyer",
-    applicationExperience: "",
-    applicationReason: "",
+    cacRegistrationNumber: "",
+    whatTheySell: "",
   });
   const [error, setError] = useState("");
   // null while unknown (avoids a flash of the wrong screen before the
@@ -142,8 +142,8 @@ export default function RootGate() {
       setError("Please choose a username of at least 3 characters.");
       return;
     }
-    if (form.path === "sourcer" && !form.applicationReason.trim()) {
-      setError("Tell us why you want to become a sourcing partner.");
+    if (form.path === "supplier" && !(form.companyName.trim() && form.primaryLocation.trim() && form.whatTheySell.trim())) {
+      setError("Business name, location, and what you sell are required for supplier verification.");
       return;
     }
 
@@ -157,20 +157,21 @@ export default function RootGate() {
     // independent step on top of it — a failure here shouldn't undo the
     // profile that already saved, just surface its own error and let them
     // retry from the (now buyer) dashboard rather than getting stuck here.
-    if (form.path === "sourcer") {
+    if (form.path === "supplier") {
       try {
-        const res = await fetch("/api/sourcer-applications", {
+        const res = await fetch("/api/supplier-verification", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            location: form.primaryLocation,
-            experience: form.applicationExperience,
-            reason: form.applicationReason,
+            businessName: form.companyName,
+            businessLocation: form.primaryLocation,
+            whatTheySell: form.whatTheySell,
+            cacRegistrationNumber: form.cacRegistrationNumber,
           }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed to submit your application.");
-        notify("success", "Application submitted — an admin will review it.");
+        notify("success", "Verification application submitted — an admin will review it.");
       } catch (err) {
         notify("error", err instanceof Error ? err.message : "Failed to submit your application.");
       }
