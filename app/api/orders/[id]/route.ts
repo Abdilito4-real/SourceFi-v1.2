@@ -33,7 +33,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   // Section G — admin can view but every state-changing route below still
   // checks the specific role it's meant for, never falls back to admin).
 
-  const [{ data: buyer }, { data: supplier }, { data: paymentEvents }, { data: proofs }, { data: disputes }, { data: rating }] =
+  const [{ data: buyer }, { data: supplier }, { data: paymentEvents }, { data: proofs }, { data: disputes }, { data: rating }, { data: listing }] =
     await Promise.all([
       supabase.from("users").select("email").eq("id", order.buyer_id).maybeSingle(),
       supabase.from("supplier_profiles").select("business_name, verification_status").eq("id", order.supplier_id).maybeSingle(),
@@ -41,6 +41,12 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       supabase.from("delivery_proofs").select("*").eq("order_id", orderId).order("submitted_at", { ascending: false }),
       supabase.from("disputes").select("*").eq("order_id", orderId).order("created_at", { ascending: false }),
       supabase.from("ratings").select("*").eq("order_id", orderId).maybeSingle(),
+      // Only for the "total = unit price x quantity" breakdown shown on
+      // the order detail screen — orders created without picking a
+      // listing (freeform amount) just won't have one to join.
+      order.supplier_listing_id
+        ? supabase.from("supplier_listings").select("price_minor, unit").eq("id", order.supplier_listing_id).maybeSingle()
+        : Promise.resolve({ data: null }),
     ]);
 
   return Response.json({
@@ -49,6 +55,8 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       buyer_email: buyer?.email ?? null,
       supplier_business_name: supplier?.business_name ?? null,
       supplier_verification_status: supplier?.verification_status ?? null,
+      listing_unit_price_minor: listing?.price_minor ?? null,
+      listing_unit: listing?.unit ?? null,
     },
     paymentEvents: paymentEvents || [],
     deliveryProofs: proofs || [],

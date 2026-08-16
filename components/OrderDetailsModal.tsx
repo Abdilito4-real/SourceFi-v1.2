@@ -157,6 +157,8 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const activeDispute = disputes.find((d) => d.status === "open" || d.status === "under_review");
   const isBuyer = role === "buyer" && canTransact;
   const isSupplier = role === "supplier" && canTransact;
+  const listingUnitPriceMinor = order.listing_unit_price_minor ?? null;
+  const listingUnit = order.listing_unit ?? null;
 
   return (
     <Modal open onClose={onClose} size="lg" className="max-h-[90vh] overflow-y-auto">
@@ -170,8 +172,14 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
 
       <div className="mt-4 grid grid-cols-2 gap-4 rounded-lg border border-border bg-surface-sunken p-4 text-sm sm:grid-cols-4">
         <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Amount</div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Total amount</div>
           <div className="mt-0.5 font-semibold text-text-primary">{formatMoney(order.amount_minor, "NGN")}</div>
+          {listingUnitPriceMinor != null && (
+            <div className="mt-0.5 text-xs text-text-tertiary">
+              {formatMoney(listingUnitPriceMinor, "NGN")}
+              {listingUnit ? ` ${listingUnit}` : ""} × {order.quantity?.match(/^\d+(\.\d+)?/)?.[0] || "?"}
+            </div>
+          )}
         </div>
         <div>
           <div className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Supplier</div>

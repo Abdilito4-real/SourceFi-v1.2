@@ -295,6 +295,12 @@ export interface OrderRow {
   created_at: string;
   buyer_email?: string | null;
   supplier_business_name?: string | null;
+  /** Joined in from supplier_listings when supplier_listing_id is set —
+   * lets the order detail view show the "unit price x quantity = total"
+   * breakdown instead of just the total in isolation. Null for a
+   * freeform order (no listing picked). */
+  listing_unit_price_minor?: number | null;
+  listing_unit?: string | null;
 }
 
 export type PaymentLeg = "funding" | "release" | "settlement" | "refund";
