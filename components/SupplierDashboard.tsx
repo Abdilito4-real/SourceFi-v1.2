@@ -280,10 +280,10 @@ export default function SupplierDashboard() {
     );
   }
 
-  const switchLinks: SwitchLink[] = [
-    { label: "Switch to buyer dashboard", href: "/buyer" },
-    ...(user.role === "admin" ? [{ label: "Admin dashboard", href: "/admin" }] : []),
-  ];
+  // No "Switch to buyer dashboard" link — a supplier account has no
+  // buyer access (see BuyerDashboard's own redirect guard). Admin still
+  // gets both links: oversight of every dashboard, not "being" any role.
+  const switchLinks: SwitchLink[] = [...(user.role === "admin" ? [{ label: "Buyer dashboard", href: "/buyer" }, { label: "Admin dashboard", href: "/admin" }] : [])];
 
   return (
     <DashboardShell

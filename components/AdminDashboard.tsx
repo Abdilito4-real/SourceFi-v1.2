@@ -86,7 +86,10 @@ export default function AdminDashboard() {
       return;
     }
     if (!isAdmin) {
-      router.replace("/buyer");
+      // Same class of bug fixed in RootGate/BuyerDashboard: a supplier
+      // hitting /admin directly must land on /supplier, not /buyer — a
+      // supplier account has no buyer access at all.
+      router.replace(user.role === "supplier" ? "/supplier" : "/buyer");
     }
   }, [checkingSession, user, isAdmin, router]);
 

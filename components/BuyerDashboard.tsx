@@ -185,7 +185,19 @@ export default function BuyerDashboard() {
 
   useEffect(() => {
     if (checkingSession) return;
-    if (!user) router.replace("/");
+    if (!user) {
+      router.replace("/");
+      return;
+    }
+    // A supplier account has no buyer access — RootGate is the real gate
+    // (fixed to redirect a supplier to /supplier, not /buyer, on sign-in)
+    // and SupplierDashboard no longer offers a "Switch to buyer
+    // dashboard" link at all; this is the defensive second layer for
+    // direct navigation (bookmark, back button, a stale tab). Admin
+    // keeps view access here on purpose — oversight, not "being a buyer".
+    if (user.role === "supplier") {
+      router.replace("/supplier");
+    }
   }, [checkingSession, user, router]);
 
   // RootGate is the real gate for this (a first-time supplier applicant
@@ -323,7 +335,7 @@ export default function BuyerDashboard() {
     ...(user?.role === "admin" ? [{ label: "Admin dashboard", href: "/admin" }] : []),
   ];
 
-  if (checkingSession || !user) {
+  if (checkingSession || !user || user.role === "supplier") {
     return (
       <div className="flex min-h-screen items-center justify-center bg-bg">
         <Loader2 size={22} className="spin-icon text-accent" aria-label="Loading" />

@@ -177,7 +177,13 @@ export default function RootGate() {
     if (!readyForDashboard) return;
     if (!pendingApplicationChecked) return; // wait for the pending-application check first
     if (pendingApplication) return; // blocked — PendingVerificationScreen renders instead of redirecting
-    router.replace(user?.role === "admin" ? "/admin" : "/buyer");
+    // Was `role === "admin" ? "/admin" : "/buyer"` — which silently sent
+    // EVERY non-admin role, including 'supplier', to /buyer. A supplier
+    // has no buyer access anymore (see BuyerDashboard's own guard below,
+    // and SupplierDashboard's switchLinks no longer offering the link at
+    // all) — this was the actual root cause, not just a stray nav link.
+    const destination = user?.role === "admin" ? "/admin" : user?.role === "supplier" ? "/supplier" : "/buyer";
+    router.replace(destination);
   }, [readyForDashboard, pendingApplicationChecked, pendingApplication, user, router]);
 
   if (checkingSession || introSeen === null) {
