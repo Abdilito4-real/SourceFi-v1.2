@@ -14,7 +14,7 @@
 // components/ui/StatusBadge.tsx's same rule. The buyer sees "processing
 // your payment", not the underlying rails (design doc Section 3).
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, XCircle, Loader2, Clock, Star, AlertTriangle, Image as ImageIcon, Receipt } from "lucide-react";
+import { CheckCircle2, XCircle, Loader2, Clock, Star, AlertTriangle, Image as ImageIcon, Receipt, Video } from "lucide-react";
 import Modal from "./ui/Modal";
 import Button from "./ui/Button";
 import Badge from "./ui/Badge";
@@ -22,8 +22,17 @@ import StatusBadge from "./ui/StatusBadge";
 import { Label, Input, Textarea } from "./ui/Field";
 import Select from "./ui/Select";
 import Skeleton from "./ui/Skeleton";
+import JitsiMeetRoom from "./JitsiMeetRoom";
 import { formatMoney } from "../lib/money";
 import type { DeliveryProofRow, DisputeCategory, DisputeRow, OrderRow, PaymentEventRow, RatingRow, Role } from "../lib/types";
+
+// Post-funding, pre-approval — the window where a live call between
+// buyer and supplier actually makes sense: funds are already in escrow
+// so there's something real to verify, and approval (which fires the
+// release) hasn't happened yet. Not offered before `funded` (nothing to
+// inspect yet) or after approval (the call's whole purpose — verifying
+// before releasing — has already passed).
+const LIVE_CALL_ELIGIBLE_STATUSES = new Set(["funded", "fulfilling", "proof_submitted"]);
 
 const DISPUTE_CATEGORIES: { value: DisputeCategory; label: string }[] = [
   { value: "item_not_as_described", label: "Item not as described" },
@@ -70,6 +79,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const [acting, setActing] = useState(false);
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [showApproveConfirm, setShowApproveConfirm] = useState(false);
+  const [showCall, setShowCall] = useState(false);
   const [rejectCategory, setRejectCategory] = useState<DisputeCategory>("item_not_as_described");
   const [rejectDescription, setRejectDescription] = useState("");
   const [proofPhotoUrl, setProofPhotoUrl] = useState("");
@@ -372,6 +382,33 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
         </div>
       )}
 
+      {/* Live verification call — both buyer and supplier can join the
+          same room to walk through the delivery together in real time
+          before the buyer decides whether to approve. Not embedded by
+          default (costs bandwidth/load time — metered mobile data is a
+          real constraint here), only once someone actually asks for it. */}
+      {(isBuyer || isSupplier) && LIVE_CALL_ELIGIBLE_STATUSES.has(order.status) && (
+        <div className="mt-5">
+          {!showCall ? (
+            <Button variant="secondary" onClick={() => setShowCall(true)}>
+              <Video size={15} /> Start live verification call
+            </Button>
+          ) : (
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
+                  Live call — share this order with your {isBuyer ? "supplier" : "buyer"} to meet here
+                </span>
+                <button type="button" onClick={() => setShowCall(false)} className="text-xs font-semibold text-text-secondary underline hover:text-text-primary">
+                  Hide
+                </button>
+              </div>
+              <JitsiMeetRoom orderCode={order.order_code} />
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Buyer: approve or reject. Approve is deliberately two steps —
           releasing funds is irreversible once the transfer confirms, so
           a single click isn't enough; this makes the buyer explicitly
@@ -390,6 +427,18 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
                 <strong>{order.supplier_business_name || "this supplier"}</strong>. This can't be undone once the transfer
                 confirms — only continue if you've reviewed the delivery proof above and you're satisfied.
               </p>
+              {!showCall && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowApproveConfirm(false);
+                    setShowCall(true);
+                  }}
+                  className="text-left text-xs font-semibold text-accent-text underline"
+                >
+                  Haven't verified live with your supplier yet? Start a call first.
+                </button>
+              )}
               <div className="flex gap-2">
                 <Button
                   variant="danger"
