@@ -9,7 +9,7 @@
 import { getSupabaseServerClient } from "../../../../../lib/supabaseServer";
 import { requireRole } from "../../../../../lib/authz";
 import { getPaymentProvider } from "../../../../../lib/paymentProvider";
-import { approveOrder, NotOrderOwnerError, OrderNotFoundError } from "../../../../../lib/orderService";
+import { approveOrder, NotOrderOwnerError, OrderNotFoundError, VerificationCallIncompleteError } from "../../../../../lib/orderService";
 import { InvalidOrderTransitionError } from "../../../../../lib/orderStateMachine";
 
 export async function POST(_request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -29,6 +29,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     if (err instanceof OrderNotFoundError) return Response.json({ error: err.message }, { status: 404 });
     if (err instanceof NotOrderOwnerError) return Response.json({ error: err.message }, { status: 403 });
     if (err instanceof InvalidOrderTransitionError) return Response.json({ error: err.message }, { status: 409 });
+    if (err instanceof VerificationCallIncompleteError) return Response.json({ error: err.message }, { status: 409 });
     return Response.json({ error: err instanceof Error ? err.message : "Failed to approve order." }, { status: 500 });
   }
 }

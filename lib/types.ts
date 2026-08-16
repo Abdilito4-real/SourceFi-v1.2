@@ -292,6 +292,12 @@ export interface OrderRow {
   currency: "NGN";
   platform_fee_minor: number;
   supplier_verified_at_order_time: string | null;
+  /** Cumulative real seconds spent in a live verification call (join-to-
+   * leave, from Jitsi's own lifecycle events — not just "the panel was
+   * open"). Approval is blocked, server-side, until this reaches
+   * MIN_VERIFICATION_CALL_SECONDS (lib/orderService.ts) — see migration
+   * 0007. */
+  verification_call_seconds: number;
   created_at: string;
   buyer_email?: string | null;
   supplier_business_name?: string | null;

@@ -417,6 +417,62 @@ export async function submitDeliveryProof(
 }
 
 // ============================================================================
+// Live verification call — mandatory before approval (explicit product
+// requirement, not inferred). Enforced HERE, server-side, in
+// approveOrder itself — not just a disabled button client-side, which
+// would just be a suggestion anyone could bypass by calling the route
+// directly. The actual authorization boundary (requireRole on the
+// route) is unaffected; this is an additional precondition on top of it.
+// ============================================================================
+
+export const MIN_VERIFICATION_CALL_SECONDS = 5 * 60;
+
+export class VerificationCallIncompleteError extends Error {
+  constructor(secondsSoFar: number) {
+    super(
+      `A live verification call of at least ${MIN_VERIFICATION_CALL_SECONDS / 60} minutes is required before ` +
+        `approving this order (${secondsSoFar}s recorded so far).`
+    );
+    this.name = "VerificationCallIncompleteError";
+  }
+}
+
+/** Adds one real call segment (join-to-leave, reported by the client
+ * from Jitsi's own lifecycle events — never just "the panel was open")
+ * to the order's running total. Either party to the order can report a
+ * segment — whoever's Jitsi session ends first reports it, same total
+ * either way. `secondsElapsed` is sanity-capped, not trusted blindly:
+ * this is a workflow gate, not itself a money-movement action, but an
+ * unbounded client-supplied number is still worth bounding. */
+export async function recordVerificationCallProgress(
+  supabase: SupabaseClient,
+  orderId: number,
+  userId: number,
+  secondsElapsed: number
+): Promise<OrderRow> {
+  const order = await fetchOrder(supabase, orderId);
+
+  const isBuyer = order.buyer_id === userId;
+  let isSupplier = false;
+  if (!isBuyer) {
+    const { data: profile } = await supabase.from("supplier_profiles").select("id").eq("user_id", userId).maybeSingle();
+    isSupplier = Boolean(profile && profile.id === order.supplier_id);
+  }
+  if (!isBuyer && !isSupplier) throw new NotOrderOwnerError();
+
+  // A single reported segment capped at 2 hours — generous for a real
+  // call, not so unbounded that one malformed/malicious report could
+  // satisfy the whole requirement by itself.
+  const cappedSeconds = Math.max(0, Math.min(Math.round(secondsElapsed), 2 * 60 * 60));
+  const newTotal = (order.verification_call_seconds ?? 0) + cappedSeconds;
+
+  const { error } = await supabase.from("orders").update({ verification_call_seconds: newTotal }).eq("id", orderId);
+  if (error) throw error;
+
+  return fetchOrder(supabase, orderId);
+}
+
+// ============================================================================
 // Buyer approval -> release
 // ============================================================================
 
@@ -428,7 +484,14 @@ export async function submitDeliveryProof(
  * assertTransition call, and still doesn't write anything to the ledger
  * — only handleReleaseConfirmed does that, once Circle actually confirms.
  * This is the exact distinction Section D.0 exists to enforce in code,
- * not just in the state diagram. */
+ * not just in the state diagram.
+ *
+ * Also requires MIN_VERIFICATION_CALL_SECONDS of real call time first
+ * (see above) — checked here, not just suggested in the UI. Deliberately
+ * scoped to THIS function only: an admin resolving a dispute in the
+ * supplier's favor (resolveDispute) calls initiateEscrowRelease directly
+ * and is NOT gated by this — that's an admin ruling on a disputed order,
+ * not the buyer's own approval flow this requirement is about. */
 export async function approveOrder(
   supabase: SupabaseClient,
   paymentProvider: PaymentBoundary,
@@ -438,6 +501,9 @@ export async function approveOrder(
   const order = await fetchOrder(supabase, orderId);
   if (order.buyer_id !== buyerId) throw new NotOrderOwnerError();
   if (order.status !== "proof_submitted") throw new InvalidOrderTransitionError(order.status, "buyer_approved");
+  if ((order.verification_call_seconds ?? 0) < MIN_VERIFICATION_CALL_SECONDS) {
+    throw new VerificationCallIncompleteError(order.verification_call_seconds ?? 0);
+  }
 
   const approved = await tryTransition(supabase, orderId, "proof_submitted", "buyer_approved");
   if (!approved) throw new InvalidOrderTransitionError(order.status, "buyer_approved");

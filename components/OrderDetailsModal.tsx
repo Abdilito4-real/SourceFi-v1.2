@@ -34,6 +34,15 @@ import type { DeliveryProofRow, DisputeCategory, DisputeRow, OrderRow, PaymentEv
 // before releasing — has already passed).
 const LIVE_CALL_ELIGIBLE_STATUSES = new Set(["funded", "fulfilling", "proof_submitted"]);
 
+// Mirrors lib/orderService.ts's MIN_VERIFICATION_CALL_SECONDS — that
+// server-side value is the actual enforcement (approveOrder rejects
+// early otherwise); this client-side copy is only for showing progress
+// and disabling the button before wasting a round trip. Kept in sync by
+// hand, same posture as the live-verification-check duplication between
+// app/api/suppliers/route.ts and the is_supplier_currently_verified()
+// Postgres function — no codegen linking them.
+const MIN_VERIFICATION_CALL_SECONDS = 5 * 60;
+
 const DISPUTE_CATEGORIES: { value: DisputeCategory; label: string }[] = [
   { value: "item_not_as_described", label: "Item not as described" },
   { value: "item_not_delivered", label: "Item not delivered" },
@@ -159,6 +168,26 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const inFlightElapsedSeconds = inFlightSince !== null ? Math.floor((nowTick - inFlightSince) / 1000) : 0;
   const isTakingLong = inFlightElapsedSeconds >= 20;
 
+  // Deliberately separate from runAction: reporting a completed call
+  // segment shouldn't toggle the shared `acting` state (which disables
+  // unrelated buttons) or show a toast every time — it happens silently
+  // in the background as segments end, sometimes more than once per
+  // session if the call drops and reconnects.
+  const reportCallSegment = async (seconds: number) => {
+    try {
+      const res = await fetch(`/api/orders/${orderId}/call-progress`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secondsElapsed: seconds }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to record call progress.");
+      await load();
+    } catch (err) {
+      showNotification("error", err instanceof Error ? err.message : "Failed to record call progress.");
+    }
+  };
+
   const runAction = async (path: string, body?: unknown, successMessage?: string) => {
     setActing(true);
     try {
@@ -199,6 +228,8 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const isSupplier = role === "supplier" && canTransact;
   const listingUnitPriceMinor = order.listing_unit_price_minor ?? null;
   const listingUnit = order.listing_unit ?? null;
+  const verificationCallSeconds = order.verification_call_seconds ?? 0;
+  const callRequirementMet = verificationCallSeconds >= MIN_VERIFICATION_CALL_SECONDS;
 
   return (
     <Modal open onClose={onClose} size="lg" className="max-h-[90vh] overflow-y-auto">
@@ -389,11 +420,19 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
           real constraint here), only once someone actually asks for it. */}
       {(isBuyer || isSupplier) && LIVE_CALL_ELIGIBLE_STATUSES.has(order.status) && (
         <div className="mt-5">
-          {!showCall ? (
-            <Button variant="secondary" onClick={() => setShowCall(true)}>
-              <Video size={15} /> Start live verification call
-            </Button>
-          ) : (
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            {!showCall && (
+              <Button variant="secondary" onClick={() => setShowCall(true)}>
+                <Video size={15} /> {verificationCallSeconds > 0 ? "Continue" : "Start"} live verification call
+              </Button>
+            )}
+            <span className={`text-xs font-semibold ${callRequirementMet ? "text-success-text" : "text-text-secondary"}`}>
+              {callRequirementMet
+                ? `✓ ${Math.floor(verificationCallSeconds / 60)}:${(verificationCallSeconds % 60).toString().padStart(2, "0")} verified — requirement met`
+                : `${Math.floor(verificationCallSeconds / 60)}:${(verificationCallSeconds % 60).toString().padStart(2, "0")} / 5:00 verified`}
+            </span>
+          </div>
+          {showCall && (
             <div>
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
@@ -403,7 +442,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
                   Hide
                 </button>
               </div>
-              <JitsiMeetRoom orderCode={order.order_code} />
+              <JitsiMeetRoom orderCode={order.order_code} onSegmentComplete={reportCallSegment} />
             </div>
           )}
         </div>
@@ -419,6 +458,18 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
           route itself, same as every other action here.) */}
       {isBuyer && order.status === "proof_submitted" && (
         <div className="mt-5">
+          {!callRequirementMet && !showApproveConfirm && (
+            <div className="mb-3 flex items-start gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2.5 text-xs text-warning-text">
+              <Video size={14} className="mt-0.5 shrink-0" />
+              <span>
+                A live verification call of at least 5 minutes with your supplier is required before you can approve —{" "}
+                <strong>
+                  {Math.floor(verificationCallSeconds / 60)}:{(verificationCallSeconds % 60).toString().padStart(2, "0")} / 5:00
+                </strong>{" "}
+                so far. Rejecting doesn't require a call.
+              </span>
+            </div>
+          )}
           {showApproveConfirm ? (
             <div className="flex flex-col gap-3 rounded-xl border border-accent bg-accent-soft p-4">
               <div className="text-xs font-semibold uppercase tracking-wide text-accent-text">Confirm release</div>
@@ -427,18 +478,6 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
                 <strong>{order.supplier_business_name || "this supplier"}</strong>. This can't be undone once the transfer
                 confirms — only continue if you've reviewed the delivery proof above and you're satisfied.
               </p>
-              {!showCall && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowApproveConfirm(false);
-                    setShowCall(true);
-                  }}
-                  className="text-left text-xs font-semibold text-accent-text underline"
-                >
-                  Haven't verified live with your supplier yet? Start a call first.
-                </button>
-              )}
               <div className="flex gap-2">
                 <Button
                   variant="danger"
@@ -454,9 +493,11 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
             </div>
           ) : !showRejectForm ? (
             <div className="flex flex-col gap-2 sm:flex-row">
-              <Button fullWidth onClick={() => setShowApproveConfirm(true)}>
-                <CheckCircle2 size={15} /> Approve delivery
-              </Button>
+              <span title={callRequirementMet ? undefined : "Complete the 5-minute verification call above first."}>
+                <Button fullWidth disabled={!callRequirementMet} onClick={() => setShowApproveConfirm(true)}>
+                  <CheckCircle2 size={15} /> Approve delivery
+                </Button>
+              </span>
               <Button fullWidth variant="secondary" disabled={acting} onClick={() => setShowRejectForm(true)}>
                 <XCircle size={15} /> Reject delivery
               </Button>

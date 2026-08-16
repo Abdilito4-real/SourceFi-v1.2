@@ -17,8 +17,11 @@ import {
   rejectProof,
   resolveDispute,
   submitRating,
+  recordVerificationCallProgress,
+  MIN_VERIFICATION_CALL_SECONDS,
   SupplierNotCurrentlyVerifiedError,
   NotOrderOwnerError,
+  VerificationCallIncompleteError,
 } from "../lib/orderService";
 import { InvalidOrderTransitionError } from "../lib/orderStateMachine";
 import { StubPaymentProvider, type PaymentStatusEvent } from "../lib/paymentBoundary";
@@ -157,6 +160,11 @@ describe("the full happy-path lifecycle: create -> fund -> proof -> approve -> s
       notes: "Delivered to site.",
     });
     expect(proofSubmitted.status).toBe("proof_submitted");
+
+    // Mandatory live verification call — approveOrder rejects below the
+    // threshold (a separate test covers that directly); satisfy it here
+    // so the rest of the happy path can proceed.
+    await recordVerificationCallProgress(supabase, created.id, 1, MIN_VERIFICATION_CALL_SECONDS);
 
     confirmed = waitForConfirmation();
     const approved = await approveOrder(supabase, provider, created.id, 1);
@@ -325,5 +333,116 @@ describe("InvalidOrderTransitionError surfaces from orderService, not just order
     const { provider } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1000 });
     await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(InvalidOrderTransitionError);
+  });
+});
+
+describe("mandatory live verification call before approval", () => {
+  async function orderAtProofSubmitted(fake: FakeSupabase) {
+    const supabase = asSupabaseClient(fake);
+    const { provider, waitForConfirmation } = synchronousProvider(supabase);
+    // A realistic amount, not the trivial 1000 (NGN 10) other tests in
+    // this file use — several tests below call approveOrder/resolveDispute,
+    // which (since the StubPaymentProvider fix) now chains a REAL
+    // settlement confirmation afterward. That surfaced a genuine, separate
+    // bug: ORDER_PLATFORM_FEE_MINOR is a flat NGN 2,000 fee regardless of
+    // order size, so an order smaller than that produces a NEGATIVE
+    // computed supplier/fee USDC split in lib/orderService.ts's
+    // computeUsdcSplit — which lib/ledger.ts correctly refuses to write
+    // (a negative-amount leg gets filtered, leaving nothing left to write,
+    // which assertBalanced correctly rejects) rather than record something
+    // nonsensical. That's the ledger safety net doing its job, not a bug
+    // in the ledger — the real bug is a flat fee with no relationship to
+    // order size, which needs a real product decision (cap the fee at
+    // some % of order value? enforce a minimum order size?), not a silent
+    // fix here. Using a realistic amount sidesteps it for this test file;
+    // the underlying issue is flagged, not fixed, pending that decision.
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
+    const confirmed = waitForConfirmation();
+    await fundOrder(supabase, provider, order.id, 1);
+    await confirmed;
+    await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
+    return order;
+  }
+
+  it("rejects approval with zero recorded call time", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider } = synchronousProvider(supabase);
+    const order = await orderAtProofSubmitted(fake);
+    await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(VerificationCallIncompleteError);
+  });
+
+  it("rejects approval below the 5-minute threshold, even by one second", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider } = synchronousProvider(supabase);
+    const order = await orderAtProofSubmitted(fake);
+    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS - 1);
+    await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(VerificationCallIncompleteError);
+  });
+
+  it("allows approval once the threshold is met", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider } = synchronousProvider(supabase);
+    const order = await orderAtProofSubmitted(fake);
+    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    const approved = await approveOrder(supabase, provider, order.id, 1);
+    expect(approved.status).toBe("release_submitted");
+  });
+
+  it("accumulates across multiple reported segments (call dropped and rejoined)", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider } = synchronousProvider(supabase);
+    const order = await orderAtProofSubmitted(fake);
+    await recordVerificationCallProgress(supabase, order.id, 1, 120);
+    await recordVerificationCallProgress(supabase, order.id, 1, 90);
+    let current = await recordVerificationCallProgress(supabase, order.id, 1, 89);
+    expect(current.verification_call_seconds).toBe(299);
+    await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(VerificationCallIncompleteError);
+
+    current = await recordVerificationCallProgress(supabase, order.id, 1, 1);
+    expect(current.verification_call_seconds).toBe(300);
+    const approved = await approveOrder(supabase, provider, order.id, 1);
+    expect(approved.status).toBe("release_submitted");
+  });
+
+  it("either the buyer or the assigned supplier can report a segment — nobody else can", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+
+    // The assigned supplier (user_id 2) reports it, not the buyer.
+    const afterSupplierReport = await recordVerificationCallProgress(supabase, order.id, 2, MIN_VERIFICATION_CALL_SECONDS);
+    expect(afterSupplierReport.verification_call_seconds).toBe(MIN_VERIFICATION_CALL_SECONDS);
+
+    // An unrelated user (admin, id 3, not a party to this order) cannot.
+    await expect(recordVerificationCallProgress(supabase, order.id, 3, 60)).rejects.toThrow(NotOrderOwnerError);
+  });
+
+  it("caps a single reported segment at 2 hours, rather than trusting an unbounded client-supplied number", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+    const result = await recordVerificationCallProgress(supabase, order.id, 1, 999_999);
+    expect(result.verification_call_seconds).toBe(2 * 60 * 60);
+  });
+
+  it("a dispute resolved for the supplier bypasses this requirement entirely — it's an admin ruling, not the buyer's own approval", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider } = synchronousProvider(supabase);
+    const order = await orderAtProofSubmitted(fake);
+
+    const rejected = await rejectProof(supabase, order.id, 1, { category: "other", description: "changed my mind" });
+    expect(rejected.status).toBe("disputed");
+    const dispute = fake.getRows("disputes").find((d) => d.order_id === order.id)!;
+
+    // No call time recorded at all — the admin ruling still proceeds,
+    // because resolveDispute's supplier-ruling path calls
+    // initiateEscrowRelease directly, not through approveOrder.
+    const result = await resolveDispute(supabase, provider, dispute.id as number, 3, "supplier", "Proof was valid.");
+    expect(result.autoActionTaken).toBe("release_initiated");
   });
 });
