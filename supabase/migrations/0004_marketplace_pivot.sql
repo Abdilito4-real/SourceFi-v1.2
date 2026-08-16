@@ -28,16 +28,24 @@
 
 -- ============================================================================
 -- 1. Role: sourcer -> supplier
+--
+-- Order matters here and previously didn't: the UPDATE has to run AFTER
+-- the old constraint (role in ('buyer','sourcer','admin')) is dropped,
+-- not before — 'supplier' isn't a legal value under the old constraint,
+-- so updating rows to it while that constraint is still in force trips
+-- users_role_check on the very first row touched. Caught via a real
+-- failed run against a live Supabase project, not just review.
 -- ============================================================================
-update users set role = 'supplier' where role = 'sourcer';
-
 do $$
 begin
   if exists (select 1 from pg_constraint where conname = 'users_role_check') then
     alter table users drop constraint users_role_check;
   end if;
-  alter table users add constraint users_role_check check (role in ('buyer', 'supplier', 'admin'));
 end $$;
+
+update users set role = 'supplier' where role = 'sourcer';
+
+alter table users add constraint users_role_check check (role in ('buyer', 'supplier', 'admin'));
 
 -- ============================================================================
 -- 2. Rename the old, passive per-transaction tables out of the way.
@@ -356,22 +364,45 @@ create constraint trigger trg_ledger_balance_check
 --    and repoints from sourcing_request_id to order_id.
 -- ============================================================================
 do $$
+declare
+  fk record;
 begin
   if exists (select 1 from information_schema.tables where table_name = 'disputes') then
-    -- Drop the old FK to the now-renamed sourcing_requests table before
-    -- adding the new one to orders.
-    if exists (
-      select 1 from information_schema.table_constraints
-      where table_name = 'disputes' and constraint_type = 'FOREIGN KEY'
-        and constraint_name = 'disputes_sourcing_request_id_fkey'
-    ) then
-      alter table disputes drop constraint disputes_sourcing_request_id_fkey;
-    end if;
+    -- Drop ANY foreign key on disputes that points at sourcing_requests
+    -- (under either its original name or its renamed deprecated_ form) —
+    -- found dynamically via pg_constraint rather than guessed by name.
+    -- The exact auto-generated constraint name depends on which
+    -- migration lineage originally created this column
+    -- (0000_fresh_project_full_schema.sql vs. 0001_stage4_auth.sql +
+    -- 0002_stage5_data_layer.sql), and guessing wrong here silently
+    -- leaves a stale FK pointing at the renamed deprecated table instead
+    -- of the new orders table — caught via a real failed run, not just
+    -- review, same as the role-constraint ordering bug above.
+    for fk in
+      select con.conname
+      from pg_constraint con
+      join pg_class rel on rel.oid = con.conrelid
+      join pg_class frel on frel.oid = con.confrelid
+      where rel.relname = 'disputes'
+        and con.contype = 'f'
+        and frel.relname in ('sourcing_requests', 'deprecated_sourcing_requests')
+    loop
+      execute format('alter table disputes drop constraint %I', fk.conname);
+    end loop;
 
     if exists (select 1 from information_schema.columns where table_name = 'disputes' and column_name = 'sourcing_request_id') then
       alter table disputes rename column sourcing_request_id to order_id;
     end if;
-    alter table disputes add constraint disputes_order_id_fkey foreign key (order_id) references orders(id);
+
+    -- Guarded so a second run of this migration doesn't fail on "constraint
+    -- already exists" — the file's own header promises "safe to re-run".
+    if not exists (
+      select 1 from pg_constraint con
+      join pg_class rel on rel.oid = con.conrelid
+      where rel.relname = 'disputes' and con.conname = 'disputes_order_id_fkey'
+    ) then
+      alter table disputes add constraint disputes_order_id_fkey foreign key (order_id) references orders(id);
+    end if;
 
     if not exists (select 1 from information_schema.columns where table_name = 'disputes' and column_name = 'dispute_type') then
       alter table disputes add column dispute_type text
