@@ -94,6 +94,7 @@ export default function RootGate() {
     path: "buyer",
     cacRegistrationNumber: "",
     whatTheySell: "",
+    supportingDocumentUrl: "",
   });
   const [error, setError] = useState("");
   // null while unknown (avoids a flash of the wrong screen before the
@@ -167,6 +168,7 @@ export default function RootGate() {
             businessLocation: form.primaryLocation,
             whatTheySell: form.whatTheySell,
             cacRegistrationNumber: form.cacRegistrationNumber,
+            supportingDocumentUrl: form.supportingDocumentUrl,
           }),
         });
         const data = await res.json();

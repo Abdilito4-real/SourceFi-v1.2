@@ -27,6 +27,7 @@ export interface OnboardingForm {
   path: "buyer" | "supplier";
   cacRegistrationNumber: string;
   whatTheySell: string;
+  supportingDocumentUrl: string;
 }
 
 export interface OnboardingScreenProps {
@@ -178,6 +179,16 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
                   value={form.cacRegistrationNumber}
                   onChange={(e) => setForm({ ...form, cacRegistrationNumber: e.target.value })}
                 />
+              </div>
+              <div>
+                <Label htmlFor="onboard-doc">Supporting document (optional)</Label>
+                <Input
+                  id="onboard-doc"
+                  placeholder="Link to your CAC certificate, utility bill, etc."
+                  value={form.supportingDocumentUrl}
+                  onChange={(e) => setForm({ ...form, supportingDocumentUrl: e.target.value })}
+                />
+                <HelperText>A link (Google Drive, Dropbox, etc.) — no file upload yet, so paste a shareable URL.</HelperText>
               </div>
               <div>
                 <Label htmlFor="onboard-sells">What do you produce or sell?</Label>

@@ -34,6 +34,7 @@ function VerificationApplicationForm({ onSubmitted }: { onSubmitted: () => void 
   const [businessLocation, setBusinessLocation] = useState("");
   const [whatTheySell, setWhatTheySell] = useState("");
   const [cacRegistrationNumber, setCacRegistrationNumber] = useState("");
+  const [supportingDocumentUrl, setSupportingDocumentUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const valid = businessName.trim() && businessLocation.trim() && whatTheySell.trim();
@@ -46,7 +47,7 @@ function VerificationApplicationForm({ onSubmitted }: { onSubmitted: () => void 
       const res = await fetch("/api/supplier-verification", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ businessName, businessLocation, whatTheySell, cacRegistrationNumber }),
+        body: JSON.stringify({ businessName, businessLocation, whatTheySell, cacRegistrationNumber, supportingDocumentUrl }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to submit application.");
@@ -72,6 +73,15 @@ function VerificationApplicationForm({ onSubmitted }: { onSubmitted: () => void 
       <div>
         <Label htmlFor="verif-location">Business location</Label>
         <Input id="verif-location" value={businessLocation} onChange={(e) => setBusinessLocation(e.target.value)} required />
+      </div>
+      <div>
+        <Label htmlFor="verif-doc">Supporting document (optional)</Label>
+        <Input
+          id="verif-doc"
+          placeholder="Link to your CAC certificate, utility bill, etc."
+          value={supportingDocumentUrl}
+          onChange={(e) => setSupportingDocumentUrl(e.target.value)}
+        />
       </div>
       <div>
         <Label htmlFor="verif-sells">What do you produce or sell?</Label>
@@ -296,7 +306,8 @@ export default function SupplierDashboard() {
                 <div>
                   {latestApplication?.status === "pending" ? (
                     <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-sunken px-4 py-3 text-sm text-text-secondary">
-                      <Clock size={15} /> Your verification application is pending admin review.
+                      <Clock size={15} className="shrink-0" /> Your re-verification is under review — most reviews complete
+                      within a couple of minutes, but it can take up to 48 hours.
                     </div>
                   ) : (
                     <>
