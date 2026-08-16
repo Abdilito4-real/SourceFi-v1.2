@@ -32,12 +32,13 @@ describe("StubPaymentProvider — initiateOrderFunding", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     expect(events).toHaveLength(1);
-    expect(events[0].orderId).toBe(7);
-    expect(events[0].leg).toBe("funding");
-    expect(events[0].provider).toBe("yellow_card");
+    const event = events[0]!; // length just asserted above
+    expect(event.orderId).toBe(7);
+    expect(event.leg).toBe("funding");
+    expect(event.provider).toBe("yellow_card");
     // The funding leg's confirmation comes from Yellow Card, not Circle —
     // no on-chain txHash belongs on this event.
-    expect(events[0].txHash).toBeUndefined();
+    expect(event.txHash).toBeUndefined();
   });
 });
 
@@ -50,10 +51,11 @@ describe("StubPaymentProvider — initiateEscrowRelease (the Circle leg)", () =>
 
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(events).toHaveLength(1);
-    expect(events[0].leg).toBe("release");
-    expect(events[0].provider).toBe("circle");
-    expect(events[0].providerState).toBe("CONFIRMED");
-    expect(events[0].txHash).toMatch(/^0x[0-9a-f]{64}$/);
+    const event = events[0]!; // length just asserted above
+    expect(event.leg).toBe("release");
+    expect(event.provider).toBe("circle");
+    expect(event.providerState).toBe("CONFIRMED");
+    expect(event.txHash).toMatch(/^0x[0-9a-f]{64}$/);
   });
 });
 

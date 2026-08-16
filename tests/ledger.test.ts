@@ -108,7 +108,7 @@ describe("writeLedgerTransaction — the DB call never happens for unbalanced in
     expect(rows).toHaveLength(2);
     expect(rows.every((r) => r.ledger_transaction_id === txnId)).toBe(true);
     expect(rows.every((r) => r.order_id === 42)).toBe(true);
-    expect(rows[1].account_ref).toBe(5);
+    expect(rows[1]!.account_ref).toBe(5); // length just asserted above
   });
 });
 
