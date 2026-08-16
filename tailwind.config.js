@@ -58,8 +58,14 @@ module.exports = {
         },
       },
       fontFamily: {
-        display: ["var(--font-display)", "Georgia", "serif"],
-        body: ["var(--font-body)", "system-ui", "sans-serif"],
+        // "Circular"/"CircularStd" tried first — a paid Lineto typeface
+        // this repo doesn't (and shouldn't) bundle; renders automatically
+        // if a viewer's device already has it, or once this app is
+        // deployed with a real licensed self-host. var(--font-sans) is
+        // the actual loaded font (Roboto, via next/font in app/layout.tsx)
+        // that everyone sees today. See app/layout.tsx's comment.
+        display: ["Circular", "CircularStd", "var(--font-sans)", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "Roboto", "sans-serif"],
+        body: ["var(--font-sans)", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "Roboto", "sans-serif"],
         mono: ["var(--font-mono)", "ui-monospace", "monospace"],
       },
       fontSize: {

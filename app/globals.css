@@ -62,8 +62,11 @@
   --shadow-md: 0 8px 20px rgba(18, 22, 31, 0.1);
   --shadow-lg: 0 16px 40px rgba(18, 22, 31, 0.16);
 
-  --font-display: "Libre Baskerville", Georgia, serif;
-  --font-body: "Space Grotesk", system-ui, sans-serif;
+  /* "Circular" (Lineto) tried first for headings — a paid font this repo
+     doesn't bundle, renders only where already available; Roboto is the
+     real fallback both stacks actually render as. See app/layout.tsx. */
+  --font-display: "Circular", "CircularStd", "Roboto", system-ui, sans-serif;
+  --font-body: "Roboto", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 
   color-scheme: light;

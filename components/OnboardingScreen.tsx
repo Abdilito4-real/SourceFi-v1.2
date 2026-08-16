@@ -17,7 +17,6 @@
 import React, { useState } from "react";
 import { HardHat, Package, Store, Check, ArrowLeft } from "lucide-react";
 import Button from "./ui/Button";
-import Select from "./ui/Select";
 import { Label, Input, Textarea, ErrorText, HelperText } from "./ui/Field";
 import { cn } from "./ui/cn";
 
@@ -25,7 +24,6 @@ export interface OnboardingForm {
   username: string;
   fullName: string;
   companyName: string;
-  professionalRole: string;
   primaryLocation: string;
   path: "buyer" | "supplier";
   cacRegistrationNumber: string;
@@ -178,26 +176,10 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
           )}
 
           {step === 1 && !isSupplierPath && (
-            <>
-              <div>
-                <Label htmlFor="onboard-company">Company name</Label>
-                <Input id="onboard-company" placeholder="e.g. Ibrahim Sourcing & Slabs Ltd" value={form.companyName} onChange={(e) => setForm({ ...form, companyName: e.target.value })} />
-              </div>
-              <div>
-                <Label htmlFor="onboard-role">Professional role</Label>
-                <Select id="onboard-role" value={form.professionalRole} onChange={(e) => setForm({ ...form, professionalRole: e.target.value })}>
-                  {["Contractor", "Developer", "Specialty Supplier", "Accredited Auditor"].map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-              <div>
-                <Label htmlFor="onboard-location">Primary location</Label>
-                <Input id="onboard-location" placeholder="e.g. Lagos" value={form.primaryLocation} onChange={(e) => setForm({ ...form, primaryLocation: e.target.value })} />
-              </div>
-            </>
+            <div>
+              <Label htmlFor="onboard-location">Primary location</Label>
+              <Input id="onboard-location" placeholder="e.g. Lagos" value={form.primaryLocation} onChange={(e) => setForm({ ...form, primaryLocation: e.target.value })} />
+            </div>
           )}
 
           {step === 1 && isSupplierPath && (

@@ -130,7 +130,7 @@ export default function DesignSystemPreview() {
           </div>
         </Section>
 
-        <Section title="Type scale — Fraunces display / Space Grotesk body / IBM Plex Mono labels">
+        <Section title="Type scale — Circular (Lineto) display, falls back to Roboto / Roboto body / IBM Plex Mono labels">
           <div className="flex flex-col gap-3">
             {TYPE_SCALE.map(([label, classes]) => (
               <div key={label} className="flex flex-wrap items-baseline gap-3 border-b border-border pb-3">

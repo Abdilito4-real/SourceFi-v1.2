@@ -1,6 +1,6 @@
 import "./globals.css";
 import type { Metadata, Viewport } from "next";
-import { Libre_Baskerville, Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
+import { Roboto, IBM_Plex_Mono } from "next/font/google";
 import ThemeScript from "../components/ui/ThemeScript";
 import { ToastProvider } from "../components/ui/Toast";
 import ServiceWorkerUpdater from "../components/ui/ServiceWorkerUpdater";
@@ -11,26 +11,24 @@ import InstallPrompt from "../components/ui/InstallPrompt";
 // own domain, and Next inlines the fallback metrics to avoid layout shift.
 // Matters more than usual here — sourcers are on metered mobile data.
 //
-// Baskerville, deliberately scoped to display/headings only (font-display
-// in Tailwind config) — a classical serif at UI-chrome sizes (buttons,
-// table cells, form labels) hurts scanability, so the body/UI sans stays
-// Space Grotesk. This pairing is the editorial-architectural direction
-// this redesign is going for, not the previous release's terminal/tech
-// aesthetic (which leaned on IBM Plex Mono for nearly everything — that
-// font now stays reserved for the few places a genuine monospace value
-// still belongs, like tx hashes and request codes).
-const display = Libre_Baskerville({
+// Brand direction: Circular (Lineto) for headings/prominent UI text,
+// paired with Roboto for body text. IMPORTANT — Circular is a paid,
+// commercially licensed typeface; this repo does not (and should not)
+// bundle or fetch the actual font files, since there's no license here
+// to redistribute them. `tailwind.config.js`'s `font-display` stack
+// names "Circular"/"CircularStd" FIRST, so it renders automatically
+// wherever it's actually available (a viewer's OS/device already has it
+// installed, or this app is later deployed with a real licensed
+// self-hosted copy via next/font/local) — with NO code change needed
+// when that happens. Until then it falls straight through to this
+// Roboto load, which is what both `font-display` and `font-body`
+// actually render as today. Loaded once, referenced by both Tailwind
+// families (see tailwind.config.js) rather than duplicated.
+const sans = Roboto({
   subsets: ["latin"],
-  weight: ["400", "700"],
+  weight: ["400", "500", "700"],
   style: ["normal", "italic"],
-  variable: "--font-display",
-  display: "swap",
-});
-
-const body = Space_Grotesk({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-  variable: "--font-body",
+  variable: "--font-sans",
   display: "swap",
 });
 
@@ -70,7 +68,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html
       lang="en"
-      className={`${display.variable} ${body.variable} ${mono.variable}`}
+      className={`${sans.variable} ${mono.variable}`}
       // ThemeScript sets data-theme synchronously before hydration so
       // there's no flash of the wrong palette. React's hydration diff
       // sees that attribute appear "from nowhere" and would otherwise warn

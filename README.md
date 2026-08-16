@@ -45,9 +45,11 @@ product.
   slate/mint) driven entirely by CSS custom properties — see
   `app/globals.css` and `components/ui/*`. Light is the default theme
   regardless of OS preference (`components/ui/ThemeScript.tsx`); dark is
-  opt-in via the toggle. Display type is Libre Baskerville, scoped to
-  headings only — body text and UI chrome stay on Space Grotesk for
-  readability at small sizes.
+  opt-in via the toggle. Display type is Circular (Lineto), scoped to
+  headings/prominent UI text — a paid font this repo doesn't bundle, so
+  it renders only where already available (a viewer's device, or a real
+  licensed self-host later); body text, UI chrome, and the display
+  fallback all render as Roboto today. See `app/layout.tsx`.
 - **Auth: Privy proves identity once, this app runs its own session.**
   Privy (email/Google/wallet login) issues a short-lived access token;
   the server verifies it once via `@privy-io/node` and mints its own

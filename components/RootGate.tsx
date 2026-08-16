@@ -92,7 +92,6 @@ export default function RootGate() {
     username: "",
     fullName: "",
     companyName: "",
-    professionalRole: "Contractor",
     primaryLocation: "",
     path: "buyer",
     cacRegistrationNumber: "",
