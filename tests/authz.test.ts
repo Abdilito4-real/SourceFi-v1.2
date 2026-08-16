@@ -3,8 +3,8 @@
 // Stage 4's explicit deliverable: prove a buyer session cannot reach any
 // supplier- or admin-only action, including by manipulating the client.
 // "Manipulating the client" is modeled here as trying every input the
-// browser actually controls — the session cookie's own claims, and
-// whatever a forged request body might claim about role/email — and
+// browser actually controls, the session cookie's own claims, and
+// whatever a forged request body might claim about role/email, and
 // showing none of it changes the outcome, because requireRole() never
 // reads role from any of those; it always re-reads the DB row.
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -51,7 +51,7 @@ const ADMIN_ROW: UserRow = {
 };
 
 /** Mimics supabase-js's chainable query builder (.from().select().eq().eq().maybeSingle())
- * closely enough for requireSession()'s exact call shape — every chain
+ * closely enough for requireSession()'s exact call shape, every chain
  * method returns the same builder, and the terminal method resolves to
  * whatever row this test wants "the database" to actually contain. */
 function mockSupabaseReturning(row: UserRow | null) {
@@ -88,14 +88,14 @@ describe("requireSession", () => {
     mockSupabaseReturning(BUYER_ROW);
     const result = await requireSession();
     expect(result?.user.role).toBe("buyer");
-    // SessionClaims has no role field at all — there is nothing to forge
+    // SessionClaims has no role field at all, there is nothing to forge
     // here even if an attacker could tamper with a decoded token, because
     // the type this function reads from never carries role in the first place.
     expect((BUYER_SESSION as unknown as Record<string, unknown>).role).toBeUndefined();
   });
 });
 
-describe("requireRole — the actual boundary the client cannot cross", () => {
+describe("requireRole: the actual boundary the client cannot cross", () => {
   it("blocks a buyer session from a supplier-only action (403)", async () => {
     vi.mocked(readSessionFromCookieStore).mockResolvedValue(BUYER_SESSION);
     mockSupabaseReturning(BUYER_ROW);
@@ -156,7 +156,7 @@ describe("requireRole — the actual boundary the client cannot cross", () => {
 
   it("cannot be tricked by a session cookie whose DID doesn't match the row it claims (mismatched id/privy_user_id)", async () => {
     // Simulates a forged/stale session claiming row #1 but a DID that
-    // doesn't belong to row #1 — the .eq("privy_user_id", ...) half of
+    // doesn't belong to row #1, the .eq("privy_user_id"...) half of
     // requireSession's lookup means this matches nothing, not "close enough".
     vi.mocked(readSessionFromCookieStore).mockResolvedValue({
       privyUserId: "did:privy:someone-else",
@@ -166,6 +166,54 @@ describe("requireRole — the actual boundary the client cannot cross", () => {
     mockSupabaseReturning(null); // the real query would find no matching row
 
     const result = await requireRole(["buyer"]);
+    expect(result).toBeInstanceOf(Response);
+    expect((result as Response).status).toBe(401);
+  });
+});
+
+describe("session revocation (Prompt 4, M5): a token issued before session_valid_after is dead on arrival", () => {
+  it("rejects a token issued BEFORE the user's session_valid_after (e.g. they logged out after this token was minted)", async () => {
+    const validAfter = new Date("2026-01-01T12:00:00Z");
+    const tokenIssuedAt = Math.floor(new Date("2026-01-01T11:59:00Z").getTime() / 1000); // 1 minute earlier
+
+    vi.mocked(readSessionFromCookieStore).mockResolvedValue({ ...BUYER_SESSION, issuedAt: tokenIssuedAt });
+    mockSupabaseReturning({ ...BUYER_ROW, session_valid_after: validAfter.toISOString() });
+
+    const result = await requireRole(["buyer"]);
+    expect(result).toBeInstanceOf(Response);
+    expect((result as Response).status).toBe(401);
+  });
+
+  it("accepts a token issued AFTER session_valid_after (a fresh login post-logout)", async () => {
+    const validAfter = new Date("2026-01-01T12:00:00Z");
+    const tokenIssuedAt = Math.floor(new Date("2026-01-01T12:05:00Z").getTime() / 1000); // 5 minutes later
+
+    vi.mocked(readSessionFromCookieStore).mockResolvedValue({ ...BUYER_SESSION, issuedAt: tokenIssuedAt });
+    mockSupabaseReturning({ ...BUYER_ROW, session_valid_after: validAfter.toISOString() });
+
+    const result = await requireRole(["buyer"]);
+    expect(result).not.toBeInstanceOf(Response);
+  });
+
+  it("a null session_valid_after (never logged out / brand new account) never rejects anything", async () => {
+    vi.mocked(readSessionFromCookieStore).mockResolvedValue({ ...BUYER_SESSION, issuedAt: 1 }); // absurdly old iat, would fail if the check ran unconditionally
+    mockSupabaseReturning({ ...BUYER_ROW, session_valid_after: null });
+
+    const result = await requireRole(["buyer"]);
+    expect(result).not.toBeInstanceOf(Response);
+  });
+
+  it("suspending a supplier revokes their existing sessions immediately, not just at their next login", async () => {
+    // Simulates the exact sequence: admin suspends -> supplier's
+    // already-issued token (minted before the suspension) is now dead,
+    // even though it hasn't expired and nothing about the JWT itself changed.
+    const suspendedAt = new Date("2026-01-01T09:00:00Z");
+    const tokenIssuedAt = Math.floor(new Date("2026-01-01T08:00:00Z").getTime() / 1000); // 1h before suspension
+
+    vi.mocked(readSessionFromCookieStore).mockResolvedValue({ ...SUPPLIER_SESSION, issuedAt: tokenIssuedAt });
+    mockSupabaseReturning({ ...SUPPLIER_ROW, suspended_at: suspendedAt.toISOString(), session_valid_after: suspendedAt.toISOString() });
+
+    const result = await requireRole(["supplier"]);
     expect(result).toBeInstanceOf(Response);
     expect((result as Response).status).toBe(401);
   });

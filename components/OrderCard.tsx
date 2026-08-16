@@ -1,6 +1,6 @@
 // components/OrderCard.tsx
 //
-// Shared between BuyerDashboard and SupplierDashboard's order lists —
+// Shared between BuyerDashboard and SupplierDashboard's order lists
 // supersedes RequestCard.tsx (sourcing_requests -> orders).
 import React from "react";
 import { ChevronRight } from "lucide-react";

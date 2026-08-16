@@ -1,15 +1,16 @@
 // app/api/materials/route.ts
 //
-// The buyer-facing materials search — supersedes browsing the old
+// The buyer-facing materials search, supersedes browsing the old
 // hardcoded materialLibrary. Only ever returns listings belonging to a
 // CURRENTLY verified supplier (design doc's live-verification rule,
 // same three conditions as app/api/suppliers/route.ts and the
-// is_supplier_currently_verified() Postgres function — kept in sync by
+// is_supplier_currently_verified() Postgres function, kept in sync by
 // hand, no codegen linking them, same caveat as that route). `?q=`
 // searches name/category/description via ILIKE; fine at hackathon scale,
 // would want a trigram/full-text index before this sees real volume.
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
 import { requireSession } from "../../../lib/authz";
+import { dbErrorResponse } from "../../../lib/dbErrorResponse";
 
 export async function GET(request: Request) {
   const auth = await requireSession();
@@ -22,7 +23,7 @@ export async function GET(request: Request) {
 
   const supabase = getSupabaseServerClient();
 
-  // Currently-verified suppliers only — same conditions as
+  // Currently-verified suppliers only, same conditions as
   // is_supplier_currently_verified(), inlined here because this is a
   // LIST query (checking every supplier's listings), not a single-id
   // gate.
@@ -36,7 +37,7 @@ export async function GET(request: Request) {
   if (supplierId) supplierQuery = supplierQuery.eq("id", supplierId);
 
   const { data: verifiedSuppliers, error: supplierErr } = await supplierQuery;
-  if (supplierErr) return Response.json({ error: supplierErr.message }, { status: 500 });
+  if (supplierErr) return dbErrorResponse("GET materials (suppliers)", supplierErr);
 
   const verifiedSupplierIds = (verifiedSuppliers || []).map((s) => s.id);
   if (verifiedSupplierIds.length === 0) return Response.json({ materials: [] });
@@ -56,7 +57,7 @@ export async function GET(request: Request) {
   }
 
   const { data: listings, error } = await listingQuery;
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbErrorResponse("GET materials (listings)", error);
 
   const supplierById = new Map((verifiedSuppliers || []).map((s) => [s.id, s]));
   const materials = (listings || []).map((l) => ({

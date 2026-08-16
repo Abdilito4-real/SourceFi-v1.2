@@ -9,7 +9,7 @@ if (!projectId) {
   throw new Error("NEXT_PUBLIC_REOWN_PROJECT_ID is not defined in .env.local");
 }
 
-// Arc Testnet — not in AppKit's built-in network list, so defined manually.
+// Arc Testnet, not in AppKit's built-in network list, so defined manually.
 // Values confirmed against official docs.arc.io.
 export const arcTestnet = defineChain({
   id: 5042002,
@@ -32,7 +32,7 @@ export const arcTestnet = defineChain({
 
 export const networks = [arcTestnet];
 
-// Deliberately using ONLY injected() — covers MetaMask, Rabby, Rainbow, OKX,
+// Deliberately using ONLY injected(), covers MetaMask, Rabby, Rainbow, OKX
 // and Coinbase's browser extension, since they all implement the same
 // standard EIP-1193 window.ethereum interface. walletConnect() was removed:
 // it exists for QR-code/mobile wallet scanning, which isn't needed for

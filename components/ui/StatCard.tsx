@@ -1,6 +1,6 @@
 // components/ui/StatCard.tsx
 //
-// The dashboard-overview equivalent of Badge/StatusBadge — one small
+// The dashboard-overview equivalent of Badge/StatusBadge, one small
 // primitive both BuyerDashboard and SourcerDashboard build their stat rows
 // from, instead of each hand-rolling its own card markup.
 import React from "react";

@@ -1,6 +1,6 @@
 "use client";
 
-// components/ClientOnlyAdminDashboard.tsx — see ClientOnlyRootGate.tsx
+// components/ClientOnlyAdminDashboard.tsx, see ClientOnlyRootGate.tsx
 // for why this boundary exists.
 import nextDynamic from "next/dynamic";
 

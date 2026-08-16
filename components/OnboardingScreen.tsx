@@ -1,18 +1,18 @@
 // components/OnboardingScreen.tsx
 //
 // The "become a verified supplier" path here submits a KYB-style
-// verification application, not a role — see
+// verification application, not a role, see
 // app/api/supplier-verification/route.ts. Every account still starts
 // (and stays) buyer until an admin approves it; this screen just decides
 // whether that application gets submitted alongside the normal profile
 // setup, never a role itself.
 //
-// Multi-step on purpose (was one long single-page form — real feedback
+// Multi-step on purpose (was one long single-page form, real feedback
 // from actually using it: "too tall/long"). Buyer path is 2 steps
 // (about you -> profile details); supplier path is 3 (about you ->
 // business identity -> what you sell + verification submit). The form
 // stays a single <form> spanning every step so onSubmit only fires on
-// the real final-step submit button — intermediate "Next" controls are
+// the real final-step submit button, intermediate "Next" controls are
 // type="button" and just advance local step state, no partial POSTs.
 import React, { useState } from "react";
 import { HardHat, Package, Store, Check, ArrowLeft } from "lucide-react";
@@ -102,7 +102,7 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
   const goBack = () => setStep((s) => Math.max(0, s - 1));
 
   // Switching path mid-flow could leave `step` pointing past the new
-  // path's total steps (buyer has fewer) — clamp rather than let a stale
+  // path's total steps (buyer has fewer), clamp rather than let a stale
   // step index render nothing.
   const handleSelectPath = (path: OnboardingForm["path"]) => {
     setForm({ ...form, path });
@@ -219,7 +219,7 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
                 <Label htmlFor="onboard-sells">What do you produce or sell?</Label>
                 <Textarea
                   id="onboard-sells"
-                  placeholder="e.g. LC3 cement, compressed earth blocks — materials and typical quantities."
+                  placeholder="e.g. LC3 cement, compressed earth blocks. Materials and typical quantities."
                   value={form.whatTheySell}
                   onChange={(e) => setForm({ ...form, whatTheySell: e.target.value })}
                   required
@@ -233,12 +233,12 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
                   value={form.supportingDocumentUrl}
                   onChange={(e) => setForm({ ...form, supportingDocumentUrl: e.target.value })}
                 />
-                <HelperText>A link (Google Drive, Dropbox, etc.) — no file upload yet, so paste a shareable URL.</HelperText>
+                <HelperText>A link (Google Drive, Dropbox, etc.), no file upload yet, so paste a shareable URL.</HelperText>
               </div>
               <p className="m-0 text-xs leading-relaxed text-text-tertiary">
-                An admin reviews this once — confirming your business is real, your location, and what you sell.
+                An admin reviews this once, confirming your business, location, and what you sell.
                 Verification is valid for 90 days or 20 orders, whichever comes first, then you re-apply the same
-                way. This submits an application, not a role — you'll have full buyer access right away either way.
+                way. This submits an application, not a role, you'll have full buyer access right away either way.
               </p>
             </div>
           )}

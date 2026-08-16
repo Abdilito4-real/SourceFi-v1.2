@@ -19,9 +19,15 @@ export interface ModalProps {
   children?: React.ReactNode;
   className?: string;
   size?: "sm" | "md" | "lg";
+  /** Default true. Set false for confirmation dialogs over an irreversible
+   * or financial action, feedback-layer rule: "Confirmation dialogs must
+   * never be dismissible by clicking outside." Also drops Escape and the
+   * header's X button, so the only way out is an explicit button the
+   * dialog's own content provides (e.g. ConfirmDialog's Cancel). */
+  dismissible?: boolean;
 }
 
-export default function Modal({ open, onClose, title, children, className = "", size = "md" }: ModalProps) {
+export default function Modal({ open, onClose, title, children, className = "", size = "md", dismissible = true }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLElement | null>(null);
 
@@ -35,7 +41,7 @@ export default function Modal({ open, onClose, title, children, className = "", 
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onClose();
+        if (dismissible) onClose();
         return;
       }
       if (e.key === "Tab" && focusable.length > 0) {
@@ -56,7 +62,7 @@ export default function Modal({ open, onClose, title, children, className = "", 
       document.removeEventListener("keydown", onKeyDown);
       triggerRef.current?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open, onClose, dismissible]);
 
   if (!open) return null;
 
@@ -65,7 +71,7 @@ export default function Modal({ open, onClose, title, children, className = "", 
   return (
     <div
       className="modal-backdrop fixed inset-0 z-[1000] flex items-center justify-center bg-black/60 p-5"
-      onClick={onClose}
+      onClick={dismissible ? onClose : undefined}
     >
       <div
         ref={panelRef}
@@ -85,14 +91,16 @@ export default function Modal({ open, onClose, title, children, className = "", 
             <h2 id="modal-title" className="font-display text-xl font-semibold text-text-primary">
               {title}
             </h2>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close dialog"
-              className="rounded-md p-1 text-text-tertiary transition-colors duration-base ease-base hover:text-text-primary"
-            >
-              <X size={18} />
-            </button>
+            {dismissible && (
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Close dialog"
+                className="rounded-md p-1 text-text-tertiary transition-colors duration-base ease-base hover:text-text-primary"
+              >
+                <X size={18} />
+              </button>
+            )}
           </div>
         )}
         {children}

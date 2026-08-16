@@ -2,23 +2,24 @@
 //
 // The supplier directory a buyer browses before creating an order
 // (design doc Section F: "Buyer: Supplier directory... -> Create order").
-// Only currently-verified suppliers are listed — the same three
+// Only currently-verified suppliers are listed, the same three
 // conditions as the is_supplier_currently_verified() Postgres function
 // (migration 0004), inlined here as a WHERE clause because this is a
 // LIST endpoint (checking N rows), not a single-supplier gate; the RPC
 // function is still the one used for the actual authorization decision
 // at order-creation/funding time (lib/supplierVerification.ts). Keep
-// these two in sync by hand if the expiry rule ever changes — there's no
+// these two in sync by hand if the expiry rule ever changes, there's no
 // codegen linking them.
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
 import { requireSession } from "../../../lib/authz";
+import { dbErrorResponse } from "../../../lib/dbErrorResponse";
 
 export async function GET(request: Request) {
   const auth = await requireSession();
   if (!auth) return Response.json({ error: "Not authenticated." }, { status: 401 });
 
-  // Free-text search across what a supplier actually uploaded — their own
-  // listings (migration 0006) — not the old fixed material catalog. A
+  // Free-text search across what a supplier actually uploaded, their own
+  // listings (migration 0006), not the old fixed material catalog. A
   // supplier matches if their business name/what_they_sell mentions the
   // term, OR any of their active listings do.
   const q = new URL(request.url).searchParams.get("q")?.trim() || "";
@@ -51,10 +52,10 @@ export async function GET(request: Request) {
   }
 
   const { data, error } = await query;
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbErrorResponse("GET suppliers", error);
 
   // Aggregate rating, from CONFIRMED-on-chain ratings only (design doc
-  // Section C.8) — a rating submitted but not yet independently
+  // Section C.8), a rating submitted but not yet independently
   // verifiable can't inflate a supplier's public number.
   const supplierIds = (data || []).map((s) => s.id);
   const { data: ratingRows } =

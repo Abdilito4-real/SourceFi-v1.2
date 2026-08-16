@@ -1,22 +1,23 @@
 // lib/session.ts
 //
-// Our own first-party session — separate from Privy entirely once it's
+// Our own first-party session, separate from Privy entirely once it's
 // issued. Privy's SDK proves identity once (see lib/privyServer.ts); this
 // is what every subsequent request actually authenticates against.
 //
 // Why not just use Privy's own cookie? Privy's httpOnly-cookie mode is
 // gated behind registering and DNS-verifying a stable production domain in
-// their Dashboard — not available in local dev, and Privy's own docs
+// their Dashboard, not available in local dev, and Privy's own docs
 // recommend localStorage for dev. "Sessions in httpOnly, secure, sameSite
 // cookies, never localStorage" (CLAUDE.md) still has to hold in dev, so
 // this project runs its own short-lived, signed session on top of a
 // one-time verified Privy identity instead.
+import "server-only";
 import { cookies } from "next/headers";
 import { SignJWT, jwtVerify } from "jose";
 import type { SessionClaims } from "./types";
 
 export const SESSION_COOKIE_NAME = "sourcefi_session";
-const SESSION_TTL_SECONDS = 60 * 60 * 12; // 12h — short enough that a stolen
+const SESSION_TTL_SECONDS = 60 * 60 * 12; // 12h, short enough that a stolen
 // token is stale soon, long enough a sourcer mid-audit in a warehouse with
 // patchy signal doesn't get logged out mid-task.
 
@@ -40,16 +41,16 @@ export async function signSession(claims: SessionClaims): Promise<string> {
 }
 
 /** Verifies a raw session token string. Returns null (never throws) for
- * anything invalid/expired/tampered — same "null means not authenticated"
+ * anything invalid/expired/tampered, same "null means not authenticated"
  * contract as verifyPrivyAccessToken. */
 export async function verifySessionToken(token: string): Promise<SessionClaims | null> {
   try {
     const { payload } = await jwtVerify(token, getSecret());
-    const { privyUserId, userRowId, email } = payload as Record<string, unknown>;
+    const { privyUserId, userRowId, email, iat } = payload as Record<string, unknown>;
     if (typeof privyUserId !== "string" || typeof userRowId !== "number" || typeof email !== "string") {
       return null;
     }
-    return { privyUserId, userRowId, email };
+    return { privyUserId, userRowId, email, issuedAt: typeof iat === "number" ? iat : undefined };
   } catch (err) {
     return null;
   }
@@ -60,7 +61,7 @@ export async function setSessionCookie(claims: SessionClaims): Promise<void> {
   const store = await cookies();
   store.set(SESSION_COOKIE_NAME, token, {
     httpOnly: true,
-    // Cookies marked `secure` are dropped by the browser over plain HTTP —
+    // Cookies marked `secure` are dropped by the browser over plain HTTP
     // gating on NODE_ENV is the standard pattern so local dev (http://localhost)
     // keeps working while anything deployed (always https) gets the real protection.
     secure: process.env.NODE_ENV === "production",

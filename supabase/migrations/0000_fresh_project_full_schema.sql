@@ -1,38 +1,38 @@
 -- 0000_fresh_project_full_schema.sql
 --
 -- For a BRAND-NEW, EMPTY Supabase project only. Run this ONE file instead
--- of 0001_stage4_auth.sql and 0002_stage5_data_layer.sql — this is the
+-- of 0001_stage4_auth.sql and 0002_stage5_data_layer.sql, this is the
 -- same end state as running those two in sequence, consolidated for a
 -- database that doesn't already have `users`/`requests` tables from
 -- somewhere outside this repo's migration history.
 --
 -- If you're continuing on the ORIGINAL project (the one that already had
--- users/requests before Stage 4), ignore this file — keep using
+-- users/requests before Stage 4), ignore this file, keep using
 -- 0001_stage4_auth.sql and 0002_stage5_data_layer.sql as before. Nothing
 -- about those two files changes; this is an alternative starting point,
 -- not a replacement for them.
 --
--- Idempotent — safe to re-run. Because this targets an empty database,
+-- Idempotent, safe to re-run. Because this targets an empty database
 -- there's no legacy data to rename around, backfill, or preserve
--- compatibility with — every table is created directly in its final Stage
+-- compatibility with, every table is created directly in its final Stage
 -- 5 shape, and the application code (app/api/escrow, app/api/requests,
 -- components/App.tsx) has been rewired to match: buyer_id/sourcer_id are
 -- real foreign keys (not email text), money is integer minor units
 -- throughout, and there is no buyer_email/sourcer_email/sourcing_fee/
--- budget/evidence column at all — this schema never carried them. If
+-- budget/evidence column at all, this schema never carried them. If
 -- you're instead running this against the ORIGINAL project (real rows,
 -- deployed app code still on the old columns), use
 -- 0001_stage4_auth.sql + 0002_stage5_data_layer.sql, which keep the
 -- deprecated columns around for exactly that reason.
 --
 -- Same three decisions as the Stage 5 review doc apply here too:
---   1. Currency defaults to USD — matches what the app does today, not a
+--   1. Currency defaults to USD, matches what the app does today, not a
 --      resolution of the Naira-vs-USD question in CLAUDE.md.
 --   2. RLS is enabled with zero policies (default-deny backstop). The
---      service-role client this app uses bypasses RLS by design — real
+--      service-role client this app uses bypasses RLS by design, real
 --      per-user visibility is enforced in the API route layer, not here.
 --   3. Identity is real id-based foreign keys (buyer_id/sourcer_id), not
---      email text — the app joins in emails for display server-side (see
+--      email text, the app joins in emails for display server-side (see
 --      app/api/requests/route.ts) rather than storing them redundantly.
 
 -- ============================================================================
@@ -70,7 +70,7 @@ create table if not exists users (
   -- supplied copy of this for an authorization decision.
   role text not null default 'buyer',
   -- Stage 4: the verified Privy DID this row is bound to. Server-verified
-  -- once per session via @privy-io/node — see lib/privyServer.ts — never
+  -- once per session via @privy-io/node, see lib/privyServer.ts, never
   -- client-supplied.
   privy_user_id text,
   created_at timestamptz not null default now(),
@@ -100,7 +100,7 @@ create trigger trg_users_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- materials — the catalog currently hardcoded in lib/constants.ts, seeded
+-- materials, the catalog currently hardcoded in lib/constants.ts, seeded
 -- in as real rows. `slug` matches today's static `id` field.
 -- ============================================================================
 create table if not exists materials (
@@ -190,7 +190,7 @@ insert into materials (slug, name, tag, savings, hook, explainer, why_rare, metr
 on conflict (slug) do nothing;
 
 -- ============================================================================
--- suppliers — CAC format validation and collusion flagging are Stage 7's
+-- suppliers, CAC format validation and collusion flagging are Stage 7's
 -- job; this is the table only.
 -- ============================================================================
 create table if not exists suppliers (
@@ -212,7 +212,7 @@ create trigger trg_suppliers_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- sourcer_profiles — every counter starts at zero. Stage 7 explicitly
+-- sourcer_profiles, every counter starts at zero. Stage 7 explicitly
 -- bans seeded stats, so nothing here seeds any.
 -- ============================================================================
 create table if not exists sourcer_profiles (
@@ -238,9 +238,9 @@ create trigger trg_sourcer_profiles_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- sourcing_requests — the core table. No deprecated columns here: this is
+-- sourcing_requests, the core table. No deprecated columns here: this is
 -- a fresh project, and the application code writes buyer_id/sourcer_id/
--- budget_minor/sourcing_fee_minor directly — see lib/requestStateMachine.ts
+-- budget_minor/sourcing_fee_minor directly, see lib/requestStateMachine.ts
 -- for the status transitions this table's status column is validated
 -- against server-side.
 -- ============================================================================
@@ -260,7 +260,7 @@ create table if not exists sourcing_requests (
   sourcing_fee_minor bigint,
   platform_fee_minor bigint,
 
-  -- Small per-request workflow flags — previously fields inside a JSONB
+  -- Small per-request workflow flags, previously fields inside a JSONB
   -- evidence blob, now real columns. The audit report itself (notes,
   -- image, supplier id, GPS) lives in audit_reports; these three are
   -- everything else that isn't a status transition.
@@ -287,7 +287,7 @@ create trigger trg_sourcing_requests_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- escrow_transactions — a transaction LOG, not the balanced double-entry
+-- escrow_transactions, a transaction LOG, not the balanced double-entry
 -- ledger Stage 6 builds. Append-only by convention: no soft delete,
 -- because a financial log entry is never edited or removed.
 -- ============================================================================
@@ -305,7 +305,7 @@ create table if not exists escrow_transactions (
 create index if not exists idx_escrow_tx_request on escrow_transactions (sourcing_request_id);
 
 -- ============================================================================
--- audit_reports — the sourcer's field-visit report. GPS/EXIF extraction
+-- audit_reports, the sourcer's field-visit report. GPS/EXIF extraction
 -- and handshake-code hardening are Stage 7's job; this gives that stage
 -- somewhere real to write to.
 -- ============================================================================
@@ -333,7 +333,7 @@ create trigger trg_audit_reports_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- disputes — schema only. Stage 8 builds the filing flow, freeze
+-- disputes, schema only. Stage 8 builds the filing flow, freeze
 -- semantics, and the admin review queue.
 -- ============================================================================
 create table if not exists disputes (
@@ -359,7 +359,7 @@ create trigger trg_disputes_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- notifications — schema only. Nothing writes to this yet.
+-- notifications, schema only. Nothing writes to this yet.
 -- ============================================================================
 create table if not exists notifications (
   id bigint generated always as identity primary key,
@@ -376,7 +376,7 @@ create index if not exists idx_notifications_user_id on notifications (user_id);
 create index if not exists idx_notifications_unread on notifications (user_id) where read_at is null;
 
 -- ============================================================================
--- audit_log — who did what, when, from where. Written by lib/authz.ts's
+-- audit_log, who did what, when, from where. Written by lib/authz.ts's
 -- logAudit() on every role change and admin action. Deliberately no
 -- soft-delete column: an audit trail that can be "deleted" isn't one.
 -- ============================================================================
@@ -394,7 +394,7 @@ create index if not exists idx_audit_log_actor_email on audit_log (actor_email);
 create index if not exists idx_audit_log_created_at on audit_log (created_at desc);
 
 -- ============================================================================
--- Row-level security — enabled everywhere, zero policies for anon/
+-- Row-level security, enabled everywhere, zero policies for anon/
 -- authenticated. Default-deny backstop, not the primary access boundary:
 -- this app's Supabase client always authenticates as service_role (see
 -- lib/supabaseServer.ts), which bypasses RLS by design, so real per-user

@@ -3,16 +3,16 @@
 // components/PendingVerificationScreen.tsx
 //
 // A first-time supplier applicant stays role='buyer' until an admin
-// approves them (see docs/marketplace-payments-design.md Section 0 —
+// approves them (see docs/marketplace-payments-design.md Section 0
 // approval is what actually flips the role). Per explicit product
 // direction, that account does NOT get normal buyer access while a
-// first-time application is pending — this screen is the entire
+// first-time application is pending, this screen is the entire
 // experience until an admin reviews it, not a dismissible banner on top
 // of a working dashboard. RootGate renders this in place of the /buyer
 // redirect; BuyerDashboard also bounces back here defensively if someone
 // reaches /buyer directly (bookmark, back button) while still pending.
 //
-// Re-verification after expiry is NOT gated this way — that account is
+// Re-verification after expiry is NOT gated this way, that account is
 // already role='supplier' and keeps full dashboard access (existing
 // orders still need managing); only a first-time, not-yet-a-supplier-at-all
 // applicant sees this screen.
@@ -49,7 +49,7 @@ export default function PendingVerificationScreen({ application, onSignOut, sign
 
         <p className="text-sm leading-relaxed text-text-secondary">
           Most reviews complete within a couple of minutes, but it can take up to <strong>48 hours</strong>. You'll get
-          full supplier access on this account the moment it's approved — no need to reapply or do anything else
+          full supplier access on this account the moment it's approved, no need to reapply or do anything else
           in the meantime.
         </p>
 

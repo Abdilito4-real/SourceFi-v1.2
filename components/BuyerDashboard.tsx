@@ -2,19 +2,21 @@
 
 // components/BuyerDashboard.tsx
 //
-// Real route (/buyer) — Overview, Suppliers, Orders, Materials.
-// Marketplace pivot: no more "post a request and a sourcer claims it" —
+// Real route (/buyer), Overview, Suppliers, Orders, Materials.
+// Marketplace pivot: no more "post a request and a sourcer claims it"
 // the buyer picks a currently-verified supplier directly and creates an
 // order against them (design doc Section 0). No wallet/crypto UI
-// anywhere here — Fund Order is a single button, NGN in, NGN shown
+// anywhere here, Fund Order is a single button, NGN in, NGN shown
 // (design doc Section 3).
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Loader2, Info, Coins, Package, LayoutGrid, FileText, History, Store, ShieldCheck, XCircle, Search } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Loader2, Coins, Package, LayoutGrid, FileText, History, Store, ShieldCheck, XCircle, Search } from "lucide-react";
 
 import { formatMoney, MIN_ORDER_AMOUNT_MINOR } from "../lib/money";
 import { useSession } from "./SessionProvider";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
+import NotificationBell from "./NotificationBell";
+import PushSoftPrompt from "./PushSoftPrompt";
 import OrderCard from "./OrderCard";
 import OrderDetailsModal from "./OrderDetailsModal";
 import SupplierVerificationForm from "./SupplierVerificationForm";
@@ -23,6 +25,7 @@ import { Card } from "./ui/Card";
 import Modal from "./ui/Modal";
 import StatCard from "./ui/StatCard";
 import { Label, Input, Textarea } from "./ui/Field";
+import SharedEmptyState from "./ui/EmptyState";
 import { useToast } from "./ui/Toast";
 import type { OrderRow, SupplierListingRow, SupplierVerificationApplicationRow } from "../lib/types";
 
@@ -108,7 +111,7 @@ interface NewOrderModalProps {
   }) => void | Promise<void>;
   supplier: SupplierListing;
   /** Set when the buyer got here by ordering a specific listing from
-   * search/browse, rather than starting from the supplier directory —
+   * search/browse, rather than starting from the supplier directory
    * prefills title/amount and links the order back to that listing. */
   prefillListing?: SupplierListingRow | null;
   submitting: boolean;
@@ -116,7 +119,7 @@ interface NewOrderModalProps {
 
 function NewOrderModal({ onClose, onSubmit, supplier, prefillListing, submitting }: NewOrderModalProps) {
   // A listing with a set per-unit price (e.g. "₦9,000 per bag") drives
-  // the total from quantity x price — it must NOT just prefill the raw
+  // the total from quantity x price, it must NOT just prefill the raw
   // per-unit price as the whole order amount and leave it there
   // regardless of how many units the buyer actually wants (the exact bug
   // reported: a ₦9,000/bag listing produced a ₦9,000 order no matter
@@ -215,12 +218,14 @@ function NewOrderModal({ onClose, onSubmit, supplier, prefillListing, submitting
 
 export default function BuyerDashboard() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { notify } = useToast();
   const { checkingSession, user, orders, setOrders, loadingOrders, canBeSupplier, signingOut, handleSignOut } = useSession();
 
   const [section, setSection] = useState<Section>("overview");
   const [tab, setTab] = useState<"active" | "history">("active");
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  const [pushPromptOpen, setPushPromptOpen] = useState(false);
   const [suppliers, setSuppliers] = useState<SupplierListing[]>([]);
   const [loadingSuppliers, setLoadingSuppliers] = useState(true);
   const [orderingSupplier, setOrderingSupplier] = useState<SupplierListing | null>(null);
@@ -234,30 +239,43 @@ export default function BuyerDashboard() {
 
   const isBuyer = user?.role === "buyer";
 
+  // Push notificationclick deep-links here as e.g. /buyer?order=482
+  // open the right order/section on load instead of just landing on the
+  // overview and leaving the user to find it themselves.
+  useEffect(() => {
+    const orderParam = searchParams.get("order");
+    if (orderParam && Number.isInteger(Number(orderParam))) setSelectedOrderId(Number(orderParam));
+    const sectionParam = searchParams.get("section");
+    if (sectionParam === "overview" || sectionParam === "suppliers" || sectionParam === "orders" || sectionParam === "materials") {
+      setSection(sectionParam);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (checkingSession) return;
     if (!user) {
       router.replace("/");
       return;
     }
-    // A supplier account has no buyer access — RootGate is the real gate
+    // A supplier account has no buyer access, RootGate is the real gate
     // (fixed to redirect a supplier to /supplier, not /buyer, on sign-in)
     // and SupplierDashboard no longer offers a "Switch to buyer
     // dashboard" link at all; this is the defensive second layer for
     // direct navigation (bookmark, back button, a stale tab). Admin
-    // keeps view access here on purpose — oversight, not "being a buyer".
+    // keeps view access here on purpose, oversight, not "being a buyer".
     if (user.role === "supplier") {
       router.replace("/supplier");
     }
   }, [checkingSession, user, router]);
 
   // RootGate is the real gate for this (a first-time supplier applicant
-  // doesn't get redirected to /buyer at all while pending — see
+  // doesn't get redirected to /buyer at all while pending, see
   // PendingVerificationScreen.tsx). This is the defensive second layer:
   // someone reaching /buyer directly anyway (a bookmark, browser back
   // button, a stale tab) gets bounced back to "/" so RootGate's check
   // runs again and shows the real pending screen, rather than quietly
-  // landing on a working buyer dashboard while pending — per explicit
+  // landing on a working buyer dashboard while pending, per explicit
   // product direction, that account is not a buyer during this window.
   const loadSupplierApplication = () => {
     fetch("/api/supplier-verification/me")
@@ -288,7 +306,7 @@ export default function BuyerDashboard() {
   }, [user]);
 
   // Debounced so typing a search term doesn't fire a request per
-  // keystroke — only loaded once the buyer actually visits the section
+  // keystroke, only loaded once the buyer actually visits the section
   // (or types in it), not eagerly on every dashboard mount.
   const materialsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -369,7 +387,7 @@ export default function BuyerDashboard() {
       const data = await res.json();
       if (!res.ok || !data.order) throw new Error(data.error || "Failed to create order.");
       setOrders((prev) => [data.order as OrderRow, ...prev]);
-      notify("success", "Order created — fund it to get started.");
+      notify("success", "Order created. Fund it to get started.");
       setOrderingSupplier(null);
       setOrderingListing(null);
       setSection("orders");
@@ -402,6 +420,7 @@ export default function BuyerDashboard() {
       user={user}
       onSignOut={handleSignOut}
       signingOut={signingOut}
+      notificationBell={<NotificationBell />}
       pageTitle={
         section === "overview" ? `Welcome back, ${user.username || "Buyer"}` : section === "suppliers" ? "Verified suppliers" : section === "materials" ? "Materials" : "Orders"
       }
@@ -411,7 +430,7 @@ export default function BuyerDashboard() {
           : section === "suppliers"
           ? "Every supplier here has passed one-time business verification."
           : section === "materials"
-          ? "Uploaded directly by verified suppliers — search to find who has what you need."
+          ? "Uploaded directly by verified suppliers. Search to find who has what you need."
           : undefined
       }
     >
@@ -484,10 +503,7 @@ export default function BuyerDashboard() {
               <Loader2 size={22} className="spin-icon text-accent" />
             </div>
           ) : suppliers.length === 0 ? (
-            <div className="rounded-[10px] border-[1.5px] border-dashed border-border bg-surface px-5 py-10 text-center">
-              <Info size={24} className="mx-auto mb-2 text-text-tertiary" />
-              <p className="mx-auto max-w-[320px] text-sm text-text-secondary">No verified suppliers yet. Check back soon.</p>
-            </div>
+            <SharedEmptyState title="No verified suppliers yet" description="Check back soon." />
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {suppliers.map((s) => (
@@ -505,7 +521,7 @@ export default function BuyerDashboard() {
             <Input
               value={materialsQuery}
               onChange={(e) => setMaterialsQuery(e.target.value)}
-              placeholder="Search materials — e.g. cement, GFRP rebar…"
+              placeholder="Search materials: cement, GFRP rebar…"
               className="pl-9"
             />
           </div>
@@ -515,12 +531,10 @@ export default function BuyerDashboard() {
               <Loader2 size={22} className="spin-icon text-accent" />
             </div>
           ) : materials.length === 0 ? (
-            <div className="rounded-[10px] border-[1.5px] border-dashed border-border bg-surface px-5 py-10 text-center">
-              <Info size={24} className="mx-auto mb-2 text-text-tertiary" />
-              <p className="mx-auto max-w-[320px] text-sm text-text-secondary">
-                {materialsQuery ? `No materials matching "${materialsQuery}".` : "No materials listed yet — suppliers add these from their own dashboard."}
-              </p>
-            </div>
+            <SharedEmptyState
+              title={materialsQuery ? `No materials matching "${materialsQuery}"` : "No materials listed yet"}
+              description={materialsQuery ? undefined : "Suppliers add these from their own dashboard."}
+            />
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {materials.map((listing) => (
@@ -590,25 +604,26 @@ export default function BuyerDashboard() {
           onClose={() => setSelectedOrderId(null)}
           onOrderChange={(order) => setOrders((prev) => prev.map((o) => (o.id === order.id ? order : o)))}
           showNotification={notify}
+          onFunded={() => setPushPromptOpen(true)}
         />
       )}
+      <PushSoftPrompt open={pushPromptOpen} onClose={() => setPushPromptOpen(false)} reason="You just funded escrow." />
     </DashboardShell>
   );
 }
 
 function EmptyOrders({ onBrowse, historyTab = false }: { onBrowse?: () => void; historyTab?: boolean }) {
   return (
-    <div className="rounded-[10px] border-[1.5px] border-dashed border-border bg-surface px-5 py-10 text-center">
-      <Info size={24} className="mx-auto mb-2 text-text-tertiary" />
-      <div className="text-sm font-semibold text-text-primary">{historyTab ? "No completed orders yet" : "No orders yet"}</div>
-      <p className="mx-auto mt-1 max-w-[300px] text-xs text-text-secondary">
-        {historyTab ? "Completed orders will appear here once they settle." : "Browse verified suppliers to place your first order."}
-      </p>
-      {!historyTab && onBrowse && (
-        <Button size="sm" className="mt-4" onClick={onBrowse}>
-          Browse suppliers
-        </Button>
-      )}
-    </div>
+    <SharedEmptyState
+      title={historyTab ? "No completed orders yet" : "No orders yet"}
+      description={historyTab ? "Completed orders will appear here once they settle." : "Browse verified suppliers to place your first order."}
+      action={
+        !historyTab && onBrowse ? (
+          <Button size="sm" onClick={onBrowse}>
+            Browse suppliers
+          </Button>
+        ) : undefined
+      }
+    />
   );
 }

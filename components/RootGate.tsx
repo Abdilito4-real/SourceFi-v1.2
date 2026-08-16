@@ -3,7 +3,7 @@
 // components/RootGate.tsx
 //
 // The one thing this route does: figure out which of three screens to
-// show — sign in, finish onboarding, or (once both are done) get out of
+// show, sign in, finish onboarding, or (once both are done) get out of
 // the way and send you to your dashboard. Neither dashboard route
 // re-renders this; they each do their own light auth check for
 // direct/deep links (see BuyerDashboard.tsx / SourcerDashboard.tsx).
@@ -33,7 +33,7 @@ const STEPS: { icon: LucideIcon; label: string }[] = [
 /** The three real phases RootGate ever waits on, made visible instead of
  * one ambiguous spinner. Step 1 (signing in) is the one that used to sit
  * behind a stale `checkingSession` value and take several seconds with no
- * feedback at all — see the fix in SessionProvider.tsx. */
+ * feedback at all, see the fix in SessionProvider.tsx. */
 function FullPageLoader({ phase }: { phase: Phase }) {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-8 bg-bg px-6">
@@ -101,11 +101,11 @@ export default function RootGate() {
   });
   const [error, setError] = useState("");
   // null while unknown (avoids a flash of the wrong screen before the
-  // localStorage read resolves on mount) — true/false once it has.
+  // localStorage read resolves on mount), true/false once it has.
   const [introSeen, setIntroSeen] = useState<boolean | null>(null);
 
   // A first-time supplier applicant stays role='buyer' until an admin
-  // approves them — per explicit product direction, that account does
+  // approves them, per explicit product direction, that account does
   // NOT get normal buyer access while pending (see
   // PendingVerificationScreen.tsx's header comment). Re-verification
   // after expiry is different: that account is already role='supplier'
@@ -117,7 +117,7 @@ export default function RootGate() {
     try {
       setIntroSeen(localStorage.getItem(INTRO_SEEN_KEY) === "1");
     } catch {
-      setIntroSeen(true); // localStorage unavailable — don't block on it
+      setIntroSeen(true); // localStorage unavailable, don't block on it
     }
   }, []);
 
@@ -126,7 +126,7 @@ export default function RootGate() {
     try {
       localStorage.setItem(INTRO_SEEN_KEY, "1");
     } catch {
-      /* localStorage unavailable — intro just reappears next visit */
+      /* localStorage unavailable, intro just reappears next visit */
     }
   };
 
@@ -136,7 +136,7 @@ export default function RootGate() {
     if (!readyForDashboard) return;
     // Already resolved once (including the direct-from-submit path in
     // handleSubmit below, which sets both these synchronously right
-    // after a successful application POST) — skip re-checking. Without
+    // after a successful application POST), skip re-checking. Without
     // this guard, this effect firing on the SAME render pass that
     // needsOnboarding flips (readyForDashboard becoming true) can race
     // the just-submitted application's own insert and briefly read back
@@ -145,7 +145,7 @@ export default function RootGate() {
     if (pendingApplicationChecked) return;
     if (user?.role !== "buyer") {
       // Only a still-role='buyer' account can have a BLOCKING first-time
-      // application — an already-'supplier' account's re-verification
+      // application, an already-'supplier' account's re-verification
       // pending state is handled inside SupplierDashboard instead, with
       // full dashboard access kept.
       setPendingApplicationChecked(true);
@@ -167,7 +167,7 @@ export default function RootGate() {
     return () => {
       cancelled = true;
     };
-    // pendingApplicationChecked is read (as a guard), not a re-trigger —
+    // pendingApplicationChecked is read (as a guard), not a re-trigger
     // deliberately excluded so this doesn't re-run the instant it flips.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readyForDashboard, user]);
@@ -175,12 +175,12 @@ export default function RootGate() {
   useEffect(() => {
     if (!readyForDashboard) return;
     if (!pendingApplicationChecked) return; // wait for the pending-application check first
-    if (pendingApplication) return; // blocked — PendingVerificationScreen renders instead of redirecting
-    // Was `role === "admin" ? "/admin" : "/buyer"` — which silently sent
+    if (pendingApplication) return; // blocked, PendingVerificationScreen renders instead of redirecting
+    // Was `role === "admin" ? "/admin" : "/buyer"`, which silently sent
     // EVERY non-admin role, including 'supplier', to /buyer. A supplier
     // has no buyer access anymore (see BuyerDashboard's own guard below,
     // and SupplierDashboard's switchLinks no longer offering the link at
-    // all) — this was the actual root cause, not just a stray nav link.
+    // all), this was the actual root cause, not just a stray nav link.
     const destination = user?.role === "admin" ? "/admin" : user?.role === "supplier" ? "/supplier" : "/buyer";
     router.replace(destination);
   }, [readyForDashboard, pendingApplicationChecked, pendingApplication, user, router]);
@@ -195,7 +195,7 @@ export default function RootGate() {
       return <PendingVerificationScreen application={pendingApplication} onSignOut={handleSignOut} signingOut={signingOut} />;
     }
     // Either still checking, or checked-clear and the redirect effect
-    // above is about to fire — both cases show the same loader.
+    // above is about to fire, both cases show the same loader.
     return <FullPageLoader phase={2} />;
   }
 
@@ -225,7 +225,7 @@ export default function RootGate() {
     }
 
     // The profile save always happens; the application is a second,
-    // independent step on top of it — a failure here shouldn't undo the
+    // independent step on top of it, a failure here shouldn't undo the
     // profile that already saved, just surface its own error and let them
     // retry from the (now buyer) dashboard rather than getting stuck here.
     if (form.path === "supplier") {
@@ -244,9 +244,9 @@ export default function RootGate() {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed to submit your application.");
-        notify("success", "Verification application submitted — an admin will review it.");
+        notify("success", "Verification application submitted. An admin will review it.");
         // Set directly from the response rather than waiting on the
-        // pending-application effect to refetch — avoids a flash of the
+        // pending-application effect to refetch, avoids a flash of the
         // redirect-to-/buyer race between this submit and that fetch.
         setPendingApplicationChecked(true);
         setPendingApplication(data.application);

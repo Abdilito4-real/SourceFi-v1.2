@@ -2,18 +2,20 @@
 
 // components/SupplierDashboard.tsx
 //
-// Real route (/supplier) — supersedes SourcerDashboard.tsx. Overview,
+// Real route (/supplier), supersedes SourcerDashboard.tsx. Overview
 // Orders, Verification. Marketplace pivot: no more "claim an open job,
-// visit a supplier, submit an audit" — the account HOLDING this
+// visit a supplier, submit an audit", the account HOLDING this
 // dashboard now IS the supplier, verified once at onboarding (design doc
 // Section 0), receiving orders buyers place directly and fulfilling them.
-import React, { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Loader2, Info, Coins, ShieldCheck, ShieldAlert, LayoutGrid, FileText, History, Clock, Package, Plus, Pencil, Trash2, EyeOff, Eye } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Loader2, Coins, ShieldCheck, ShieldAlert, LayoutGrid, FileText, History, Clock, Package, Plus, Pencil, Trash2, EyeOff, Eye } from "lucide-react";
 
 import { formatMoney } from "../lib/money";
 import { useSession } from "./SessionProvider";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
+import NotificationBell from "./NotificationBell";
+import PushSoftPrompt from "./PushSoftPrompt";
 import OrderCard from "./OrderCard";
 import OrderDetailsModal from "./OrderDetailsModal";
 import SupplierVerificationForm from "./SupplierVerificationForm";
@@ -23,6 +25,7 @@ import Modal from "./ui/Modal";
 import StatCard from "./ui/StatCard";
 import Badge from "./ui/Badge";
 import { Label, Input, Textarea } from "./ui/Field";
+import SharedEmptyState from "./ui/EmptyState";
 import { useToast } from "./ui/Toast";
 import type { SupplierListingRow, SupplierProfileRow, SupplierVerificationApplicationRow } from "../lib/types";
 
@@ -107,12 +110,14 @@ function ListingFormModal({
 
 export default function SupplierDashboard() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { notify } = useToast();
   const { checkingSession, user, orders, setOrders, loadingOrders, canBeSupplier, signingOut, handleSignOut } = useSession();
 
   const [section, setSection] = useState<Section>("overview");
   const [ordersTab, setOrdersTab] = useState<"active" | "history">("active");
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  const [pushPromptOpen, setPushPromptOpen] = useState(false);
   const [profile, setProfile] = useState<SupplierProfileRow | null>(null);
   const [currentlyVerified, setCurrentlyVerified] = useState(false);
   const [latestApplication, setLatestApplication] = useState<SupplierVerificationApplicationRow | null>(null);
@@ -124,6 +129,18 @@ export default function SupplierDashboard() {
   const [savingListing, setSavingListing] = useState(false);
 
   const isSupplier = user?.role === "supplier";
+
+  // Push notificationclick deep-links here as e.g. /supplier?order=482 or
+  // /supplier?section=verification.
+  useEffect(() => {
+    const orderParam = searchParams.get("order");
+    if (orderParam && Number.isInteger(Number(orderParam))) setSelectedOrderId(Number(orderParam));
+    const sectionParam = searchParams.get("section");
+    if (sectionParam === "overview" || sectionParam === "orders" || sectionParam === "listings" || sectionParam === "verification") {
+      setSection(sectionParam);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (checkingSession) return;
@@ -171,6 +188,12 @@ export default function SupplierDashboard() {
   }, [user, isSupplier]);
 
   const handleCreateListing = async (values: ListingFormValues) => {
+    // Captured before the request, not after: this is "did they have zero
+    // listings when they started this action" (the real "about to
+    // receive your first order" moment), not "do they still have zero
+    // after the state update lands" (which is always false by then).
+    const isFirstListing = listings.length === 0;
+
     setSavingListing(true);
     try {
       const res = await fetch("/api/supplier-listings", {
@@ -190,6 +213,11 @@ export default function SupplierDashboard() {
       setListings((rows) => [data.listing, ...rows]);
       notify("success", "Listing added.");
       setShowNewListing(false);
+      // Push-notification soft prompt (feedback-layer Prompt 2), the
+      // "moment value is obvious" for a supplier: buyers can now find and
+      // order this, and a push is how they'll learn one did without
+      // sitting on the dashboard waiting.
+      if (isFirstListing) setPushPromptOpen(true);
     } catch (err) {
       notify("error", err instanceof Error ? err.message : "Failed to create listing.");
     } finally {
@@ -240,16 +268,58 @@ export default function SupplierDashboard() {
     }
   };
 
-  const handleDeleteListing = async (listing: SupplierListingRow) => {
-    try {
-      const res = await fetch(`/api/supplier-listings/${listing.id}`, { method: "DELETE" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to delete listing.");
-      setListings((rows) => rows.filter((r) => r.id !== listing.id));
-      notify("success", "Listing removed.");
-    } catch (err) {
-      notify("error", err instanceof Error ? err.message : "Failed to delete listing.");
-    }
+  // Not financial, and the API route is a soft delete (deleted_at, never a
+  // hard DELETE), a genuinely, safely undoable action. Feedback-layer
+  // rule: "Where an action can be safely undone, offer a 5-10s undo window
+  // instead of a confirmation dialog." So this removes the card from view
+  // immediately and only calls the DELETE route if the window lapses
+  // without Undo, the row never actually leaves the database at all if
+  // the buyer/supplier changes their mind in time, no separate restore
+  // endpoint needed. (Trade-off, stated plainly: if this dashboard
+  // unmounts, navigating away, logging out, before the window closes
+  // the pending delete is dropped rather than fired; same posture as most
+  // "undo send" implementations.)
+  const deleteTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+
+  useEffect(() => {
+    const timers = deleteTimers.current;
+    return () => {
+      timers.forEach((t) => clearTimeout(t));
+    };
+  }, []);
+
+  const handleDeleteListing = (listing: SupplierListingRow) => {
+    setListings((rows) => rows.filter((r) => r.id !== listing.id));
+    notify("info", `${listing.name} removed.`, {
+      duration: 7000,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          const timer = deleteTimers.current.get(listing.id);
+          if (timer) {
+            clearTimeout(timer);
+            deleteTimers.current.delete(listing.id);
+          }
+          setListings((rows) => [listing, ...rows]);
+        },
+      },
+    });
+
+    const timer = setTimeout(async () => {
+      deleteTimers.current.delete(listing.id);
+      try {
+        const res = await fetch(`/api/supplier-listings/${listing.id}`, { method: "DELETE" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to delete listing.");
+      } catch (err) {
+        // The undo window already closed and deletion still failed, put
+        // it back rather than leave the screen showing it gone while the
+        // database still has it.
+        setListings((rows) => [listing, ...rows]);
+        notify("error", err instanceof Error ? err.message : "Failed to delete listing. It's back in your list.");
+      }
+    }, 7000);
+    deleteTimers.current.set(listing.id, timer);
   };
 
   const activeOrders = orders.filter((o) => !TERMINAL_STATUSES.has(o.status));
@@ -280,7 +350,7 @@ export default function SupplierDashboard() {
     );
   }
 
-  // No "Switch to buyer dashboard" link — a supplier account has no
+  // No "Switch to buyer dashboard" link, a supplier account has no
   // buyer access (see BuyerDashboard's own redirect guard). Admin still
   // gets both links: oversight of every dashboard, not "being" any role.
   const switchLinks: SwitchLink[] = [...(user.role === "admin" ? [{ label: "Buyer dashboard", href: "/buyer" }, { label: "Admin dashboard", href: "/admin" }] : [])];
@@ -293,6 +363,7 @@ export default function SupplierDashboard() {
       user={user}
       onSignOut={handleSignOut}
       signingOut={signingOut}
+      notificationBell={<NotificationBell />}
       pageTitle={
         section === "overview"
           ? `Supplier portal · @${user.username || "Supplier"}`
@@ -313,7 +384,7 @@ export default function SupplierDashboard() {
       {!loadingVerification && isSupplier && !currentlyVerified && section !== "verification" && (
         <div className="mb-6 flex items-center justify-between gap-3 rounded-lg border border-warning bg-warning-soft px-4 py-3 text-sm text-warning-text">
           <span className="flex items-center gap-2">
-            <ShieldAlert size={15} /> Your verification isn't currently active — you can't receive new orders until it's renewed.
+            <ShieldAlert size={15} /> Your verification isn't currently active. You can't receive new orders until it's renewed.
           </span>
           <Button size="sm" variant="secondary" onClick={() => setSection("verification")}>
             Review
@@ -345,7 +416,7 @@ export default function SupplierDashboard() {
                 <Loader2 size={22} className="spin-icon text-accent" />
               </div>
             ) : orders.length === 0 ? (
-              <EmptyState message="No orders yet. They'll show up here as soon as a buyer funds one against your business." />
+              <SharedEmptyState title="No orders yet" description="They'll show up here as soon as a buyer funds one against your business." />
             ) : (
               <div className="grid gap-3">
                 {orders.slice(0, 4).map((o) => (
@@ -385,7 +456,7 @@ export default function SupplierDashboard() {
               <Loader2 size={22} className="spin-icon text-accent" />
             </div>
           ) : ordersTabbed.length === 0 ? (
-            <EmptyState message={ordersTab === "history" ? "No completed orders yet." : "No active orders right now."} />
+            <SharedEmptyState title={ordersTab === "history" ? "No completed orders yet" : "No active orders right now"} />
           ) : (
             <div className="grid gap-3">
               {ordersTabbed.map((o) => (
@@ -409,7 +480,7 @@ export default function SupplierDashboard() {
               <Loader2 size={22} className="spin-icon text-accent" />
             </div>
           ) : listings.length === 0 ? (
-            <EmptyState message="No listings yet. Add what you sell so buyers can find it in search." />
+            <SharedEmptyState title="No listings yet" description="Add what you sell so buyers can find it in search." />
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {listings.map((listing) => (
@@ -492,7 +563,7 @@ export default function SupplierDashboard() {
                   )}
                 </div>
                 <p className="mt-4 text-xs leading-relaxed text-text-secondary">
-                  Verification is valid for 90 days or 20 orders, whichever comes first — this is a one-time business check, not a
+                  Verification is valid for 90 days or 20 orders, whichever comes first. This is a one-time business check, not a
                   per-order visit. Once it expires you can't receive new orders until you're re-verified.
                 </p>
               </Card>
@@ -501,7 +572,7 @@ export default function SupplierDashboard() {
                 <div>
                   {latestApplication?.status === "pending" ? (
                     <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-sunken px-4 py-3 text-sm text-text-secondary">
-                      <Clock size={15} className="shrink-0" /> Your re-verification is under review — most reviews complete
+                      <Clock size={15} className="shrink-0" /> Your re-verification is under review. Most reviews complete
                       within a couple of minutes, but it can take up to 48 hours.
                     </div>
                   ) : (
@@ -549,15 +620,7 @@ export default function SupplierDashboard() {
           submitting={savingListing}
         />
       )}
+      <PushSoftPrompt open={pushPromptOpen} onClose={() => setPushPromptOpen(false)} reason="You just added your first listing. Buyers can now find and order it." />
     </DashboardShell>
-  );
-}
-
-function EmptyState({ message }: { message: string }) {
-  return (
-    <div className="rounded-[10px] border-[1.5px] border-dashed border-border bg-surface px-5 py-10 text-center">
-      <Info size={24} className="mx-auto mb-2 text-text-tertiary" />
-      <p className="mx-auto max-w-[320px] text-sm text-text-secondary">{message}</p>
-    </div>
   );
 }

@@ -1,10 +1,10 @@
 // app/api/orders/route.ts
 //
 // Supersedes app/api/requests/route.ts. POST creates an order directly
-// against a specific, currently-verified supplier — no claim/fee-naming
+// against a specific, currently-verified supplier, no claim/fee-naming
 // step (design doc Section 0). GET lists orders scoped by role: buyers
 // see their own, suppliers see orders assigned to them, admins see
-// everything — same row-level-visibility-in-application-code posture
+// everything, same row-level-visibility-in-application-code posture
 // requests/route.ts already used (RLS is a default-deny backstop, not
 // the real gate, since this app always talks to Supabase as
 // service_role).
@@ -12,6 +12,7 @@ import { getSupabaseServerClient } from "../../../lib/supabaseServer";
 import { requireSession, requireRole } from "../../../lib/authz";
 import { toMinorUnits, MIN_ORDER_AMOUNT_MINOR, formatMoney } from "../../../lib/money";
 import { createOrder, SupplierNotCurrentlyVerifiedError, InvalidOrderAmountError } from "../../../lib/orderService";
+import { dbErrorResponse } from "../../../lib/dbErrorResponse";
 import type { OrderRow } from "../../../lib/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -51,13 +52,13 @@ export async function GET() {
     const { data: profile } = await supabase.from("supplier_profiles").select("id").eq("user_id", auth.user.id).maybeSingle();
     query = query.eq("supplier_id", profile?.id ?? -1);
   }
-  // admin: no filter — full oversight, per design doc Section G.
+  // admin: no filter, full oversight, per design doc Section G.
 
   const { data, error } = await query;
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbErrorResponse("GET orders", error);
 
   let orders = await attachJoins(supabase, (data || []) as OrderRow[]);
-  // The verification call is a private, two-party conversation — admin's
+  // The verification call is a private, two-party conversation, admin's
   // full-oversight view of every order (no row filter above) should not
   // include the real room id for orders admin isn't a party to. Buyers
   // and suppliers are already scoped to their own orders by the query
@@ -126,7 +127,9 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    const message = err instanceof Error ? err.message : "Failed to create order.";
-    return Response.json({ error: message }, { status: 500 });
+    // Not a known, clean custom error class at this point, could be a
+    // raw Postgres error bubbling up from lib/orderService.ts's `throw
+    // error` on an unexpected DB failure. Sanitize rather than trust it.
+    return dbErrorResponse("POST orders (createOrder)", err instanceof Error ? err : new Error(String(err)));
   }
 }

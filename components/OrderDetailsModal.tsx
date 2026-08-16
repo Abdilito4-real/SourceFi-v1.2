@@ -2,19 +2,19 @@
 
 // components/OrderDetailsModal.tsx
 //
-// Supersedes RequestDetailsModal.tsx + TransactionLedger.tsx — one modal
+// Supersedes RequestDetailsModal.tsx + TransactionLedger.tsx, one modal
 // that fetches the full order (GET /api/orders/[id]: order + payment
 // events + delivery proofs + disputes + rating) and renders whatever
 // action is legal next, by (role, status). Every button here calls a
-// route that's independently requireRole()-checked server-side — this
+// route that's independently requireRole()-checked server-side, this
 // component enables/disables buttons for UX only, per CLAUDE.md's rule
 // that the client never IS the authorization boundary.
 //
-// Buyer-facing copy never says USDC, Circle, or Yellow Card — see
+// Buyer-facing copy never says USDC, Circle, or Yellow Card, see
 // components/ui/StatusBadge.tsx's same rule. The buyer sees "processing
 // your payment", not the underlying rails (design doc Section 3).
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, Loader2, Clock, Star, AlertTriangle, Image as ImageIcon, Receipt, Video } from "lucide-react";
+import { CheckCircle2, Loader2, Clock, Star, AlertTriangle, Image as ImageIcon, Receipt, Video, History } from "lucide-react";
 import Modal from "./ui/Modal";
 import Button from "./ui/Button";
 import Badge from "./ui/Badge";
@@ -22,25 +22,60 @@ import StatusBadge from "./ui/StatusBadge";
 import { Label, Input, Textarea } from "./ui/Field";
 import Select from "./ui/Select";
 import Skeleton from "./ui/Skeleton";
+import ConfirmDialog from "./ui/ConfirmDialog";
+import ErrorPanel from "./ui/ErrorPanel";
+import TransactionProgress, { type TransactionStep } from "./ui/TransactionProgress";
 import JitsiMeetRoom from "./JitsiMeetRoom";
-import { formatMoney } from "../lib/money";
-import type { DeliveryProofRow, DisputeCategory, DisputeRow, OrderRow, PaymentEventRow, RatingRow, Role } from "../lib/types";
+import { formatMoney, CANCELLATION_FEE_MINOR, TYPED_CONFIRMATION_THRESHOLD_MINOR } from "../lib/money";
+import { useNetworkStatus } from "../lib/useNetworkStatus";
+import type {
+  BuyerCancellationCategory,
+  DeliveryProofRow,
+  DisputeCategory,
+  DisputeRow,
+  OrderRow,
+  OrderStatus,
+  PaymentEventRow,
+  RatingRow,
+  Role,
+  SupplierExitCategory,
+} from "../lib/types";
 
-// Post-funding, pre-approval — the window where a live call between
+const BUYER_CANCELLATION_CATEGORIES: { value: BuyerCancellationCategory; label: string }[] = [
+  { value: "changed_mind", label: "Changed my mind" },
+  { value: "found_alternative", label: "Found an alternative" },
+  { value: "no_longer_needed", label: "No longer needed" },
+  { value: "price_disagreement", label: "Price disagreement" },
+  { value: "other", label: "Other" },
+];
+
+const SUPPLIER_EXIT_CATEGORIES: { value: SupplierExitCategory; label: string }[] = [
+  { value: "cannot_fulfill", label: "Can't fulfill this order" },
+  { value: "schedule_conflict", label: "Schedule conflict" },
+  { value: "pricing_error", label: "Pricing error" },
+  { value: "other", label: "Other" },
+];
+
+// Mirrors lib/orderService.ts's WITHDRAW_PROOF_WINDOW_MS, client-side
+// copy for showing/hiding the Withdraw button and a countdown; the server
+// route is the actual enforcement.
+const WITHDRAW_PROOF_WINDOW_MS = 30 * 60 * 1000;
+
+// Post-funding, pre-approval, the window where a live call between
 // buyer and supplier actually makes sense: funds are already in escrow
 // so there's something real to verify, and approval (which fires the
 // release) hasn't happened yet. Not offered before `funded` (nothing to
-// inspect yet) or after approval (the call's whole purpose — verifying
-// before releasing — has already passed).
+// inspect yet) or after approval (the call's whole purpose, verifying
+// before releasing, has already passed).
 const LIVE_CALL_ELIGIBLE_STATUSES = new Set(["funded", "fulfilling", "proof_submitted"]);
 
-// Mirrors lib/orderService.ts's MIN_VERIFICATION_CALL_SECONDS — that
+// Mirrors lib/orderService.ts's MIN_VERIFICATION_CALL_SECONDS, that
 // server-side value is the actual enforcement (approveOrder rejects
 // early otherwise); this client-side copy is only for showing progress
 // and disabling the button before wasting a round trip. Kept in sync by
 // hand, same posture as the live-verification-check duplication between
 // app/api/suppliers/route.ts and the is_supplier_currently_verified()
-// Postgres function — no codegen linking them.
+// Postgres function, no codegen linking them.
 const MIN_VERIFICATION_CALL_SECONDS = 5 * 60;
 
 const DISPUTE_CATEGORIES: { value: DisputeCategory; label: string }[] = [
@@ -53,7 +88,7 @@ const DISPUTE_CATEGORIES: { value: DisputeCategory; label: string }[] = [
 ];
 
 // Statuses where the underlying payment/blockchain state is still
-// resolving — the modal polls while in one of these so the buyer/supplier
+// resolving, the modal polls while in one of these so the buyer/supplier
 // see the outcome without having to close and reopen it.
 const IN_FLIGHT_STATUSES = new Set([
   "payment_processing",
@@ -73,6 +108,38 @@ interface OrderDetail {
   rating: RatingRow | null;
 }
 
+/** submitted/processing progress for whichever leg (payment or release) is
+ * currently in flight, feedback-layer rule: distinguish these three
+ * states clearly, not just a bare spinner. Never returns "confirmed": once
+ * a leg actually confirms, order.status leaves IN_FLIGHT_STATUSES
+ * entirely and the terminal-state banners below (funded/escrow_released/
+ * settled) take over as that confirmation. */
+function getInFlightProgress(status: OrderStatus): { legLabel: string; step: TransactionStep } | null {
+  switch (status) {
+    case "payment_processing":
+      return { legLabel: "Payment", step: "submitted" };
+    case "converting":
+    case "escrow_depositing":
+      return { legLabel: "Payment", step: "processing" };
+    case "release_submitted":
+      return { legLabel: "Release", step: "submitted" };
+    case "release_processing":
+    case "settlement_processing":
+      return { legLabel: "Release", step: "processing" };
+    case "refund_processing":
+      return { legLabel: "Refund", step: "processing" };
+    default:
+      return null;
+  }
+}
+
+interface FinancialError {
+  title: string;
+  detail?: string;
+  fundPosition: string;
+  referenceCode?: string;
+}
+
 export interface OrderDetailsModalProps {
   orderId: number;
   role: Role;
@@ -80,14 +147,23 @@ export interface OrderDetailsModalProps {
   onClose: () => void;
   onOrderChange?: (order: OrderRow) => void;
   showNotification: (type: "success" | "error" | "info", message: string) => void;
+  /** Fired right after a successful /fund call, the "moment value is
+   * obvious" push-notification soft prompt (feedback-layer Prompt 2)
+   * hooks in here, not on page load. Buyer-side only; nothing calls this
+   * for a supplier/admin viewer. */
+  onFunded?: () => void;
 }
 
-export default function OrderDetailsModal({ orderId, role, canTransact, onClose, onOrderChange, showNotification }: OrderDetailsModalProps) {
+export default function OrderDetailsModal({ orderId, role, canTransact, onClose, onOrderChange, showNotification, onFunded }: OrderDetailsModalProps) {
   const [detail, setDetail] = useState<OrderDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
+  const [showFundConfirm, setShowFundConfirm] = useState(false);
   const [showApproveConfirm, setShowApproveConfirm] = useState(false);
+  const [fundError, setFundError] = useState<FinancialError | null>(null);
+  const [approveError, setApproveError] = useState<FinancialError | null>(null);
   const [showCall, setShowCall] = useState(false);
+  const online = useNetworkStatus();
   const [proofPhotoUrl, setProofPhotoUrl] = useState("");
   const [proofReceiptUrl, setProofReceiptUrl] = useState("");
   const [proofNotes, setProofNotes] = useState("");
@@ -99,8 +175,28 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const [showEarlyIssueForm, setShowEarlyIssueForm] = useState(false);
   const [earlyIssueCategory, setEarlyIssueCategory] = useState<DisputeCategory>("item_not_delivered");
   const [earlyIssueDescription, setEarlyIssueDescription] = useState("");
+  // Termination flows (Prompt 3).
+  const [showCancelForm, setShowCancelForm] = useState(false);
+  const [cancelCategory, setCancelCategory] = useState<BuyerCancellationCategory>("changed_mind");
+  const [cancelDescription, setCancelDescription] = useState("");
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [cancelError, setCancelError] = useState<FinancialError | null>(null);
+  const [showAbandonForm, setShowAbandonForm] = useState(false);
+  const [abandonCategory, setAbandonCategory] = useState<SupplierExitCategory>("cannot_fulfill");
+  const [abandonDescription, setAbandonDescription] = useState("");
+  const [showAbandonConfirm, setShowAbandonConfirm] = useState(false);
+  const [abandonError, setAbandonError] = useState<FinancialError | null>(null);
+  const [showRejectForm, setShowRejectForm] = useState(false);
+  const [rejectCategory, setRejectCategory] = useState<DisputeCategory>("item_not_as_described");
+  const [rejectDescription, setRejectDescription] = useState("");
+  const [rejectEvidenceUrl, setRejectEvidenceUrl] = useState("");
+  const [showRejectConfirm, setShowRejectConfirm] = useState(false);
+  const [showWithdrawConfirm, setShowWithdrawConfirm] = useState(false);
+  const [showTimeline, setShowTimeline] = useState(false);
+  const [timelineEntries, setTimelineEntries] = useState<{ type: string; timestamp: string; summary: string }[] | null>(null);
+  const [loadingTimeline, setLoadingTimeline] = useState(false);
   // When the CURRENT in-flight streak started, and a ticking clock to
-  // measure it — a bare spinner with no escalation is exactly what
+  // measure it, a bare spinner with no escalation is exactly what
   // "hung" felt like from a stuck settlement (see
   // lib/paymentBoundary.ts's fix for the actual cause). This doesn't fix
   // a real provider hanging, but it stops leaving the buyer staring at
@@ -129,7 +225,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
     load();
   }, [load]);
 
-  // Poll while an async payment step is in flight — the stub provider
+  // Poll while an async payment step is in flight, the stub provider
   // resolves in milliseconds, but a real Yellow Card/Circle integration
   // won't, so this is genuinely needed, not just cosmetic (design doc
   // Section D.5: poll is the recommended confirmation mechanism for this
@@ -144,7 +240,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
     };
   }, [detail, load]);
 
-  // Tracks how long the CURRENT in-flight status has persisted — resets
+  // Tracks how long the CURRENT in-flight status has persisted, resets
   // the moment the status actually changes (a fresh leg starting is not
   // "still stuck on the last one").
   useEffect(() => {
@@ -167,7 +263,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
 
   // Deliberately separate from runAction: reporting a completed call
   // segment shouldn't toggle the shared `acting` state (which disables
-  // unrelated buttons) or show a toast every time — it happens silently
+  // unrelated buttons) or show a toast every time, it happens silently
   // in the background as segments end, sometimes more than once per
   // session if the call drops and reconnects.
   const reportCallSegment = async (seconds: number) => {
@@ -206,6 +302,131 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
     }
   };
 
+  // Fund/approve specifically: distinct from runAction above because a
+  // failure here needs PERSISTENT on-screen state, not just a toast, "a
+  // toast that disappears while the user is scrolled elsewhere is not a
+  // receipt" applies just as much to a failure as a success. setError puts
+  // the failure into an <ErrorPanel> that stays until the user dismisses
+  // it or retries, and always states the fund position explicitly rather
+  // than leaving the buyer to assume the worst.
+  const runFinancialAction = async (
+    path: string,
+    body: unknown | undefined,
+    opts: { successMessage: string; fundPosition: string; setError: (e: FinancialError | null) => void }
+  ) => {
+    opts.setError(null);
+    setActing(true);
+    try {
+      const res = await fetch(`/api/orders/${orderId}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        opts.setError({
+          title: data.error || "That didn't go through.",
+          fundPosition: opts.fundPosition,
+          referenceCode: data.referenceCode,
+        });
+        return false;
+      }
+      if (data.alreadyInProgress) {
+        // The first attempt already moved the order forward, not a
+        // failure. Just refresh and show the real server-side status.
+        showNotification("info", "Already in progress, refreshing status.");
+        await load();
+        return true;
+      }
+      showNotification("success", opts.successMessage);
+      await load();
+      return true;
+    } catch {
+      // fetch itself threw, network drop, not a server response at all.
+      opts.setError({
+        title: "Couldn't reach the server.",
+        detail: "Check your connection and try again.",
+        fundPosition: opts.fundPosition,
+      });
+      return false;
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const loadTimeline = async () => {
+    setLoadingTimeline(true);
+    try {
+      const res = await fetch(`/api/orders/${orderId}/timeline`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load timeline.");
+      setTimelineEntries(data.timeline ?? []);
+    } catch (err) {
+      showNotification("error", err instanceof Error ? err.message : "Failed to load timeline.");
+    } finally {
+      setLoadingTimeline(false);
+    }
+  };
+
+  // Cancel (flows 1 & 4), one route, server picks the right consequence
+  // by current status. Client mirrors that split only for copy/typed-
+  // confirmation purposes; the server is the actual authority.
+  const runCancel = async () => {
+    const isFundedCancel = detail?.order.status === "funded" || detail?.order.status === "fulfilling";
+    const ok = await runFinancialAction("/cancel", { category: cancelCategory, description: cancelDescription.trim() || null }, {
+      successMessage: "Order cancelled.",
+      fundPosition: isFundedCancel ? "Your refund is being processed." : "No money has left your account.",
+      setError: setCancelError,
+    });
+    setShowCancelConfirm(false);
+    if (ok) {
+      setShowCancelForm(false);
+      setCancelDescription("");
+    }
+  };
+
+  // Abandon (flow 6), supplier-side, always a full refund.
+  const runAbandon = async () => {
+    const ok = await runFinancialAction("/abandon", { category: abandonCategory, description: abandonDescription.trim() || null }, {
+      successMessage: "Order cancelled. The buyer will be refunded in full.",
+      fundPosition: "The buyer's funds are still in escrow and will be refunded.",
+      setError: setAbandonError,
+    });
+    setShowAbandonConfirm(false);
+    if (ok) {
+      setShowAbandonForm(false);
+      setAbandonDescription("");
+    }
+  };
+
+  // Reject (flow 3, reinstated), freezes funds, opens a dispute. Not a
+  // financial action in the runFinancialAction sense (nothing settles
+  // here), so it reuses the plain runAction path like the other
+  // dispute-opening flows in this file.
+  const runReject = async () => {
+    const ok = await runAction(
+      "/reject",
+      {
+        category: rejectCategory,
+        description: rejectDescription.trim() || null,
+        evidenceUrls: rejectEvidenceUrl.trim() ? [rejectEvidenceUrl.trim()] : [],
+      },
+      "Delivery proof rejected. This order is now under dispute review."
+    );
+    setShowRejectConfirm(false);
+    if (ok) {
+      setShowRejectForm(false);
+      setRejectDescription("");
+      setRejectEvidenceUrl("");
+    }
+  };
+
+  const runWithdrawProof = async () => {
+    const ok = await runAction("/withdraw-proof", undefined, "Delivery proof withdrawn. You can resubmit.");
+    setShowWithdrawConfirm(false);
+    return ok;
+  };
+
   if (loading || !detail) {
     return (
       <Modal open onClose={onClose} size="lg">
@@ -227,9 +448,12 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const listingUnit = order.listing_unit ?? null;
   const verificationCallSeconds = order.verification_call_seconds ?? 0;
   const callRequirementMet = verificationCallSeconds >= MIN_VERIFICATION_CALL_SECONDS;
+  const inFlightProgress = getInFlightProgress(order.status);
+  const needsTypedConfirm = order.amount_minor >= TYPED_CONFIRMATION_THRESHOLD_MINOR;
+  const formattedAmount = formatMoney(order.amount_minor, "NGN");
 
   return (
-    <Modal open onClose={onClose} size="lg" className="max-h-[90vh] overflow-y-auto">
+    <Modal open onClose={onClose} size="lg" className="max-h-[90vh] overflow-y-auto" dismissible={!acting}>
       <div className="mb-1 flex items-start justify-between gap-3">
         <div>
           <div className="font-mono text-xs tracking-wide text-accent-text">{order.order_code}</div>
@@ -265,13 +489,13 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
 
       {order.description && <p className="mt-4 text-sm leading-relaxed text-text-secondary">{order.description}</p>}
 
-      {/* In-flight processing states — no jargon, just "this is happening".
-          Escalates past a plain spinner once it's run long enough that
-          "still normal" starts to look like "actually stuck" — a bare
-          indefinite spinner with no signal either way is exactly what
-          produced the "did this hang?" confusion. */}
+      {/* In-flight state: no jargon, just "this is happening". Escalates
+          past a plain spinner once it's run long enough to look stuck. */}
       {IN_FLIGHT_STATUSES.has(order.status) && (
-        <div className="mt-5 flex flex-col gap-2.5 rounded-lg border border-border bg-accent-soft px-4 py-3 text-sm text-accent-text">
+        <div className="mt-5 flex flex-col gap-3 rounded-lg border border-border bg-accent-soft px-4 py-3 text-sm text-accent-text">
+          {inFlightProgress && (
+            <TransactionProgress state={inFlightProgress.step} labels={{ submitted: `${inFlightProgress.legLabel} submitted` }} />
+          )}
           <div className="flex items-center gap-2.5">
             <Loader2 size={15} className="spin-icon shrink-0" />
             {order.status === "payment_processing" || order.status === "converting" || order.status === "escrow_depositing"
@@ -283,8 +507,8 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
           {isTakingLong && (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning bg-warning-soft px-3 py-2 text-xs text-warning-text">
               <span>
-                This is taking longer than usual ({inFlightElapsedSeconds}s) — it can still complete normally, but if it
-                doesn't resolve soon, that's worth flagging rather than waiting indefinitely.
+                This is taking longer than usual ({inFlightElapsedSeconds}s). It can still complete normally, but
+                flag it if it doesn't resolve soon.
               </span>
               <Button size="sm" variant="secondary" onClick={load}>
                 Check again
@@ -294,17 +518,126 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
         </div>
       )}
 
-      {/* Buyer: fund order */}
+      {/* Buyer: fund order. Irreversible, so this needs a confirmation
+          step, not a single tap; above the threshold it needs the
+          amount typed back too. */}
       {isBuyer && (order.status === "pending_payment" || order.status === "payment_failed") && (
         <div className="mt-5">
           {order.status === "payment_failed" && (
             <div className="mb-3 flex items-center gap-2 rounded-lg border border-danger bg-danger-soft px-3 py-2 text-xs text-danger-text">
-              <AlertTriangle size={14} /> Your last payment attempt didn't go through. You can try again.
+              <AlertTriangle size={14} /> Your last payment attempt didn't go through. No money has left your account, you can try again.
             </div>
           )}
-          <Button fullWidth loading={acting} onClick={() => runAction("/fund", undefined, "Payment started.")}>
-            Fund order — {formatMoney(order.amount_minor, "NGN")}
+          {fundError && (
+            <div className="mb-3">
+              <ErrorPanel
+                title={fundError.title}
+                detail={fundError.detail}
+                fundPosition={fundError.fundPosition}
+                referenceCode={fundError.referenceCode}
+                retrying={acting}
+                onRetry={() =>
+                  runFinancialAction("/fund", undefined, {
+                    successMessage: "Payment started.",
+                    fundPosition: "No money has left your account.",
+                    setError: setFundError,
+                  })
+                }
+                onDismiss={() => setFundError(null)}
+              />
+            </div>
+          )}
+          {!online && (
+            <div className="mb-3 flex items-center gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2 text-xs text-warning-text">
+              <AlertTriangle size={14} /> You&rsquo;re offline. Funding escrow needs a connection. Reconnect and try again.
+            </div>
+          )}
+          <Button fullWidth disabled={!online} onClick={() => setShowFundConfirm(true)}>
+            Fund order: {formattedAmount}
           </Button>
+          <ConfirmDialog
+            open={showFundConfirm}
+            title="Confirm payment"
+            body={
+              <>
+                You&rsquo;re about to pay <strong>{formattedAmount}</strong> for this order. The funds move into escrow
+                and are held there. Your supplier is only paid once you approve the delivery. This starts a real
+                payment; make sure the amount and supplier are right before confirming.
+                <p className="mt-2 text-xs text-text-tertiary">
+                  Cancellation policy: cancelling before your supplier submits proof refunds everything except a{" "}
+                  {formatMoney(CANCELLATION_FEE_MINOR, "NGN")} fee. Cancelling now, before funding, is always free.
+                </p>
+              </>
+            }
+            confirmLabel={`Yes, pay ${formattedAmount}`}
+            loading={acting}
+            requireTypedConfirmation={needsTypedConfirm ? formattedAmount : undefined}
+            onConfirm={async () => {
+              // Close either way, success or failure: on failure the
+              // persistent ErrorPanel above needs to be visible (it's
+              // hidden behind this dialog while open), and its own Retry
+              // button re-runs the same action without asking the user to
+              // re-confirm intent they already gave once.
+              const ok = await runFinancialAction("/fund", undefined, {
+                successMessage: "Payment started.",
+                fundPosition: "No money has left your account.",
+                setError: setFundError,
+              });
+              setShowFundConfirm(false);
+              if (ok) onFunded?.();
+            }}
+            onCancel={() => setShowFundConfirm(false)}
+          />
+
+          {/* Flow 1: cancel before funding, free, no dispute. */}
+          {!showCancelForm ? (
+            <button type="button" onClick={() => setShowCancelForm(true)} className="mt-3 text-xs font-semibold text-text-secondary underline hover:text-text-primary">
+              Cancel this order instead
+            </button>
+          ) : (
+            <div className="mt-3 flex flex-col gap-3 rounded-xl border border-border bg-surface-sunken p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">Cancel order</div>
+              <Select value={cancelCategory} onChange={(e) => setCancelCategory(e.target.value as BuyerCancellationCategory)}>
+                {BUYER_CANCELLATION_CATEGORIES.map((c) => (
+                  <option key={c.value} value={c.value}>
+                    {c.label}
+                  </option>
+                ))}
+              </Select>
+              <Textarea value={cancelDescription} onChange={(e) => setCancelDescription(e.target.value)} placeholder="Optional: anything else we should know?" />
+              <div className="flex gap-2">
+                <Button variant="danger" onClick={() => setShowCancelConfirm(true)}>
+                  Cancel order
+                </Button>
+                <Button variant="ghost" onClick={() => setShowCancelForm(false)}>
+                  Never mind
+                </Button>
+              </div>
+            </div>
+          )}
+          {cancelError && (
+            <div className="mt-3">
+              <ErrorPanel
+                title={cancelError.title}
+                detail={cancelError.detail}
+                fundPosition={cancelError.fundPosition}
+                referenceCode={cancelError.referenceCode}
+                retrying={acting}
+                onRetry={runCancel}
+                onDismiss={() => setCancelError(null)}
+              />
+            </div>
+          )}
+          <ConfirmDialog
+            open={showCancelConfirm}
+            tone="danger"
+            title="Confirm cancellation"
+            body={<>You&rsquo;re about to cancel this order. No payment has been made yet, so nothing is charged and nothing needs to be refunded.</>}
+            confirmLabel="Yes, cancel order"
+            loading={acting}
+            onConfirm={runCancel}
+            onCancel={() => setShowCancelConfirm(false)}
+          />
         </div>
       )}
 
@@ -337,15 +670,69 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
           >
             Submit proof
           </Button>
+
+          {/* Flow 6: supplier exits before proof. Full refund, no fee,
+              recorded as a strike (2nd within 90 days blocks new orders). */}
+          {!showAbandonForm ? (
+            <button type="button" onClick={() => setShowAbandonForm(true)} className="self-start text-xs font-semibold text-danger-text underline">
+              Can&rsquo;t fulfill this order?
+            </button>
+          ) : (
+            <div className="flex flex-col gap-3 rounded-xl border border-danger bg-danger-soft p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-danger-text">Cancel this order</div>
+              <Select value={abandonCategory} onChange={(e) => setAbandonCategory(e.target.value as SupplierExitCategory)}>
+                {SUPPLIER_EXIT_CATEGORIES.map((c) => (
+                  <option key={c.value} value={c.value}>
+                    {c.label}
+                  </option>
+                ))}
+              </Select>
+              <Textarea value={abandonDescription} onChange={(e) => setAbandonDescription(e.target.value)} placeholder="Optional: anything else we should know?" />
+              <div className="flex gap-2">
+                <Button variant="danger" onClick={() => setShowAbandonConfirm(true)}>
+                  Cancel order
+                </Button>
+                <Button variant="ghost" onClick={() => setShowAbandonForm(false)}>
+                  Never mind
+                </Button>
+              </div>
+            </div>
+          )}
+          {abandonError && (
+            <ErrorPanel
+              title={abandonError.title}
+              detail={abandonError.detail}
+              fundPosition={abandonError.fundPosition}
+              referenceCode={abandonError.referenceCode}
+              retrying={acting}
+              onRetry={runAbandon}
+              onDismiss={() => setAbandonError(null)}
+            />
+          )}
+          <ConfirmDialog
+            open={showAbandonConfirm}
+            tone="danger"
+            title="Confirm cancellation"
+            body={
+              <>
+                You&rsquo;re about to cancel this order. The buyer will be refunded the full{" "}
+                <strong>{formattedAmount}</strong>, no fee, since this wasn&rsquo;t their choice. This will be recorded
+                against your account; repeated cancellations can temporarily block you from new orders.
+              </>
+            }
+            confirmLabel="Yes, cancel order"
+            loading={acting}
+            onConfirm={runAbandon}
+            onCancel={() => setShowAbandonConfirm(false)}
+          />
         </div>
       )}
       {isSupplier && order.status !== "funded" && order.status !== "fulfilling" && order.status !== "pending_payment" && !proof && (
         <div className="mt-5 text-sm text-text-secondary">Waiting on the buyer to fund this order before you can begin.</div>
       )}
 
-      {/* Buyer: waiting on fulfillment — with an out if something's
-          already wrong before any proof has even been submitted (design
-          doc's "rare, allowed" funded/fulfilling -> disputed edge). */}
+      {/* Buyer: waiting on fulfillment, with an out if something's
+          already wrong before proof is submitted. */}
       {isBuyer && (order.status === "funded" || order.status === "fulfilling") && (
         <div className="mt-5">
           <div className="rounded-xl border border-border bg-surface-sunken p-4 text-sm text-text-secondary">
@@ -353,7 +740,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
           </div>
           {!showEarlyIssueForm ? (
             <button type="button" onClick={() => setShowEarlyIssueForm(true)} className="mt-3 text-xs font-semibold text-danger-text underline">
-              Something's already wrong — report it now
+              Something's already wrong, report it now
             </button>
           ) : (
             <div className="mt-3 flex flex-col gap-3 rounded-xl border border-danger bg-danger-soft p-4">
@@ -375,7 +762,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
                     runAction(
                       "/report-early-issue",
                       { category: earlyIssueCategory, description: earlyIssueDescription },
-                      "Reported — this order is now under review."
+                      "Reported. This order is now under review."
                     )
                   }
                 >
@@ -387,6 +774,69 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
               </div>
             </div>
           )}
+
+          {/* Flow 4: a clean exit, no fault alleged, skips the dispute
+              path. Refund minus the disclosed CANCELLATION_FEE_MINOR. */}
+          {!showCancelForm ? (
+            <button type="button" onClick={() => setShowCancelForm(true)} className="mt-3 text-xs font-semibold text-text-secondary underline hover:text-text-primary">
+              Cancel this order
+            </button>
+          ) : (
+            <div className="mt-3 flex flex-col gap-3 rounded-xl border border-border bg-surface-sunken p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">Cancel order</div>
+              <p className="text-xs text-text-secondary">
+                You&rsquo;ll be refunded {formatMoney(order.amount_minor - CANCELLATION_FEE_MINOR, "NGN")} of your{" "}
+                {formattedAmount} payment. A {formatMoney(CANCELLATION_FEE_MINOR, "NGN")} fee applies once an order is
+                funded, disclosed before you paid.
+              </p>
+              <Select value={cancelCategory} onChange={(e) => setCancelCategory(e.target.value as BuyerCancellationCategory)}>
+                {BUYER_CANCELLATION_CATEGORIES.map((c) => (
+                  <option key={c.value} value={c.value}>
+                    {c.label}
+                  </option>
+                ))}
+              </Select>
+              <Textarea value={cancelDescription} onChange={(e) => setCancelDescription(e.target.value)} placeholder="Optional: anything else we should know?" />
+              <div className="flex gap-2">
+                <Button variant="danger" onClick={() => setShowCancelConfirm(true)}>
+                  Cancel order
+                </Button>
+                <Button variant="ghost" onClick={() => setShowCancelForm(false)}>
+                  Never mind
+                </Button>
+              </div>
+            </div>
+          )}
+          {cancelError && (
+            <div className="mt-3">
+              <ErrorPanel
+                title={cancelError.title}
+                detail={cancelError.detail}
+                fundPosition={cancelError.fundPosition}
+                referenceCode={cancelError.referenceCode}
+                retrying={acting}
+                onRetry={runCancel}
+                onDismiss={() => setCancelError(null)}
+              />
+            </div>
+          )}
+          <ConfirmDialog
+            open={showCancelConfirm}
+            tone="danger"
+            title="Confirm cancellation"
+            body={
+              <>
+                You&rsquo;re about to cancel this order. <strong>{formatMoney(order.amount_minor - CANCELLATION_FEE_MINOR, "NGN")}</strong> will
+                be refunded to you; <strong>{formatMoney(CANCELLATION_FEE_MINOR, "NGN")}</strong> is retained as the
+                disclosed cancellation fee. This can&rsquo;t be undone.
+              </>
+            }
+            confirmLabel="Yes, cancel order"
+            loading={acting}
+            requireTypedConfirmation={needsTypedConfirm ? formattedAmount : undefined}
+            onConfirm={runCancel}
+            onCancel={() => setShowCancelConfirm(false)}
+          />
         </div>
       )}
 
@@ -407,14 +857,33 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
             )}
           </div>
           {proof.notes && <p className="mt-2 text-sm leading-relaxed text-text-secondary">{proof.notes}</p>}
+
+          {/* Flow 7: supplier can withdraw within a short window to fix a
+              mistake before the buyer reviews it. No fund movement.
+              Window enforced server-side; this just hides the option
+              once it's closed. */}
+          {isSupplier && order.status === "proof_submitted" && Date.now() - new Date(proof.submitted_at).getTime() < WITHDRAW_PROOF_WINDOW_MS && (
+            <div className="mt-3 border-t border-border pt-3">
+              <button type="button" onClick={() => setShowWithdrawConfirm(true)} className="text-xs font-semibold text-text-secondary underline hover:text-text-primary">
+                Made a mistake? Withdraw and resubmit
+              </button>
+              <ConfirmDialog
+                open={showWithdrawConfirm}
+                title="Withdraw delivery proof?"
+                body={<>You&rsquo;ll be able to resubmit right away. No funds are affected either way.</>}
+                confirmLabel="Yes, withdraw"
+                loading={acting}
+                onConfirm={runWithdrawProof}
+                onCancel={() => setShowWithdrawConfirm(false)}
+              />
+            </div>
+          )}
         </div>
       )}
 
-      {/* Live verification call — both buyer and supplier can join the
-          same room to walk through the delivery together in real time
-          before the buyer decides whether to approve. Not embedded by
-          default (costs bandwidth/load time — metered mobile data is a
-          real constraint here), only once someone actually asks for it. */}
+      {/* Live verification call, buyer and supplier can join the same
+          room before the buyer approves. Not embedded by default,
+          metered mobile data is a real constraint, loads on request. */}
       {(isBuyer || isSupplier) && LIVE_CALL_ELIGIBLE_STATUSES.has(order.status) && (
         <div className="mt-5">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -425,7 +894,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
             )}
             <span className={`text-xs font-semibold ${callRequirementMet ? "text-success-text" : "text-text-secondary"}`}>
               {callRequirementMet
-                ? `✓ ${Math.floor(verificationCallSeconds / 60)}:${(verificationCallSeconds % 60).toString().padStart(2, "0")} verified — requirement met`
+                ? `✓ ${Math.floor(verificationCallSeconds / 60)}:${(verificationCallSeconds % 60).toString().padStart(2, "0")} verified, requirement met`
                 : `${Math.floor(verificationCallSeconds / 60)}:${(verificationCallSeconds % 60).toString().padStart(2, "0")} / 5:00 verified`}
             </span>
           </div>
@@ -433,7 +902,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
             <div>
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
-                  Live call — share this order with your {isBuyer ? "supplier" : "buyer"} to meet here
+                  Live call: share this order with your {isBuyer ? "supplier" : "buyer"} to meet here
                 </span>
                 <button type="button" onClick={() => setShowCall(false)} className="text-xs font-semibold text-text-secondary underline hover:text-text-primary">
                   Hide
@@ -455,26 +924,18 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
         </div>
       )}
 
-      {/* Buyer: accept delivery — the only action here now (Reject was
-          removed per explicit product direction; a buyer with a problem
-          uses "Something's already wrong" above or a post-settlement
-          report instead of a separate reject-with-reason flow). Suspended
-          until the verification call requirement clears, and still two
-          steps once it does — releasing funds is irreversible once the
-          transfer confirms, so a single click isn't enough. (The confirm
-          step is a review/confirmation step, not a new authentication
-          factor — the actual authorization boundary is still the existing
-          session check on the /approve route itself, same as every other
-          action here; the call requirement itself IS enforced server-side,
-          see lib/orderService.ts's approveOrder.) */}
+      {/* Buyer: accept or reject delivery. Accept stays disabled until the
+          verification call requirement is met (enforced server-side in
+          orderService.ts's approveOrder). Releasing funds is irreversible,
+          so it also needs an explicit confirm step. */}
       {isBuyer && order.status === "proof_submitted" && (
         <div className="mt-5">
-          {!callRequirementMet && !showApproveConfirm && (
+          {!callRequirementMet && (
             <div className="mb-3 flex items-start gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2.5 text-xs text-warning-text">
               <Video size={14} className="mt-0.5 shrink-0" />
               <span>
                 Accepting delivery is suspended until you complete a live verification call of at least 5 minutes with your
-                supplier —{" "}
+                supplier:{" "}
                 <strong>
                   {Math.floor(verificationCallSeconds / 60)}:{(verificationCallSeconds % 60).toString().padStart(2, "0")} / 5:00
                 </strong>{" "}
@@ -482,34 +943,108 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
               </span>
             </div>
           )}
-          {showApproveConfirm ? (
-            <div className="flex flex-col gap-3 rounded-xl border border-accent bg-accent-soft p-4">
-              <div className="text-xs font-semibold uppercase tracking-wide text-accent-text">Confirm release</div>
-              <p className="text-sm leading-relaxed text-text-primary">
-                You're about to release <strong>{formatMoney(order.amount_minor, "NGN")}</strong> to{" "}
-                <strong>{order.supplier_business_name || "this supplier"}</strong>. This can't be undone once the transfer
-                confirms — only continue if you've reviewed the delivery proof above and you're satisfied.
+          {approveError && (
+            <div className="mb-3">
+              <ErrorPanel
+                title={approveError.title}
+                detail={approveError.detail}
+                fundPosition={approveError.fundPosition}
+                referenceCode={approveError.referenceCode}
+                retrying={acting}
+                onRetry={() =>
+                  runFinancialAction("/approve", undefined, {
+                    successMessage: "Order accepted. Releasing funds to your supplier.",
+                    fundPosition: "Your funds are still held in escrow, nothing has been released.",
+                    setError: setApproveError,
+                  })
+                }
+                onDismiss={() => setApproveError(null)}
+              />
+            </div>
+          )}
+          {!online && (
+            <div className="mb-3 flex items-center gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2 text-xs text-warning-text">
+              <AlertTriangle size={14} /> You&rsquo;re offline. Releasing funds needs a connection. Reconnect and try again.
+            </div>
+          )}
+          <span title={callRequirementMet ? undefined : "Complete the 5-minute verification call above first."}>
+            <Button fullWidth disabled={!callRequirementMet || !online} onClick={() => setShowApproveConfirm(true)}>
+              <CheckCircle2 size={15} /> Accept delivery
+            </Button>
+          </span>
+          <ConfirmDialog
+            open={showApproveConfirm}
+            tone="danger"
+            title="Confirm release"
+            body={
+              <>
+                You&rsquo;re about to release <strong>{formattedAmount}</strong> to{" "}
+                <strong>{order.supplier_business_name || "this supplier"}</strong>. This can&rsquo;t be undone once the
+                transfer confirms. Only continue if you&rsquo;ve reviewed the delivery proof above and you&rsquo;re
+                satisfied.
+              </>
+            }
+            confirmLabel={`Yes, release ${formattedAmount}`}
+            loading={acting}
+            requireTypedConfirmation={needsTypedConfirm ? formattedAmount : undefined}
+            onConfirm={async () => {
+              await runFinancialAction("/approve", undefined, {
+                successMessage: "Order accepted. Releasing funds to your supplier.",
+                fundPosition: "Your funds are still held in escrow, nothing has been released.",
+                setError: setApproveError,
+              });
+              setShowApproveConfirm(false);
+            }}
+            onCancel={() => setShowApproveConfirm(false)}
+          />
+
+          {!showRejectForm ? (
+            <button type="button" onClick={() => setShowRejectForm(true)} className="mt-3 text-xs font-semibold text-danger-text underline">
+              Something's wrong with this delivery
+            </button>
+          ) : (
+            <div className="mt-3 flex flex-col gap-3 rounded-xl border border-danger bg-danger-soft p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-danger-text">Reject delivery</div>
+              <p className="text-xs leading-relaxed text-danger-text">
+                This freezes the funds and opens a dispute. Nothing releases to your supplier until an admin reviews it.
               </p>
+              <Select value={rejectCategory} onChange={(e) => setRejectCategory(e.target.value as DisputeCategory)}>
+                {DISPUTE_CATEGORIES.map((c) => (
+                  <option key={c.value} value={c.value}>
+                    {c.label}
+                  </option>
+                ))}
+              </Select>
+              <Textarea value={rejectDescription} onChange={(e) => setRejectDescription(e.target.value)} placeholder="What's wrong?" required />
+              <div>
+                <Label htmlFor="reject-evidence">Supporting evidence (photo/document URL)</Label>
+                <Input id="reject-evidence" placeholder="https://…" value={rejectEvidenceUrl} onChange={(e) => setRejectEvidenceUrl(e.target.value)} />
+              </div>
               <div className="flex gap-2">
-                <Button
-                  variant="danger"
-                  loading={acting}
-                  onClick={() => runAction("/approve", undefined, "Order accepted — releasing funds to your supplier.")}
-                >
-                  <CheckCircle2 size={15} /> Yes, release {formatMoney(order.amount_minor, "NGN")}
+                <Button variant="danger" disabled={!rejectDescription.trim()} onClick={() => setShowRejectConfirm(true)}>
+                  Reject delivery
                 </Button>
-                <Button variant="ghost" disabled={acting} onClick={() => setShowApproveConfirm(false)}>
+                <Button variant="ghost" disabled={acting} onClick={() => setShowRejectForm(false)}>
                   Cancel
                 </Button>
               </div>
             </div>
-          ) : (
-            <span title={callRequirementMet ? undefined : "Complete the 5-minute verification call above first."}>
-              <Button fullWidth disabled={!callRequirementMet} onClick={() => setShowApproveConfirm(true)}>
-                <CheckCircle2 size={15} /> Accept delivery
-              </Button>
-            </span>
           )}
+          <ConfirmDialog
+            open={showRejectConfirm}
+            tone="danger"
+            title="Confirm rejection"
+            body={
+              <>
+                Rejecting freezes <strong>{formattedAmount}</strong> in escrow and opens a dispute. Neither you nor your
+                supplier can move these funds until an admin reviews it. This can&rsquo;t be undone once submitted.
+              </>
+            }
+            confirmLabel="Yes, reject delivery"
+            loading={acting}
+            onConfirm={runReject}
+            onCancel={() => setShowRejectConfirm(false)}
+          />
         </div>
       )}
 
@@ -517,7 +1052,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
       {activeDispute && (
         <div className="mt-5 rounded-xl border border-danger bg-danger-soft p-4">
           <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-danger-text">
-            <Clock size={13} /> {activeDispute.dispute_type === "post_settlement_report" ? "Issue reported — under review" : "Under dispute review"}
+            <Clock size={13} /> {activeDispute.dispute_type === "post_settlement_report" ? "Issue reported, under review" : "Under dispute review"}
           </div>
           <p className="text-sm text-text-secondary">{activeDispute.description}</p>
           <p className="mt-2 text-xs text-text-tertiary">
@@ -535,7 +1070,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
       {order.status === "settled" && (
         <div className="mt-5 flex flex-col gap-4">
           <div className="flex items-center gap-2 rounded-lg border border-success bg-success-soft px-4 py-3 text-sm text-success-text">
-            <CheckCircle2 size={15} /> Order complete — supplier has been paid.
+            <CheckCircle2 size={15} /> Order complete, supplier has been paid.
           </div>
 
           {isBuyer && !rating && (
@@ -559,9 +1094,9 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
           )}
           {isBuyer && rating && (
             <div className="rounded-xl border border-border p-4 text-sm text-text-secondary">
-              You rated this supplier {rating.score}/5{rating.comment ? ` — "${rating.comment}"` : ""}.
+              You rated this supplier {rating.score}/5{rating.comment ? `: "${rating.comment}"` : ""}.
               {!rating.on_chain_confirmed_at && (
-                <span className="mt-1 block text-xs text-text-tertiary">Recorded — awaiting on-chain confirmation.</span>
+                <span className="mt-1 block text-xs text-text-tertiary">Recorded, awaiting on-chain confirmation.</span>
               )}
             </div>
           )}
@@ -575,7 +1110,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
               ) : (
                 <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface-sunken p-4">
                   <div className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
-                    Report an issue — this order stays complete; an admin reviews separately.
+                    Report an issue. This order stays complete; an admin reviews separately.
                   </div>
                   <Select value={issueCategory} onChange={(e) => setIssueCategory(e.target.value as DisputeCategory)}>
                     {DISPUTE_CATEGORIES.map((c) => (
@@ -614,6 +1149,44 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
       )}
       {order.status === "cancelled" && <div className="mt-5 text-sm text-text-secondary">This order was cancelled.</div>}
       {order.status === "expired" && <div className="mt-5 text-sm text-text-secondary">This order expired.</div>}
+
+      {/* Timeline: every transition, always available, any status, both
+          roles. Fetched lazily since most views don't need it. */}
+      <div className="mt-6 border-t border-border pt-4">
+        <button
+          type="button"
+          onClick={() => {
+            setShowTimeline((v) => !v);
+            if (!showTimeline && timelineEntries === null) loadTimeline();
+          }}
+          className="flex items-center gap-1.5 text-xs font-semibold text-text-secondary hover:text-text-primary"
+        >
+          <History size={13} /> {showTimeline ? "Hide" : "View"} order history
+        </button>
+        {showTimeline && (
+          <div className="mt-3">
+            {loadingTimeline ? (
+              <div className="flex flex-col gap-2">
+                <Skeleton className="h-4 w-2/3" />
+                <Skeleton className="h-4 w-1/2" />
+                <Skeleton className="h-4 w-3/4" />
+              </div>
+            ) : timelineEntries && timelineEntries.length > 0 ? (
+              <ol className="flex flex-col gap-2 border-l border-border pl-4">
+                {timelineEntries.map((entry, i) => (
+                  <li key={i} className="text-xs text-text-secondary">
+                    <span className="font-mono text-[10px] text-text-tertiary">{new Date(entry.timestamp).toLocaleString()}</span>
+                    <br />
+                    {entry.summary}
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="text-xs text-text-tertiary">No history yet.</p>
+            )}
+          </div>
+        )}
+      </div>
     </Modal>
   );
 }

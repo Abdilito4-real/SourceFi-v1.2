@@ -1,11 +1,11 @@
 // app/api/orders/[id]/rating/route.ts
 //
-// Buyer rates a settled order — 1-5, optional comment (design doc
+// Buyer rates a settled order, 1-5, optional comment (design doc
 // Section 6). Only usable once, only after settlement. The rating is
 // written to the DB immediately (as a cache) but on_chain_confirmed_at
 // stays null until the payment layer's on-chain write actually confirms
-// — with StubPaymentProvider that's forever, on purpose (Open Question
-// 10 — no real contract decided yet), so this rating won't count toward
+//, with StubPaymentProvider that's forever, on purpose (Open Question
+// 10, no real contract decided yet), so this rating won't count toward
 // the supplier's public aggregate until a real integration exists.
 import { getSupabaseServerClient } from "../../../../../lib/supabaseServer";
 import { requireRole } from "../../../../../lib/authz";

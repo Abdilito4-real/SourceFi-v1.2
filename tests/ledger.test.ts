@@ -3,7 +3,7 @@
 // The pack's explicit requirement: "the fundamental invariant should be
 // for every ledger transaction, total debits must equal total credits...
 // include tests that verify this invariant." This file does that at two
-// levels — assertBalanced() directly (pure logic, every scenario in the
+// levels, assertBalanced() directly (pure logic, every scenario in the
 // design doc's Section I test plan), and writeLedgerTransaction() against
 // a mocked Supabase client (proves the unbalanced case never reaches the
 // database at all, and the balanced case sends exactly the rows it
@@ -16,6 +16,7 @@ import {
   recordEscrowRelease,
   recordSettlement,
   recordRefundFromEscrow,
+  recordPartialRefundWithFee,
   UnbalancedLedgerTransactionError,
   type LedgerLeg,
 } from "../lib/ledger";
@@ -40,7 +41,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("assertBalanced — the fundamental invariant", () => {
+describe("assertBalanced: the fundamental invariant", () => {
   it("accepts a simple balanced single-currency transaction", () => {
     const legs: LedgerLeg[] = [
       { account: "ESCROW_WALLET_USDC", direction: "debit", amountMinor: 10000, currency: "USDC" },
@@ -87,7 +88,7 @@ describe("assertBalanced — the fundamental invariant", () => {
   });
 });
 
-describe("writeLedgerTransaction — the DB call never happens for unbalanced input", () => {
+describe("writeLedgerTransaction: the DB call never happens for unbalanced input", () => {
   it("throws before calling supabase.from().insert() at all", async () => {
     const { client, insertedRows } = mockSupabaseInsert();
     const legs: LedgerLeg[] = [{ account: "ESCROW_WALLET_USDC", direction: "debit", amountMinor: 100, currency: "USDC" }];
@@ -112,7 +113,7 @@ describe("writeLedgerTransaction — the DB call never happens for unbalanced in
   });
 });
 
-describe("the four order-lifecycle ledger events — each balances on its own", () => {
+describe("the four order-lifecycle ledger events: each balances on its own", () => {
   it("recordFundingConfirmed balances NGN-in against USDC-into-escrow", async () => {
     const { client, insertedRows } = mockSupabaseInsert();
     await recordFundingConfirmed(client, 1, 500000, 32000);
@@ -160,7 +161,7 @@ describe("the four order-lifecycle ledger events — each balances on its own", 
     // hold regardless of fee/spread (see the two tests below for that):
     // every NGN/USDC unit that entered escrow/FX_CLEARING also left it.
     // With a nonzero fee, FX_CLEARING:NGN is EXPECTED to carry a residual
-    // (the fee's un-off-ramped NGN-equivalent) — see recordSettlement's
+    // (the fee's un-off-ramped NGN-equivalent), see recordSettlement's
     // doc comment in lib/ledger.ts. That's not tested here to keep this
     // test's expectations unambiguous; it's covered by the next test.
     const { client, insertedRows } = mockSupabaseInsert();
@@ -179,7 +180,7 @@ describe("the four order-lifecycle ledger events — each balances on its own", 
     // These two hold unconditionally, by construction: recordEscrowRelease
     // always credits ESCROW_WALLET_USDC by exactly
     // (supplierAmount + platformFee), matching what recordFundingConfirmed
-    // debited into it — the fee doesn't change that. Same for
+    // debited into it, the fee doesn't change that. Same for
     // SUPPLIER_PAYABLE: release debits it, settlement credits it back by
     // the same amount.
     const { client, insertedRows } = mockSupabaseInsert();
@@ -192,7 +193,7 @@ describe("the four order-lifecycle ledger events — each balances on its own", 
     expect(byAccount.get("SUPPLIER_PAYABLE:USDC")).toBe(0);
     // The documented exception: FX_CLEARING:NGN carries the fee's
     // NGN-equivalent as a residual (500000 funded in, only 470000 paid
-    // back out via settlement — the other 20000 corresponds to the
+    // back out via settlement, the other 20000 corresponds to the
     // 2000 USDC fee never converted back to NGN).
     expect(byAccount.get("FX_CLEARING:NGN")).toBe(30000);
   });
@@ -210,8 +211,56 @@ describe("the four order-lifecycle ledger events — each balances on its own", 
   });
 });
 
+describe("recordPartialRefundWithFee: Prompt 3's new ledger shape (buyer cancels a funded order, fee retained)", () => {
+  it("balances on its own: fee leg plus refund leg together", async () => {
+    const { client, insertedRows } = mockSupabaseInsert();
+    // Order funded 500000 NGN / 32000 USDC; fee retains 2000 NGN-equivalent
+    // (~128 USDC at the same rate), refund is the remainder.
+    await recordPartialRefundWithFee(client, 1, 498000, 31872, 128);
+    const rows = insertedRows[0] as Array<Record<string, unknown>>;
+    const ngn = rows.filter((r) => r.currency === "NGN");
+    const usdc = rows.filter((r) => r.currency === "USDC");
+    expect(sum(ngn, "debit")).toBe(sum(ngn, "credit"));
+    expect(sum(usdc, "debit")).toBe(sum(usdc, "credit"));
+  });
+
+  it("credits ESCROW_WALLET_USDC for exactly refund+fee: the same total recordFundingConfirmed originally debited into it", async () => {
+    const { client, insertedRows } = mockSupabaseInsert();
+    await recordFundingConfirmed(client, 1, 500000, 32000);
+    await recordPartialRefundWithFee(client, 1, 498000, 31872, 128);
+
+    const byAccount = netByAccount(insertedRows);
+    // recordFundingConfirmed debited ESCROW_WALLET_USDC by 32000; this
+    // credits it by 31872 + 128 = 32000 exactly, nets to zero, same
+    // invariant recordRefundFromEscrow's own test above checks for the
+    // full-refund case.
+    expect(byAccount.get("ESCROW_WALLET_USDC:USDC")).toBe(0);
+  });
+
+  it("recognizes the fee as PLATFORM_REVENUE immediately, with no SUPPLIER_PAYABLE leg (no supplier delivered anything)", async () => {
+    const { client, insertedRows } = mockSupabaseInsert();
+    await recordPartialRefundWithFee(client, 1, 498000, 31872, 128);
+    const rows = insertedRows[0] as Array<Record<string, unknown>>;
+    expect(rows.some((r) => r.account === "PLATFORM_REVENUE" && r.direction === "debit" && r.amount_minor === 128)).toBe(true);
+    expect(rows.some((r) => r.account === "SUPPLIER_PAYABLE")).toBe(false);
+  });
+
+  it("a zero fee behaves as a pure refund: PLATFORM_REVENUE leg is dropped, not written as a zero-amount row", async () => {
+    // writeLedgerTransaction drops zero-amount legs (see its own comment)
+    //, a $0 fee shouldn't leave a meaningless PLATFORM_REVENUE row behind.
+    const { client, insertedRows } = mockSupabaseInsert();
+    await recordPartialRefundWithFee(client, 1, 500000, 32000, 0);
+    const rows = insertedRows[0] as Array<Record<string, unknown>>;
+    expect(rows.some((r) => r.account === "PLATFORM_REVENUE")).toBe(false);
+    const ngn = rows.filter((r) => r.currency === "NGN");
+    const usdc = rows.filter((r) => r.currency === "USDC");
+    expect(sum(ngn, "debit")).toBe(sum(ngn, "credit"));
+    expect(sum(usdc, "debit")).toBe(sum(usdc, "credit"));
+  });
+});
+
 /** Cumulative (debit-positive, credit-negative) balance per account+currency
- * across every ledger transaction written so far — the system-wide version
+ * across every ledger transaction written so far, the system-wide version
  * of the invariant, distinct from the per-transaction one the DB trigger
  * checks. */
 function netByAccount(insertedRows: unknown[][]): Map<string, number> {

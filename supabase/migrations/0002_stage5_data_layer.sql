@@ -1,17 +1,17 @@
 -- 0002_stage5_data_layer.sql
 --
 -- Stage 5 (data layer). Run this against your Supabase project's SQL
--- editor (or `supabase db push`) AFTER 0001_stage4_auth.sql. Idempotent —
+-- editor (or `supabase db push`) AFTER 0001_stage4_auth.sql. Idempotent
 -- safe to re-run. Nothing in here drops a column or a row; deprecated
 -- columns are marked in comments, not removed, until the application code
 -- that reads them is rewired and verified (see the Stage 5 review doc for
 -- what's deferred to that phase).
 --
 -- Three decisions in here that are product/architecture calls, not schema
--- mechanics — each is called out again inline at the point it happens:
+-- mechanics, each is called out again inline at the point it happens:
 --   1. Currency defaults to USD (matches what the app actually does today,
 --      not a resolution of the Naira-vs-USD tension in CLAUDE.md).
---   2. RLS is enabled with zero policies (default-deny backstop) — the
+--   2. RLS is enabled with zero policies (default-deny backstop), the
 --      service-role client this app uses bypasses it by design, so the
 --      real access control stays the API route's job, not Postgres's.
 --   3. `requests` is renamed to `sourcing_requests` and gains real
@@ -30,9 +30,9 @@ begin
 end $$;
 
 -- ============================================================================
--- 1. sourcing_request_status — a real enum instead of a free-text column.
+-- 1. sourcing_request_status, a real enum instead of a free-text column.
 -- Same eight values the app already writes (see lib/types.ts's RequestStatus)
--- — this formalizes what exists, it does not adopt Stage 6's richer state
+--, this formalizes what exists, it does not adopt Stage 6's richer state
 -- list. Stage 6 gets its own migration when it defines its own rules.
 -- ============================================================================
 do $$
@@ -49,7 +49,7 @@ do $$
 begin
   -- Guards against re-running (udt_name becomes 'sourcing_request_status'
   -- after the first successful run) without assuming the original column
-  -- was exactly `text` — a table created via Supabase's UI table editor
+  -- was exactly `text`, a table created via Supabase's UI table editor
   -- could just as easily have made it `varchar`.
   if exists (
     select 1 from information_schema.columns
@@ -62,7 +62,7 @@ begin
 end $$;
 
 -- ============================================================================
--- 2. sourcing_requests — real FKs alongside the email columns, money as
+-- 2. sourcing_requests, real FKs alongside the email columns, money as
 -- integer minor units alongside the old float/text columns, soft delete.
 -- ============================================================================
 alter table sourcing_requests add column if not exists buyer_id bigint references users(id);
@@ -85,7 +85,7 @@ set sourcer_id = u.id
 from users u
 where sr.sourcer_email is not null and sr.sourcer_email = u.email and sr.sourcer_id is null;
 
--- buyer_email / sourcer_email are now DEPRECATED — kept only so the
+-- buyer_email / sourcer_email are now DEPRECATED, kept only so the
 -- currently-deployed app code (which still reads/writes them) keeps
 -- working until the wiring phase cuts over to buyer_id/sourcer_id.
 
@@ -94,7 +94,7 @@ alter table sourcing_requests add column if not exists budget_currency text not 
 alter table sourcing_requests add column if not exists sourcing_fee_minor bigint;
 alter table sourcing_requests add column if not exists platform_fee_minor bigint;
 
--- budget stays NULL for existing rows — it's freeform text today ("2,500
+-- budget stays NULL for existing rows, it's freeform text today ("2,500
 -- USD", "~₦3m", anything a buyer typed) and not safely parseable into a
 -- number. Backfilling it with a best-effort regex would put fabricated
 -- amounts in a money column, which is worse than leaving it empty. New
@@ -102,12 +102,12 @@ alter table sourcing_requests add column if not exists platform_fee_minor bigint
 -- rewired in the wiring phase.
 --
 -- sourcing_fee, unlike budget, has always been a real number (parseFloat'd
--- on every write) — safe to backfill directly.
+-- on every write), safe to backfill directly.
 update sourcing_requests
 set sourcing_fee_minor = round(sourcing_fee::numeric * 100)::bigint
 where sourcing_fee is not null and sourcing_fee_minor is null;
 
--- sourcing_fee (old float column) is now DEPRECATED — same reason as the
+-- sourcing_fee (old float column) is now DEPRECATED, same reason as the
 -- email columns: kept until the wiring phase finishes reading from
 -- sourcing_fee_minor everywhere.
 
@@ -134,7 +134,7 @@ create index if not exists idx_sourcing_requests_material_id on sourcing_request
 create index if not exists idx_sourcing_requests_created_at on sourcing_requests (created_at desc);
 
 -- ============================================================================
--- 3. users — bring up to the same soft-delete/updated_at standard as
+-- 3. users, bring up to the same soft-delete/updated_at standard as
 -- everything else. Role/privy_user_id already added in 0001.
 -- ============================================================================
 alter table users add column if not exists updated_at timestamptz not null default now();
@@ -146,7 +146,7 @@ create trigger trg_users_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- 4. materials — the catalog currently hardcoded in lib/constants.ts,
+-- 4. materials, the catalog currently hardcoded in lib/constants.ts
 -- seeded in as real rows. `slug` matches today's static `id` field so the
 -- wiring phase can join on it without renumbering anything.
 -- ============================================================================
@@ -249,9 +249,9 @@ begin
 end $$;
 
 -- ============================================================================
--- 5. suppliers — didn't exist as an entity before; was a free-text
+-- 5. suppliers, didn't exist as an entity before; was a free-text
 -- business_id field inside evidence JSONB. CAC format validation and
--- collusion flagging are Stage 7's job — this is the table only.
+-- collusion flagging are Stage 7's job, this is the table only.
 -- ============================================================================
 create table if not exists suppliers (
   id bigint generated always as identity primary key,
@@ -272,8 +272,8 @@ create trigger trg_suppliers_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- 6. sourcer_profiles — every counter starts at zero. Stage 7 explicitly
--- says "remove all seeded stats" — so nothing here seeds any.
+-- 6. sourcer_profiles, every counter starts at zero. Stage 7 explicitly
+-- says "remove all seeded stats", so nothing here seeds any.
 -- ============================================================================
 create table if not exists sourcer_profiles (
   id bigint generated always as identity primary key,
@@ -298,10 +298,10 @@ create trigger trg_sourcer_profiles_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- 7. escrow_transactions — a real ledger row per fund movement, replacing
+-- 7. escrow_transactions, a real ledger row per fund movement, replacing
 -- the deposit_tx_hash/release_tx_hash/deposit_amount/release_amount fields
 -- currently stuffed into sourcing_requests.evidence JSONB. This is a
--- transaction LOG, not the double-entry balanced ledger Stage 6 asks for —
+-- transaction LOG, not the double-entry balanced ledger Stage 6 asks for
 -- that's a materially bigger piece of work with its own test suite
 -- ("ledger must balance to zero, and there's a test that asserts it") and
 -- stays there. Append-only by convention: no soft delete, because a
@@ -321,7 +321,7 @@ create table if not exists escrow_transactions (
 create index if not exists idx_escrow_tx_request on escrow_transactions (sourcing_request_id);
 
 -- Backfill from evidence JSONB where present. Timestamps use the parent
--- request's created_at rather than parsing evidence's toUTCString() dates —
+-- request's created_at rather than parsing evidence's toUTCString() dates
 -- an approximation for pre-migration rows, not a precision guarantee.
 insert into escrow_transactions (sourcing_request_id, type, amount_minor, currency, tx_hash, initiated_by, created_at)
 select sr.id, 'deposit',
@@ -346,7 +346,7 @@ where sr.evidence ? 'release_tx_hash'
   );
 
 -- ============================================================================
--- 8. audit_reports — the sourcer's field-visit report, out of evidence
+-- 8. audit_reports, the sourcer's field-visit report, out of evidence
 -- JSONB into real columns. GPS/EXIF extraction and handshake-code hardening
 -- are Stage 7's job; this just gives that stage somewhere real to write to.
 -- ============================================================================
@@ -384,7 +384,7 @@ where sr.evidence ? 'verified_at'
   );
 
 -- ============================================================================
--- 9. disputes — schema only. Stage 8 builds the filing flow, freeze
+-- 9. disputes, schema only. Stage 8 builds the filing flow, freeze
 -- semantics, and the admin review queue.
 -- ============================================================================
 create table if not exists disputes (
@@ -410,7 +410,7 @@ create trigger trg_disputes_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- 10. notifications — schema only. Nothing writes to this yet; that's
+-- 10. notifications, schema only. Nothing writes to this yet; that's
 -- incremental across whichever later stage first needs to notify someone.
 -- ============================================================================
 create table if not exists notifications (
@@ -428,14 +428,14 @@ create index if not exists idx_notifications_user_id on notifications (user_id);
 create index if not exists idx_notifications_unread on notifications (user_id) where read_at is null;
 
 -- ============================================================================
--- 11. Row-level security — enabled everywhere, zero policies for
+-- 11. Row-level security, enabled everywhere, zero policies for
 -- anon/authenticated. This is a default-deny backstop, not the primary
 -- access boundary: this app's Supabase client always authenticates as
 -- service_role (see lib/supabaseServer.ts), which bypasses RLS by design,
 -- so real per-user visibility is enforced in the API route layer, same as
 -- Stage 4's authz work. What this DOES do is guarantee that if the anon/
--- publishable key were ever used by mistake — or a future feature queries
--- Supabase directly from the client — it sees nothing instead of everything.
+-- publishable key were ever used by mistake, or a future feature queries
+-- Supabase directly from the client, it sees nothing instead of everything.
 -- ============================================================================
 alter table users enable row level security;
 alter table sourcing_requests enable row level security;

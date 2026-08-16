@@ -4,10 +4,10 @@
 // supabase/migrations/0000_fresh_project_full_schema.sql (or
 // 0001_stage4_auth.sql + 0002_stage5_data_layer.sql for the original
 // project), not a reverse-engineered guess from a JSONB blob anymore.
-// Money is integer minor units everywhere — see lib/money.ts for the one
+// Money is integer minor units everywhere, see lib/money.ts for the one
 // place that converts to/from a display number.
 
-// "admin" added in Stage 4 — granted only via direct DB write (bootstrap)
+// "admin" added in Stage 4, granted only via direct DB write (bootstrap)
 // or PATCH /api/admin/users/[id]/role by an existing admin. There is no
 // self-service path to it anywhere in the client.
 //
@@ -21,7 +21,7 @@
 export type Role = "buyer" | "supplier" | "admin";
 
 /** @deprecated Superseded by OrderStatus (see below) as of the marketplace
- * pivot — sourcing_requests is renamed deprecated_sourcing_requests in
+ * pivot, sourcing_requests is renamed deprecated_sourcing_requests in
  * migration 0004. Kept here, unused, rather than deleted outright, so any
  * code that still imports it fails loudly instead of silently. */
 export type RequestStatus =
@@ -34,14 +34,14 @@ export type RequestStatus =
   | "cancelled"
   | "expired";
 
-/** The order lifecycle — see docs/marketplace-payments-design.md Section D
+/** The order lifecycle, see docs/marketplace-payments-design.md Section D
  * for the full state diagram and lib/orderStateMachine.ts for the legal
  * transitions between these. Matches the `order_status` Postgres enum in
  * migration 0004_marketplace_pivot.sql exactly; keep these in sync by hand
  * (Supabase doesn't generate these types for us in this project).
  *
  * Note `settled` has no transition to `disputed` in the state machine even
- * though a post-settlement issue can still be reported — that report is a
+ * though a post-settlement issue can still be reported, that report is a
  * `disputes` row with dispute_type = 'post_settlement_report', not a
  * status change on the order itself. Conflating "what happened to the
  * money" with "is there an open question about it" is the exact mistake
@@ -71,12 +71,12 @@ export type OrderStatus =
 
 export type Currency = "USD" | "NGN";
 
-export type ToastType = "success" | "error" | "info";
+export type ToastType = "success" | "error" | "warning" | "info" | "loading";
 
-/** @deprecated Superseded by OrderRow — sourcing_requests is renamed
+/** @deprecated Superseded by OrderRow, sourcing_requests is renamed
  * deprecated_sourcing_requests in migration 0004. Row shape as it comes
  * back from Supabase (`sourcing_requests`), plus
- * buyer_email/sourcer_email — NOT real columns, joined in server-side (see
+ * buyer_email/sourcer_email, NOT real columns, joined in server-side (see
  * app/api/requests/route.ts) so the client can display/compare identity
  * without its own copy of numeric user ids. audit_notes/audit_image/
  * audit_business_id are similarly joined in from the audit_reports table
@@ -119,7 +119,7 @@ export interface SourcingRequest {
   id: string; // request_code, e.g. "REQ-482913"
   dbId: number;
   title: string;
-  buyer: string; // buyer_email — display and ownership-comparison only
+  buyer: string; // buyer_email, display and ownership-comparison only
   budgetMinor: number | null;
   budgetCurrency: Currency;
   location: string;
@@ -152,15 +152,27 @@ export interface UserRow {
    * supplied copy of this for an authorization decision. */
   role: Role;
   /** Stage 4: the verified Privy DID this row is bound to. Set once, on
-   * first successful session establishment for that DID — see
+   * first successful session establishment for that DID, see
    * app/api/auth/session/route.ts. Null for pre-Stage-4 rows until their
    * next login. */
   privy_user_id: string | null;
+  /** Prompt 3 (termination flows): orthogonal to role, a suspended
+   * supplier keeps their role and can still see/manage in-flight orders,
+   * just can't receive new ones (see createOrder's check). Never used as
+   * an authorization gate on its own; requireRole still authenticates a
+   * suspended user normally. */
+  suspended_at?: string | null;
+  suspension_reason?: string | null;
+  suspended_by?: number | null;
+  /** Prompt 4, M5, any session token issued before this timestamp is
+   * rejected by requireSession(), regardless of its own signature/expiry.
+   * Stamped on logout (all devices) and on suspendSupplier. */
+  session_valid_after?: string | null;
 }
 
-/** Client-side authenticated-user shape held in App.tsx state — distinct
+/** Client-side authenticated-user shape held in App.tsx state, distinct
  * from UserRow (the DB row) and from Privy's own user object. `role` here
- * is a display hint synced from GET /api/auth/me, not a trust boundary —
+ * is a display hint synced from GET /api/auth/me, not a trust boundary
  * every server-side action re-derives role from the DB via the session
  * cookie regardless of what this says. */
 export interface AppUser {
@@ -171,20 +183,26 @@ export interface AppUser {
   role: Role;
 }
 
-/** Payload of our own first-party session cookie (see lib/session.ts) —
+/** Payload of our own first-party session cookie (see lib/session.ts)
  * distinct from Privy's access token, which we only ever see once, at
  * session-establishment time, to prove identity. */
 export interface SessionClaims {
   privyUserId: string;
   userRowId: number;
   email: string;
+  /** Set only when reading a token back (verifySessionToken), never when
+   * signing a new one, unix seconds, from the JWT's own `iat` claim.
+   * Prompt 4, M5: requireSession() compares this against
+   * users.session_valid_after to make logout (and admin suspension)
+   * actually revoke the token, not just clear one device's cookie. */
+  issuedAt?: number;
 }
 
 export type ApplicationStatus = "pending" | "approved" | "rejected";
 
-/** @deprecated Superseded by SupplierVerificationApplicationRow —
+/** @deprecated Superseded by SupplierVerificationApplicationRow
  * sourcer_applications is renamed deprecated_sourcer_applications in
- * migration 0004. A request to become a sourcer — never a role grant by
+ * migration 0004. A request to become a sourcer, never a role grant by
  * itself. Only PATCH /api/admin/sourcer-applications/[id]'s approve
  * action (admin-only) ever changes users.role; see lib/authz.ts and
  * CLAUDE.md's rule that a user cannot self-assign the sourcer role.
@@ -206,7 +224,7 @@ export interface SourcerApplicationRow {
 }
 
 // ============================================================================
-// Marketplace pivot — see docs/marketplace-payments-design.md and
+// Marketplace pivot, see docs/marketplace-payments-design.md and
 // migration 0004_marketplace_pivot.sql. These describe the new schema;
 // nothing in app/ or components/ constructs them yet (that's Stage 3+ of
 // the pivot) but the routes/UI being written next need a shared shape to
@@ -216,12 +234,12 @@ export interface SourcerApplicationRow {
 export type SupplierVerificationStatus = "unverified" | "pending" | "verified" | "expired";
 
 /** A supplier IS a `users` row (role = 'supplier') with this profile
- * attached — not a passive record someone else fills in, which is what
+ * attached, not a passive record someone else fills in, which is what
  * the old (now deprecated_suppliers_no_account) table was. verified_at/
  * verification_expires_at/orders_since_verification are the 90-day-OR-
  * 20-order expiry inputs; NEVER trust verification_status alone for an
  * authorization decision (whether this supplier can receive a newly
- * funded order) — that check is always the live
+ * funded order), that check is always the live
  * is_supplier_currently_verified() Postgres function (see
  * lib/supplierVerification.ts), same principle as lib/authz.ts never
  * trusting a client-supplied role. */
@@ -243,13 +261,17 @@ export interface SupplierProfileRow {
   wallet_address: string | null;
   wallet_id: string | null;
   created_at: string;
+  /** Prompt 3: set by abandonOrder() on a 2nd strike within 90 days
+   * blocks new orders until this timestamp, checked in createOrder().
+   * Null means not currently blocked. */
+  blocked_until?: string | null;
 }
 
-/** Repurposed sourcer_applications — same admin-review shape (pending/
+/** Repurposed sourcer_applications, same admin-review shape (pending/
  * approved/rejected, one-pending-per-user, reviewed_by/reviewed_at/
  * review_notes), different fields: this is KYB (is the business real,
  * where is it, what does it sell), not a field-agent vetting form. Also
- * used for re-verification after expiry — same table, same flow. */
+ * used for re-verification after expiry, same table, same flow. */
 export interface SupplierVerificationApplicationRow {
   id: number;
   user_id: number;
@@ -268,10 +290,10 @@ export interface SupplierVerificationApplicationRow {
   applicant_username?: string | null;
 }
 
-/** Row shape from `orders` — supersedes SourcingRequestRow. amount_minor/
+/** Row shape from `orders`, supersedes SourcingRequestRow. amount_minor/
  * currency are always NGN; the buyer never sees or enters a USDC amount
  * (see design doc Section 3). buyer_email/supplier_business_name are NOT
- * real columns — joined in server-side, same pattern as
+ * real columns, joined in server-side, same pattern as
  * SourcingRequestRow's buyer_email. */
 export interface OrderRow {
   id: number;
@@ -280,7 +302,7 @@ export interface OrderRow {
   buyer_id: number;
   supplier_id: number;
   /** @deprecated References the old fixed material catalog (migration
-   * 0000), superseded by supplier_listing_id (migration 0006) — kept as
+   * 0000), superseded by supplier_listing_id (migration 0006), kept as
    * an unused legacy column, never set by current order-creation code. */
   material_id: number | null;
   supplier_listing_id: number | null;
@@ -293,23 +315,23 @@ export interface OrderRow {
   platform_fee_minor: number;
   supplier_verified_at_order_time: string | null;
   /** Cumulative real seconds spent in a live verification call (join-to-
-   * leave, from Jitsi's own lifecycle events — not just "the panel was
+   * leave, from Jitsi's own lifecycle events, not just "the panel was
    * open"). Approval is blocked, server-side, until this reaches
-   * MIN_VERIFICATION_CALL_SECONDS (lib/orderService.ts) — see migration
+   * MIN_VERIFICATION_CALL_SECONDS (lib/orderService.ts), see migration
    * 0007. */
   verification_call_seconds: number;
-  /** The Jitsi room's real, private name — a crypto.randomUUID(), never
+  /** The Jitsi room's real, private name, a crypto.randomUUID(), never
    * derived from order_code (which is a guessable 6-digit, user-visible
    * string). Nullable because migration 0008 doesn't backfill existing
    * rows; lib/orderService.ts's ensureCallRoomId() lazily fills it in on
    * first read. Only ever returned from ownership-checked routes (see
-   * app/api/orders/[id]/route.ts) — this IS the access control for the
+   * app/api/orders/[id]/route.ts), this IS the access control for the
    * call, since meet.jit.si itself enforces none. */
   verification_call_room_id: string | null;
   created_at: string;
   buyer_email?: string | null;
   supplier_business_name?: string | null;
-  /** Joined in from supplier_listings when supplier_listing_id is set —
+  /** Joined in from supplier_listings when supplier_listing_id is set
    * lets the order detail view show the "unit price x quantity = total"
    * breakdown instead of just the total in isolation. Null for a
    * freeform order (no listing picked). */
@@ -321,10 +343,10 @@ export type PaymentLeg = "funding" | "release" | "settlement" | "refund";
 export type PaymentProvider = "yellow_card" | "circle";
 
 /** The fine-grained async trail for both the funding leg (NGN -> USDC ->
- * escrow) and the release leg (approval -> transfer -> confirmation) —
+ * escrow) and the release leg (approval -> transfer -> confirmation)
  * distinct from OrderRow.status (coarse, user-facing) and LedgerEntryRow
  * (accounting). tx_hash is ONLY ever set from a real, confirmed provider
- * lookup (e.g. Circle's getTransaction) — see design doc Section D.0 for
+ * lookup (e.g. Circle's getTransaction), see design doc Section D.0 for
  * why a fabricated hash is exactly the bug this schema exists to prevent. */
 export interface PaymentEventRow {
   id: number;
@@ -361,7 +383,7 @@ export type LedgerAccount =
 
 /** One leg of a double-entry ledger transaction. Every write must insert
  * a full, balanced set of these (same ledger_transaction_id, same
- * currency, debits = credits) within a single DB transaction — see
+ * currency, debits = credits) within a single DB transaction, see
  * migration 0004's deferred constraint trigger, which enforces this at
  * commit time rather than trusting application code alone. */
 export interface LedgerEntryRow {
@@ -389,7 +411,7 @@ export type DisputeRuling = "buyer" | "supplier";
 
 /** dispute_type is the field that keeps "buyer rejected the proof before
  * any money moved" and "buyer has a problem after settlement" from being
- * treated as the same situation — see design doc Section C.7. */
+ * treated as the same situation, see design doc Section C.7. */
 export interface DisputeRow {
   id: number;
   order_id: number;
@@ -414,10 +436,44 @@ export interface DisputeEventRow {
   created_at: string;
 }
 
+// ============================================================================
+// Termination flows (Prompt 3), see supabase/migrations/0010_termination_flows.sql
+// and lib/orderService.ts's cancelBeforeFunding/cancelFundedOrder/
+// abandonOrder/withdrawProof.
+// ============================================================================
+
+export type BuyerCancellationCategory = "changed_mind" | "found_alternative" | "no_longer_needed" | "price_disagreement" | "other";
+export type SupplierExitCategory = "cannot_fulfill" | "schedule_conflict" | "pricing_error" | "other";
+export type CancellationCategory = BuyerCancellationCategory | SupplierExitCategory;
+
+export interface OrderStatusHistoryRow {
+  id: number;
+  order_id: number;
+  from_status: OrderStatus | null;
+  to_status: OrderStatus;
+  actor_id: number | null;
+  actor_role: "buyer" | "supplier" | "admin" | "system";
+  reason_category: string | null;
+  reason_text: string | null;
+  created_at: string;
+}
+
+export interface OrderCancellationRow {
+  id: number;
+  order_id: number;
+  actor_id: number;
+  actor_role: "buyer" | "supplier";
+  category: CancellationCategory;
+  description: string | null;
+  fee_charged_minor: number;
+  refund_minor: number | null;
+  created_at: string;
+}
+
 /** A DB CACHE of an on-chain source of truth, not the source of truth
- * itself — on_chain_tx_hash is what makes this independently verifiable.
+ * itself, on_chain_tx_hash is what makes this independently verifiable.
  * Only rows with on_chain_confirmed_at set should ever count toward a
- * supplier's aggregate rating (see design doc Section C.8) — a row
+ * supplier's aggregate rating (see design doc Section C.8), a row
  * submitted but not yet confirmed on-chain can't inflate a supplier's
  * number before it's actually verifiable. */
 export interface RatingRow {
@@ -439,10 +495,11 @@ export interface AdminUserRow {
   username: string | null;
   role: Role;
   created_at: string;
+  suspended_at?: string | null;
 }
 
 /** A material/product a supplier has listed, uploaded by that supplier
- * (not admin-curated — see migration 0006). buyer-facing search
+ * (not admin-curated, see migration 0006). buyer-facing search
  * (GET /api/materials) only ever returns listings belonging to a
  * CURRENTLY verified supplier (design doc's live-verification rule,
  * same as GET /api/suppliers) and joins in the supplier fields below;
@@ -461,4 +518,44 @@ export interface SupplierListingRow {
   created_at: string;
   supplier_business_name?: string | null;
   supplier_business_location?: string | null;
+}
+
+// ============================================================================
+// Push notifications (Prompt 2 of the feedback/notifications/security
+// pack), see migration 0009_push_notifications.sql and
+// lib/notifications/dispatch.ts.
+// ============================================================================
+
+export type NotificationCategory = "job_availability" | "escrow_payment" | "audit_status" | "disputes" | "security";
+
+/** Row shape from `notifications`, the in-app notification centre, the
+ * part of the system that stays correct even if push never arrives.
+ * title/body are already the safe, lock-screen-safe display strings (see
+ * lib/notifications/dispatch.ts's payload-security contract), never a
+ * raw amount, wallet address, or full name. */
+export interface NotificationRow {
+  id: number;
+  user_id: number;
+  category: NotificationCategory;
+  event_type: string;
+  resource_type: string | null;
+  resource_id: number | null;
+  title: string;
+  body: string;
+  deep_link: string | null;
+  tag: string | null;
+  read_at: string | null;
+  pushed_at: string | null;
+  created_at: string;
+}
+
+export interface NotificationPreferences {
+  user_id?: number;
+  job_availability: boolean;
+  escrow_payment: boolean;
+  audit_status: boolean;
+  disputes: boolean;
+  timezone: string;
+  quiet_hours_start_local: number;
+  quiet_hours_end_local: number;
 }

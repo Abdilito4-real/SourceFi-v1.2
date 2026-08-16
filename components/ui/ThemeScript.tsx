@@ -1,9 +1,9 @@
 // components/ui/ThemeScript.tsx
 //
 // Runs before React hydrates so the correct palette is painted on the very
-// first frame — no light-then-dark flash. Reads a saved preference first;
+// first frame, no light-then-dark flash. Reads a saved preference first;
 // with no stored preference, the default is unconditionally light
-// (Rebrand-I) — deliberately NOT falling back to the OS's
+// (Rebrand-I), deliberately NOT falling back to the OS's
 // prefers-color-scheme, so a first-time visitor with an OS set to dark
 // mode still lands on light. Dark stays fully available, just opt-in via
 // ThemeToggle rather than inherited from the OS. Kept as a plain string
@@ -22,7 +22,7 @@ const THEME_INIT_SCRIPT = `
 })();
 `;
 
-export default function ThemeScript() {
+export default function ThemeScript({ nonce }: { nonce?: string }) {
   // eslint-disable-next-line react/no-danger
-  return <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />;
+  return <script nonce={nonce} dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />;
 }

@@ -1,4 +1,4 @@
-# SourceFi — Project Context
+# SourceFi Project Context
 
 ## What this is
 A construction-materials sourcing platform for Nigeria. Buyers need
@@ -17,11 +17,11 @@ risky to pay for sight-unseen. SourceFi solves trust, not catalog.
 7. Buyer can reject; the dispute path takes over.
 
 ## Users
-- **Buyers** — contractors, developers, architects. Desktop and mobile.
-- **Sourcers** — field agents in Lagos, Kano, Abuja, Port Harcourt.
+- **Buyers**: contractors, developers, architects. Desktop and mobile.
+- **Sourcers**: field agents in Lagos, Kano, Abuja, Port Harcourt.
   Working from a phone, in a warehouse, on patchy mobile data.
   Mobile experience is not a nice-to-have for them; it is the product.
-- **Admins** — vet sourcers, resolve disputes.
+- **Admins**: vet sourcers, resolve disputes.
 
 ## Constraints that shape every decision
 - Users are on Android mid-range phones and metered data. Keep bundles small.
@@ -34,14 +34,14 @@ risky to pay for sight-unseen. SourceFi solves trust, not catalog.
   funds cannot be lost, double-spent, or released without authorisation.
 - Every state transition on a request must be explicit and logged.
 - No secrets in client code. No trusting client-supplied amounts, roles,
-  or status values — ever.
+  or status values, ever.
 - If a task touches escrow, KYC, or payouts, stop and flag it for human
   review rather than guessing at the rules.
 
 ## Rebrand direction (locked in)
 Two visual directions exist as PNG mockups (`Rebrand-I` = light surface,
 navy sidebar, gold/amber accents; `Rebrand-II` = dark surface, green
-accents). Decision: this is not an either/or — build the design system
+accents). Decision: this is not an either/or, build the design system
 theme-aware. `Rebrand-II` (dark/green) is the dark-mode palette;
 `Rebrand-I` (light/navy+gold) is the light-mode palette. Both must be
 defined as token sets from the start (see Stage 2), not one retrofitted

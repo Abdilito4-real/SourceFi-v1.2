@@ -5,6 +5,7 @@
 // server-side for display.
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { requireRole } from "../../../../lib/authz";
+import { dbErrorResponse } from "../../../../lib/dbErrorResponse";
 import type { ApplicationStatus } from "../../../../lib/types";
 
 const VALID_STATUSES: ApplicationStatus[] = ["pending", "approved", "rejected"];
@@ -23,7 +24,7 @@ export async function GET(request: Request) {
     .eq("status", status)
     .order("created_at", { ascending: true });
 
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbErrorResponse("GET admin/supplier-verification", error);
 
   const applicantIds = Array.from(new Set((data || []).map((a) => a.user_id)));
   const { data: users } =

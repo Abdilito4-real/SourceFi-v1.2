@@ -4,7 +4,7 @@
 // the one real behavioral difference the design doc calls out (Section
 // F): approving here does more than flip users.role. It creates (or, for
 // a re-verification after expiry, updates) a full supplier_profiles row
-// with verification metadata — verified_at, verification_expires_at (90
+// with verification metadata, verified_at, verification_expires_at (90
 // days out, per lib/supplierVerification.ts), and resets
 // orders_since_verification to 0. Rejecting behaves exactly like before:
 // nothing changes except the application's own status.
@@ -12,6 +12,8 @@ import { getSupabaseServerClient } from "../../../../../lib/supabaseServer";
 import { requireRole, logAudit } from "../../../../../lib/authz";
 import { checkRateLimit, recordFailure, recordSuccess, rateLimitKey } from "../../../../../lib/rateLimit";
 import { computeVerificationExpiry } from "../../../../../lib/supplierVerification";
+import { notifyUser } from "../../../../../lib/notifications/dispatch";
+import { dbErrorResponse } from "../../../../../lib/dbErrorResponse";
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireRole(["admin"]);
@@ -54,7 +56,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
   const nextStatus = action === "approve" ? "approved" : "rejected";
 
-  // Compare-and-swap on the current status — same pattern as every
+  // Compare-and-swap on the current status, same pattern as every
   // review action in this app.
   const { data: updated, error: updateErr } = await supabase
     .from("supplier_verification_applications")
@@ -66,7 +68,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
   if (updateErr) {
     recordFailure(limitKey);
-    return Response.json({ error: updateErr.message }, { status: 500 });
+    return dbErrorResponse(`PATCH admin/supplier-verification/${applicationId}`, updateErr);
   }
   if (!updated) {
     recordFailure(limitKey);
@@ -106,7 +108,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     }
 
     // Only grant the role if the applicant hasn't already been changed to
-    // something else in the meantime — same guard the sourcer version had.
+    // something else in the meantime, same guard the sourcer version had.
     const { data: roleUpdate } = await supabase
       .from("users")
       .update({ role: "supplier" })
@@ -122,6 +124,19 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       details: { applicationId, roleGranted: Boolean(roleUpdate), verificationExpiresAt: expiresAt.toISOString() },
       request,
     });
+
+    // security category, account-status change, not opt-out (see
+    // migration 0009's comment), applicant is now live as a supplier.
+    void notifyUser(supabase, {
+      userId: application.user_id,
+      category: "security",
+      eventType: "supplier_verification_approved",
+      resourceType: "application",
+      resourceId: applicationId,
+      title: "Verification approved",
+      body: "You're now a verified supplier on SourceFi. Tap to get started.",
+      deepLink: "/supplier?section=verification",
+    });
   } else {
     await logAudit({
       actorEmail: auth.user.email,
@@ -129,6 +144,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       target: String(application.user_id),
       details: { applicationId, notes },
       request,
+    });
+
+    void notifyUser(supabase, {
+      userId: application.user_id,
+      category: "security",
+      eventType: "supplier_verification_rejected",
+      resourceType: "application",
+      resourceId: applicationId,
+      title: "Verification update",
+      body: "There's an update on your supplier verification application. Tap to view.",
+      deepLink: "/buyer",
     });
   }
 

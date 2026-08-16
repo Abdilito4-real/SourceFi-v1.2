@@ -1,7 +1,7 @@
 // app/manifest.ts
 //
 // Next.js's App Router metadata-file convention: this is auto-served at
-// /manifest.webmanifest and auto-linked from every page's <head> — no
+// /manifest.webmanifest and auto-linked from every page's <head>, no
 // manual <link rel="manifest"> needed.
 import type { MetadataRoute } from "next";
 
@@ -13,7 +13,7 @@ export default function manifest(): MetadataRoute.Manifest {
     start_url: "/",
     display: "standalone",
     orientation: "portrait-primary",
-    // Light theme (Rebrand-I) is the default, unauthenticated first paint —
+    // Light theme (Rebrand-I) is the default, unauthenticated first paint
     // these match app/globals.css :root, not the dark override, so the
     // install/splash experience matches what a fresh visitor actually sees.
     background_color: "#f6f2ea",

@@ -4,7 +4,7 @@
 // transition MAP is right, not just that some route happens to call it
 // correctly. The two tests under "the Circle finding" are the actual
 // regression tests for the bug docs/marketplace-payments-design.md
-// Section D.0 verified against the installed Circle SDK — buyer approval
+// Section D.0 verified against the installed Circle SDK, buyer approval
 // and a confirmed on-chain release must never be reachable in one step.
 import { describe, it, expect } from "vitest";
 import { assertTransition, InvalidOrderTransitionError, TERMINAL_ORDER_STATUSES } from "../lib/orderStateMachine";
@@ -33,7 +33,7 @@ const ALL_STATUSES: OrderStatus[] = [
   "expired",
 ];
 
-describe("assertTransition — the happy path, full order lifecycle", () => {
+describe("assertTransition: the happy path, full order lifecycle", () => {
   it("allows every transition from order creation through settlement", () => {
     expect(() => assertTransition("pending_payment", "payment_processing")).not.toThrow();
     expect(() => assertTransition("payment_processing", "converting")).not.toThrow();
@@ -64,7 +64,7 @@ describe("assertTransition — the happy path, full order lifecycle", () => {
   });
 });
 
-describe("assertTransition — the Circle finding (Section D.0), enforced structurally", () => {
+describe("assertTransition: the Circle finding (Section D.0), enforced structurally", () => {
   it("rejects buyer_approved -> escrow_released directly (the exact bug being fixed)", () => {
     expect(() => assertTransition("buyer_approved", "escrow_released")).toThrow(InvalidOrderTransitionError);
   });
@@ -82,7 +82,7 @@ describe("assertTransition — the Circle finding (Section D.0), enforced struct
   });
 });
 
-describe("assertTransition — settled vs. a post-settlement dispute (Section D.1 nuance)", () => {
+describe("assertTransition: settled vs. a post-settlement dispute (Section D.1 nuance)", () => {
   it("rejects settled -> disputed as an order status transition", () => {
     // A post-settlement report is a NEW disputes row (dispute_type =
     // 'post_settlement_report'); it must never mutate orders.status.
@@ -98,7 +98,7 @@ describe("assertTransition — settled vs. a post-settlement dispute (Section D.
   });
 });
 
-describe("assertTransition — terminal states have no way out", () => {
+describe("assertTransition: terminal states have no way out", () => {
   it.each(["settled", "refunded", "cancelled", "expired"] as OrderStatus[])(
     "rejects every transition out of terminal state %s",
     (from) => {
@@ -113,7 +113,7 @@ describe("assertTransition — terminal states have no way out", () => {
   });
 });
 
-describe("assertTransition — disputes route to a real resolution, not a dead end", () => {
+describe("assertTransition: disputes route to a real resolution, not a dead end", () => {
   it("allows disputed -> refund_processing (admin rules for buyer)", () => {
     expect(() => assertTransition("disputed", "refund_processing")).not.toThrow();
   });
@@ -132,7 +132,7 @@ describe("assertTransition — disputes route to a real resolution, not a dead e
   });
 });
 
-describe("assertTransition — no skipping a step, no moving backwards, no no-ops", () => {
+describe("assertTransition: no skipping a step, no moving backwards, no no-ops", () => {
   it("rejects going straight from pending_payment to funded", () => {
     expect(() => assertTransition("pending_payment", "funded")).toThrow(InvalidOrderTransitionError);
   });
@@ -146,7 +146,7 @@ describe("assertTransition — no skipping a step, no moving backwards, no no-op
   });
 });
 
-describe("assertTransition — error identifies what was attempted", () => {
+describe("assertTransition: error identifies what was attempted", () => {
   it("names both the from and to state in the thrown error", () => {
     try {
       assertTransition("settled", "pending_payment");

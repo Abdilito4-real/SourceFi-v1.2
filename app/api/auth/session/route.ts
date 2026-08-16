@@ -2,13 +2,13 @@
 //
 // The one place a Privy access token ever gets exchanged for something
 // else. POST verifies the token, links/creates the corresponding users
-// row, and mints our own httpOnly session cookie — see lib/session.ts for
+// row, and mints our own httpOnly session cookie, see lib/session.ts for
 // why we run our own session instead of Privy's cookie mode. Every other
 // protected route in this app trusts that cookie (via lib/authz.ts), not
 // this endpoint's request body.
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { verifyPrivyAccessToken, getVerifiedPrivyProfile } from "../../../../lib/privyServer";
-import { setSessionCookie, clearSessionCookie } from "../../../../lib/session";
+import { setSessionCookie, clearSessionCookie, readSessionFromCookieStore } from "../../../../lib/session";
 import { checkRateLimit, recordFailure, recordSuccess, rateLimitKey } from "../../../../lib/rateLimit";
 import type { UserRow } from "../../../../lib/types";
 
@@ -39,7 +39,7 @@ export async function POST(request: Request) {
   try {
     const supabase = getSupabaseServerClient();
 
-    // 1. Already-linked identity — the common case on every login after
+    // 1. Already-linked identity, the common case on every login after
     // the first.
     const { data: existing } = await supabase
       .from("users")
@@ -51,8 +51,8 @@ export async function POST(request: Request) {
 
     if (!user) {
       // 2. First time this DID has established a session. Pull the
-      // verified email/wallet from Privy itself — never from this
-      // request's body — so this linking step can't be used to take over
+      // verified email/wallet from Privy itself, never from this
+      // request's body, so this linking step can't be used to take over
       // someone else's existing row by just claiming their email.
       const profile = await getVerifiedPrivyProfile(identity.privyUserId);
       const email = profile.email || (profile.walletAddress ? `web3_${profile.walletAddress.toLowerCase()}` : null);
@@ -65,7 +65,7 @@ export async function POST(request: Request) {
       const { data: byEmail } = await supabase.from("users").select("*").eq("email", email).maybeSingle();
 
       if (byEmail && !byEmail.privy_user_id) {
-        // Pre-Stage-4 row, never bound to a verified identity — bind it now.
+        // Pre-Stage-4 row, never bound to a verified identity, bind it now.
         const { data: linked, error: linkErr } = await supabase
           .from("users")
           .update({ privy_user_id: identity.privyUserId })
@@ -75,8 +75,8 @@ export async function POST(request: Request) {
         if (linkErr) throw linkErr;
         user = linked as UserRow;
       } else if (byEmail && byEmail.privy_user_id && byEmail.privy_user_id !== identity.privyUserId) {
-        // Should be unreachable — Privy guarantees an email can only be
-        // linked to one of their users — but never silently proceed if it
+        // Should be unreachable, Privy guarantees an email can only be
+        // linked to one of their users, but never silently proceed if it
         // somehow happens.
         console.error(`Email/DID mismatch on session establishment: ${email}`);
         return Response.json({ error: "Account conflict. Contact support." }, { status: 409 });
@@ -117,6 +117,24 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE() {
+  // Prompt 4, M5: clearing the cookie only removes THIS device's copy
+  // the signed JWT itself stays valid until its 12h expiry otherwise.
+  // Stamping session_valid_after makes logout actually revoke every
+  // outstanding token for this user (all devices), not just this one
+  // see lib/authz.ts's requireSession(), which checks this on every
+  // request. Best-effort: a failure here still clears the cookie (the
+  // device the user is actually looking at ends up logged out either
+  // way), it just doesn't invalidate copies elsewhere.
+  const session = await readSessionFromCookieStore();
+  if (session) {
+    try {
+      const supabase = getSupabaseServerClient();
+      await supabase.from("users").update({ session_valid_after: new Date().toISOString() }).eq("id", session.userRowId);
+    } catch (err) {
+      console.error("Failed to stamp session_valid_after on logout:", err);
+    }
+  }
+
   await clearSessionCookie();
   return Response.json({ success: true });
 }

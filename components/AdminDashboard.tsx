@@ -2,32 +2,35 @@
 
 // components/AdminDashboard.tsx
 //
-// Real route (/admin) — Overview, Supplier Verification, Orders,
+// Real route (/admin), Overview, Supplier Verification, Orders
 // Disputes, Users. Only reachable if the server-verified role allows it
 // (see the redirect guard below); the route existing doesn't grant
-// anything — every write here is its own requireRole(["admin"]) check
+// anything, every write here is its own requireRole(["admin"]) check
 // server-side (see app/api/admin/*), this is UX only.
 //
-// "Applications" is repurposed here into "Supplier Verification" — same
+// "Applications" is repurposed here into "Supplier Verification", same
 // admin-review shape (see docs/marketplace-payments-design.md Section F:
 // "same card-based review UI as today's ApplicationCard, fields
 // swapped"), but approval now creates/updates a real supplier_profiles
 // row with a 90-day expiry, not just a role flip (see
 // app/api/admin/supplier-verification/[id]/route.ts).
 import React, { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Loader2, Info, LayoutGrid, ShieldCheck, Users as UsersIcon, Check, X, UserCog, FileText, AlertTriangle, Scale } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Loader2, LayoutGrid, ShieldCheck, Users as UsersIcon, Check, X, UserCog, FileText, AlertTriangle, Scale } from "lucide-react";
 
 import { useSession } from "./SessionProvider";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
+import NotificationBell from "./NotificationBell";
 import OrderCard from "./OrderCard";
 import OrderDetailsModal from "./OrderDetailsModal";
 import StatCard from "./ui/StatCard";
 import Badge, { type BadgeTone } from "./ui/Badge";
 import Button from "./ui/Button";
+import ConfirmDialog from "./ui/ConfirmDialog";
 import Select from "./ui/Select";
-import { Textarea } from "./ui/Field";
+import { Label, Textarea } from "./ui/Field";
 import { Table, Thead, Tbody, Tr, Th, Td } from "./ui/Table";
+import SharedEmptyState from "./ui/EmptyState";
 import { useToast } from "./ui/Toast";
 import { formatMoney } from "../lib/money";
 import type { AdminUserRow, ApplicationStatus, DisputeRow, DisputeRuling, DisputeStatus, LedgerEntryRow, OrderRow, Role, SupplierVerificationApplicationRow } from "../lib/types";
@@ -50,6 +53,7 @@ const ALL_ROLES: Role[] = ["buyer", "supplier", "admin"];
 
 export default function AdminDashboard() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { notify } = useToast();
   const { checkingSession, user, signingOut, handleSignOut } = useSession();
 
@@ -63,6 +67,9 @@ export default function AdminDashboard() {
   const [users, setUsers] = useState<AdminUserRow[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [changingRoleId, setChangingRoleId] = useState<number | null>(null);
+  const [suspendingTarget, setSuspendingTarget] = useState<AdminUserRow | null>(null);
+  const [suspendReason, setSuspendReason] = useState("");
+  const [suspendBusy, setSuspendBusy] = useState(false);
 
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [loadingOrders, setLoadingOrders] = useState(true);
@@ -79,6 +86,14 @@ export default function AdminDashboard() {
 
   const isAdmin = user?.role === "admin";
 
+  // Push notificationclick deep-links here as e.g. /admin?order=482 (a
+  // dispute-related push, since admins otherwise have no per-order URL).
+  useEffect(() => {
+    const orderParam = searchParams.get("order");
+    if (orderParam && Number.isInteger(Number(orderParam))) setSelectedOrderId(Number(orderParam));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (checkingSession) return;
     if (!user) {
@@ -87,7 +102,7 @@ export default function AdminDashboard() {
     }
     if (!isAdmin) {
       // Same class of bug fixed in RootGate/BuyerDashboard: a supplier
-      // hitting /admin directly must land on /supplier, not /buyer — a
+      // hitting /admin directly must land on /supplier, not /buyer, a
       // supplier account has no buyer access at all.
       router.replace(user.role === "supplier" ? "/supplier" : "/buyer");
     }
@@ -240,6 +255,52 @@ export default function AdminDashboard() {
     }
   };
 
+  // Prompt 3, flow 10 / Decision 9, suspends/unsuspends a supplier.
+  // Blocks new orders immediately (createOrder's check); existing
+  // in-flight orders are deliberately untouched (see suspendSupplier's
+  // doc comment), this action doesn't cancel or refund anything on its
+  // own.
+  const handleUnsuspend = async (target: AdminUserRow) => {
+    setSuspendBusy(true);
+    try {
+      const res = await fetch(`/api/admin/users/${target.id}/suspend`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "unsuspend" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to reinstate account.");
+      setUsers((rows) => rows.map((u) => (u.id === target.id ? { ...u, suspended_at: null } : u)));
+      notify("success", `${target.username ? "@" + target.username : target.email} is reinstated.`);
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to reinstate account.");
+    } finally {
+      setSuspendBusy(false);
+    }
+  };
+
+  const handleConfirmSuspend = async () => {
+    if (!suspendingTarget || !suspendReason.trim()) return;
+    setSuspendBusy(true);
+    try {
+      const res = await fetch(`/api/admin/users/${suspendingTarget.id}/suspend`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "suspend", reason: suspendReason.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to suspend account.");
+      setUsers((rows) => rows.map((u) => (u.id === suspendingTarget.id ? { ...u, suspended_at: new Date().toISOString() } : u)));
+      notify("success", `${suspendingTarget.username ? "@" + suspendingTarget.username : suspendingTarget.email} is suspended.`);
+      setSuspendingTarget(null);
+      setSuspendReason("");
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to suspend account.");
+    } finally {
+      setSuspendBusy(false);
+    }
+  };
+
   const handleResolveDispute = async (disputeId: number, ruling: DisputeRuling, notes: string) => {
     setResolvingId(disputeId);
     try {
@@ -256,7 +317,7 @@ export default function AdminDashboard() {
           ? " Refund initiated."
           : data.autoActionTaken === "release_initiated"
           ? " Release initiated."
-          : " Ruling recorded — no automatic fund movement (order already settled or outside the pre-release window).";
+          : " Ruling recorded. No automatic fund movement (order already settled or outside the pre-release window).";
       notify("success", `Dispute resolved for the ${ruling}.${actionNote}`);
     } catch (err) {
       notify("error", err instanceof Error ? err.message : "Failed to resolve dispute.");
@@ -312,6 +373,7 @@ export default function AdminDashboard() {
       user={user}
       onSignOut={handleSignOut}
       signingOut={signingOut}
+      notificationBell={<NotificationBell />}
       pageTitle={
         section === "overview"
           ? "Admin overview"
@@ -335,7 +397,7 @@ export default function AdminDashboard() {
           : section === "disputes"
           ? "Buyer-raised issues, before and after settlement."
           : section === "ledger"
-          ? "The double-entry record behind every order — every account should net to what you'd expect."
+          ? "The double-entry record behind every order. Every account should net to what you'd expect."
           : "Every account on SourceFi and its current role."
       }
     >
@@ -366,7 +428,7 @@ export default function AdminDashboard() {
                 <Loader2 size={22} className="spin-icon text-accent" />
               </div>
             ) : applications.length === 0 ? (
-              <EmptyState message="No pending applications right now." />
+              <SharedEmptyState title="No pending applications right now" description="New supplier verification requests show up here for review." />
             ) : (
               <div className="grid gap-3">
                 {applications.slice(0, 3).map((a) => (
@@ -400,7 +462,7 @@ export default function AdminDashboard() {
               <Loader2 size={22} className="spin-icon text-accent" />
             </div>
           ) : applications.length === 0 ? (
-            <EmptyState message={`No ${applicationsStatus} applications.`} />
+            <SharedEmptyState title={`No ${applicationsStatus} applications`} />
           ) : (
             <div className="grid gap-3">
               {applications.map((a) => (
@@ -423,7 +485,7 @@ export default function AdminDashboard() {
               <Loader2 size={22} className="spin-icon text-accent" />
             </div>
           ) : orders.length === 0 ? (
-            <EmptyState message="No orders on the platform yet." />
+            <SharedEmptyState title="No orders on the platform yet" description="Orders appear here as soon as a buyer creates one." />
           ) : (
             <div className="grid gap-3">
               {orders.map((o) => (
@@ -456,7 +518,7 @@ export default function AdminDashboard() {
               <Loader2 size={22} className="spin-icon text-accent" />
             </div>
           ) : disputes.length === 0 ? (
-            <EmptyState message={`No ${disputesStatus.replace("_", " ")} disputes.`} />
+            <SharedEmptyState title={`No ${disputesStatus.replace("_", " ")} disputes`} />
           ) : (
             <div className="grid gap-3">
               {disputes.map((d) => (
@@ -483,7 +545,7 @@ export default function AdminDashboard() {
               <div>
                 <h2 className="mb-3 font-display text-lg italic text-text-primary">Account balances (all-time, net)</h2>
                 {ledgerBalances.length === 0 ? (
-                  <EmptyState message="No ledger activity yet — entries appear once an order reaches funded." />
+                  <SharedEmptyState title="No ledger activity yet" description="Entries appear once an order reaches funded." />
                 ) : (
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                     {ledgerBalances.map((b) => (
@@ -501,7 +563,7 @@ export default function AdminDashboard() {
               <div>
                 <h2 className="mb-3 font-display text-lg italic text-text-primary">Recent entries</h2>
                 {ledgerEntries.length === 0 ? (
-                  <EmptyState message="No ledger entries yet." />
+                  <SharedEmptyState title="No ledger entries yet" />
                 ) : (
                   <Table>
                     <Thead>
@@ -547,7 +609,7 @@ export default function AdminDashboard() {
               <Loader2 size={22} className="spin-icon text-accent" />
             </div>
           ) : users.length === 0 ? (
-            <EmptyState message="No users found." />
+            <SharedEmptyState title="No users found" />
           ) : (
             <Table>
               <Thead>
@@ -555,8 +617,10 @@ export default function AdminDashboard() {
                   <Th>User</Th>
                   <Th>Email</Th>
                   <Th>Role</Th>
+                  <Th>Status</Th>
                   <Th>Joined</Th>
                   <Th>Change role</Th>
+                  <Th>Account</Th>
                 </Tr>
               </Thead>
               <Tbody>
@@ -566,6 +630,9 @@ export default function AdminDashboard() {
                     <Td className="text-text-secondary">{u.email}</Td>
                     <Td>
                       <Badge tone={ROLE_TONE[u.role]}>{u.role}</Badge>
+                    </Td>
+                    <Td>
+                      {u.suspended_at ? <Badge tone="danger">Suspended</Badge> : <Badge tone="success">Active</Badge>}
                     </Td>
                     <Td className="text-text-secondary">{new Date(u.created_at).toLocaleDateString()}</Td>
                     <Td>
@@ -589,11 +656,51 @@ export default function AdminDashboard() {
                         </div>
                       )}
                     </Td>
+                    <Td>
+                      {u.role === "supplier" && u.email !== user.identity && (
+                        u.suspended_at ? (
+                          <Button size="sm" variant="secondary" loading={suspendBusy} onClick={() => handleUnsuspend(u)}>
+                            Reinstate
+                          </Button>
+                        ) : (
+                          <Button size="sm" variant="danger" onClick={() => setSuspendingTarget(u)}>
+                            Suspend
+                          </Button>
+                        )
+                      )}
+                    </Td>
                   </Tr>
                 ))}
               </Tbody>
             </Table>
           )}
+
+          <ConfirmDialog
+            open={suspendingTarget !== null}
+            tone="danger"
+            title="Suspend supplier account"
+            body={
+              <>
+                <p>
+                  <strong>{suspendingTarget?.username ? "@" + suspendingTarget.username : suspendingTarget?.email}</strong>{" "}
+                  won&rsquo;t be able to receive new orders. Their existing in-flight orders are NOT affected, they
+                  continue normally.
+                </p>
+                <div className="mt-3">
+                  <Label htmlFor="suspend-reason">Reason (required)</Label>
+                  <Textarea id="suspend-reason" value={suspendReason} onChange={(e) => setSuspendReason(e.target.value)} required />
+                </div>
+              </>
+            }
+            confirmLabel="Suspend account"
+            loading={suspendBusy}
+            confirmDisabled={!suspendReason.trim()}
+            onConfirm={handleConfirmSuspend}
+            onCancel={() => {
+              setSuspendingTarget(null);
+              setSuspendReason("");
+            }}
+          />
         </div>
       )}
 
@@ -690,6 +797,13 @@ function DisputeCard({
   onResolve?: (disputeId: number, ruling: DisputeRuling, notes: string) => void;
 }) {
   const [notes, setNotes] = useState("");
+  // A ruling can trigger a REAL refund or release (see
+  // lib/orderService.ts's resolveDispute, "if the order is still
+  // pre-release, this auto-fires the payment boundary") with zero
+  // confirmation before this fix, exactly the gap flagged after the
+  // feedback-layer pass: financial/irreversible actions need explicit
+  // confirmation with the exact amount, same as OrderDetailsModal.
+  const [pendingRuling, setPendingRuling] = useState<DisputeRuling | null>(null);
 
   return (
     <div className="rounded-xl border border-border bg-surface p-5">
@@ -715,24 +829,42 @@ function DisputeCard({
         <div className="mt-4 flex flex-col gap-2 border-t border-border pt-4">
           <Textarea placeholder="Resolution notes (required)" value={notes} onChange={(e) => setNotes(e.target.value)} />
           <div className="flex gap-2">
-            <Button size="sm" variant="primary" loading={resolving} disabled={!notes.trim()} onClick={() => onResolve(dispute.id, "buyer", notes)}>
+            <Button size="sm" variant="primary" disabled={!notes.trim()} onClick={() => setPendingRuling("buyer")}>
               Rule for buyer
             </Button>
-            <Button size="sm" variant="secondary" disabled={resolving || !notes.trim()} onClick={() => onResolve(dispute.id, "supplier", notes)}>
+            <Button size="sm" variant="secondary" disabled={!notes.trim()} onClick={() => setPendingRuling("supplier")}>
               Rule for supplier
             </Button>
           </div>
+          <ConfirmDialog
+            open={pendingRuling !== null}
+            tone="danger"
+            title="Confirm ruling"
+            body={
+              <>
+                Ruling for the <strong>{pendingRuling}</strong>
+                {dispute.order && (
+                  <>
+                    {" "}
+                    can move <strong>{formatMoney(dispute.order.amount_minor, "NGN")}</strong>
+                  </>
+                )}{" "}
+                If this order&rsquo;s funds are still in escrow, ruling for the{" "}
+                {pendingRuling === "buyer" ? "buyer triggers a refund" : "supplier triggers a release"} automatically.
+                This can&rsquo;t be undone once the transfer confirms.
+              </>
+            }
+            confirmLabel={`Yes, rule for the ${pendingRuling ?? ""}`}
+            loading={resolving}
+            onConfirm={() => {
+              if (pendingRuling) onResolve(dispute.id, pendingRuling, notes);
+              setPendingRuling(null);
+            }}
+            onCancel={() => setPendingRuling(null)}
+          />
         </div>
       )}
     </div>
   );
 }
 
-function EmptyState({ message }: { message: string }) {
-  return (
-    <div className="rounded-[10px] border-[1.5px] border-dashed border-border bg-surface px-5 py-10 text-center">
-      <Info size={24} className="mx-auto mb-2 text-text-tertiary" />
-      <p className="mx-auto max-w-[320px] text-sm text-text-secondary">{message}</p>
-    </div>
-  );
-}

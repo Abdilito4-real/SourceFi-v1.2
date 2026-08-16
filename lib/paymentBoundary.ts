@@ -1,16 +1,17 @@
 // lib/paymentBoundary.ts
 //
-// docs/marketplace-payments-design.md Section E — the contract between
+// docs/marketplace-payments-design.md Section E, the contract between
 // this application layer and the payment/blockchain layer (Yellow Card +
 // Circle + smart contracts), which is explicitly NOT this codebase's
 // responsibility to implement (see the design doc's Section 9 / "My
 // Responsibilities"). Nothing in app/ ever imports a Yellow Card or
-// Circle SDK directly — every route that moves money calls one of these
+// Circle SDK directly, every route that moves money calls one of these
 // four functions and reacts to reportPaymentStatus updates, whether
 // those arrive by webhook or by a poll job. That's what makes it
 // possible to build and test the entire order/ledger/dispute/rating flow
 // against StubPaymentProvider below before the real integration exists,
 // and to swap it in later without touching route code.
+import "server-only";
 import type { DisputeType, PaymentLeg, PaymentProvider } from "./types";
 
 export interface FundingResult {
@@ -35,11 +36,11 @@ export interface RatingSubmissionResult {
 
 /** The shape both a webhook handler and a poll job normalize provider
  * responses into before handing them to the order-service layer (Stage 4
- * of the pivot) — which is what actually writes payment_events,
+ * of the pivot), which is what actually writes payment_events
  * advances orders.status via lib/orderStateMachine.ts, and calls
  * lib/ledger.ts once a leg is truly confirmed. txHash is only ever
  * present once a transfer has ACTUALLY reached a confirmed state on the
- * provider's side — never synthesized here or anywhere downstream (see
+ * provider's side, never synthesized here or anywhere downstream (see
  * design doc Section D.0). */
 export interface PaymentStatusEvent {
   orderId: number;
@@ -53,7 +54,7 @@ export interface PaymentStatusEvent {
 }
 
 /** The full boundary. An implementation of this interface is the ONLY
- * thing route code is allowed to depend on for money movement — never a
+ * thing route code is allowed to depend on for money movement, never a
  * concrete Yellow Card/Circle client. */
 export interface PaymentBoundary {
   /** Called when the buyer clicks "Fund Order". */
@@ -71,16 +72,16 @@ export interface PaymentBoundary {
   ): Promise<RatingSubmissionResult>;
 }
 
-/** A deliberately fake, deterministic implementation — no network calls,
+/** A deliberately fake, deterministic implementation, no network calls
  * no credentials required. Exists so the order routes (Stage 3 cont'd /
  * Stage 4 of the pivot) and their tests can exercise the ENTIRE
  * pending_payment -> ... -> settled lifecycle without Yellow Card or
  * Circle existing yet, per the design doc's stated goal of incremental
  * integration. Swap PaymentBoundary implementations via
- * getPaymentProvider() below — never by editing route code.
+ * getPaymentProvider() below, never by editing route code.
  *
  * Behavior: every `initiate*` call immediately reports "processing" (this
- * always matches reality — no payment API confirms synchronously, see
+ * always matches reality, no payment API confirms synchronously, see
  * design doc Section D.0) and schedules a fake confirmation a few
  * milliseconds later via the injected `onStatusUpdate` callback, so a
  * caller who wires that callback up to the real order-service state
@@ -116,12 +117,12 @@ export class StubPaymentProvider implements PaymentBoundary {
     void this.scheduleConfirmation(orderId, "release", "circle", releaseReference).then(() => {
       // lib/orderService.ts's handleReleaseConfirmed auto-advances
       // escrow_released -> settlement_processing and then waits for a
-      // SEPARATE leg='settlement' event — by design (Section E), there's
+      // SEPARATE leg='settlement' event, by design (Section E), there's
       // no initiateSettlement boundary call, because a real Yellow Card
       // integration reports that back on its own timeline once the NGN
       // payout actually completes, not something we initiate. The stub
       // has no real Yellow Card to ever send that follow-up event on its
-      // own, though — without simulating it here, EVERY order would hang
+      // own, though, without simulating it here, EVERY order would hang
       // in settlement_processing forever, which is exactly the bug this
       // fixes (an order stuck on "Processing the payment to your
       // supplier" indefinitely). This compressed immediate chaining is
@@ -145,7 +146,7 @@ export class StubPaymentProvider implements PaymentBoundary {
     _score: number,
     _comment: string | null
   ): Promise<RatingSubmissionResult> {
-    // Deliberately NOT auto-confirmed like the other three — see design
+    // Deliberately NOT auto-confirmed like the other three, see design
     // doc Open Question 10: on-chain ratings mechanics (which
     // chain/contract) aren't decided yet. This stub returns "submitted",
     // never "confirmed", so calling code can't accidentally treat a
@@ -174,7 +175,7 @@ export class StubPaymentProvider implements PaymentBoundary {
 /** dispute_type values that are eligible to actually trigger
  * initiateRefund automatically once an admin rules for the buyer, vs.
  * ones where the ruling is recorded but money movement stays a manual
- * step until Stage 9's real integration exists — see design doc Open
+ * step until Stage 9's real integration exists, see design doc Open
  * Question 9. Not wired into anything yet; exported so the
  * dispute-resolution route (Stage 3 cont'd) has one place to check
  * rather than an inline decision. */

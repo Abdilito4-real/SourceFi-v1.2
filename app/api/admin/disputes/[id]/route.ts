@@ -1,11 +1,11 @@
 // app/api/admin/disputes/[id]/route.ts
 //
 // Admin resolves a dispute. Delegates entirely to
-// lib/orderService.ts's resolveDispute() — see that function's doc
+// lib/orderService.ts's resolveDispute(), see that function's doc
 // comment for exactly which cases automatically call into the payment
 // boundary (refund/release) versus which ones only record the ruling
 // for manual follow-up (design doc Open Question 9, genuinely
-// unresolved — this route does not silently invent an answer either).
+// unresolved, this route does not silently invent an answer either).
 import { getSupabaseServerClient } from "../../../../../lib/supabaseServer";
 import { requireRole, logAudit } from "../../../../../lib/authz";
 import { getPaymentProvider } from "../../../../../lib/paymentProvider";

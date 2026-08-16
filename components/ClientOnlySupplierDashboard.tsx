@@ -1,6 +1,6 @@
 "use client";
 
-// components/ClientOnlySupplierDashboard.tsx — see ClientOnlyRootGate.tsx
+// components/ClientOnlySupplierDashboard.tsx, see ClientOnlyRootGate.tsx
 // for why this boundary exists. Supersedes ClientOnlySourcerDashboard.tsx.
 import nextDynamic from "next/dynamic";
 

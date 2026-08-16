@@ -3,14 +3,14 @@
 -- Stage 4 (auth and roles). Run this against your Supabase project's SQL
 -- editor (or via `supabase db push` if you've adopted the CLI) before
 -- deploying the Stage 4 code. There is no formal migrations runner wired
--- up yet — Stage 5 (data layer) is where a real schema/migration story
+-- up yet, Stage 5 (data layer) is where a real schema/migration story
 -- gets built; this file exists now because Stage 4 can't ship without it.
 --
 -- Idempotent: safe to re-run. Assumes the `users` and `requests` tables
 -- already exist in the shape app/api/escrow/route.ts and
 -- app/api/requests/**/route.ts have always read/written (id, email,
 -- username, wallet_address, wallet_id, wallet_set_id, funding_password,
--- funding_password_reset_at) — this migration only adds to that.
+-- funding_password_reset_at), this migration only adds to that.
 
 -- ---------------------------------------------------------------------------
 -- users: add role + the verified Privy identity we now key sessions on
@@ -30,7 +30,7 @@ end $$;
 
 -- The authoritative link to a verified Privy session (their DID, e.g.
 -- "did:privy:clxxxxxxx..."). Server-verified once per session via
--- @privy-io/node — see lib/privyServer.ts — never client-supplied.
+-- @privy-io/node, see lib/privyServer.ts, never client-supplied.
 -- Nullable: existing rows created before Stage 4 won't have one until
 -- their next login re-establishes a session.
 alter table users
@@ -69,7 +69,7 @@ create index if not exists idx_audit_log_created_at on audit_log (created_at des
 -- ---------------------------------------------------------------------------
 -- Bootstrapping the first admin
 --
--- There is deliberately no self-service or API path to become an admin —
+-- There is deliberately no self-service or API path to become an admin
 -- that's the whole point of removing the old hardcoded-password "Sourcer
 -- Access" gate. The very first admin has to be set directly in the
 -- database. Replace the email below and run once:

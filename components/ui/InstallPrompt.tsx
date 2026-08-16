@@ -2,16 +2,16 @@
 
 // components/ui/InstallPrompt.tsx
 //
-// Captures beforeinstallprompt (Chrome/Edge/Android — Safari has no
+// Captures beforeinstallprompt (Chrome/Edge/Android, Safari has no
 // equivalent event and always shows its own native "Add to Home Screen"
 // affordance instead, so this component simply never appears there).
-// Dismissal is remembered permanently, not just for the session — "don't
+// Dismissal is remembered permanently, not just for the session, "don't
 // nag" means don't ask again next visit either, not just this one.
 import { useEffect, useState } from "react";
 import { Download, X } from "lucide-react";
 import Button from "./Button";
 
-// Not part of lib.dom.d.ts — this is a real, standard event
+// Not part of lib.dom.d.ts, this is a real, standard event
 // (https://developer.mozilla.org/en-US/docs/Web/API/BeforeInstallPromptEvent)
 // that TypeScript's bundled DOM types simply don't ship yet.
 interface BeforeInstallPromptEvent extends Event {
@@ -31,7 +31,7 @@ export default function InstallPrompt() {
     try {
       dismissed = localStorage.getItem(DISMISS_KEY) === "true";
     } catch (e) {
-      /* localStorage unavailable — fall through and just don't nag this session */
+      /* localStorage unavailable, fall through and just don't nag this session */
     }
     if (dismissed) return;
 
@@ -43,7 +43,7 @@ export default function InstallPrompt() {
     window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt);
 
     // If the app gets installed by any means (this card, the browser's own
-    // menu item, an existing install), stop offering — there's nothing left
+    // menu item, an existing install), stop offering, there's nothing left
     // to prompt for.
     const onInstalled = () => setVisible(false);
     window.addEventListener("appinstalled", onInstalled);
@@ -69,7 +69,7 @@ export default function InstallPrompt() {
     await deferredPrompt.userChoice;
     setDeferredPrompt(null);
     setVisible(false);
-    // Deliberately not persisting DISMISS_KEY here — if they accepted, the
+    // Deliberately not persisting DISMISS_KEY here, if they accepted, the
     // 'appinstalled' listener above handles it; if they declined via the
     // native dialog, it's reasonable to offer again on a later visit rather
     // than treating a native-dialog "not now" the same as dismissing our card.

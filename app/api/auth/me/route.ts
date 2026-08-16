@@ -2,12 +2,13 @@
 //
 // Read-only: lets the client fetch its own verified identity + role to
 // display (role switcher, "you're a sourcer" UI, etc.). This is the ONLY
-// server-sanctioned source for "what role am I" on the client — nothing
+// server-sanctioned source for "what role am I" on the client, nothing
 // derives role from localStorage anymore. It's still just a display hint,
 // though: every actual protected action re-checks role itself via
 // requireRole(), not by trusting that the client read this correctly.
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { requireSession } from "../../../../lib/authz";
+import { dbErrorResponse } from "../../../../lib/dbErrorResponse";
 
 export async function GET() {
   const auth = await requireSession();
@@ -26,7 +27,7 @@ export async function GET() {
   });
 }
 
-// Onboarding's "choose a username" step. Self-service is fine here — you
+// Onboarding's "choose a username" step. Self-service is fine here, you
 // can only ever rename the account the session cookie already proves is
 // yours, so there's no client-supplied-identity risk the way there was in
 // the old authSync action this replaces.
@@ -51,7 +52,7 @@ export async function PATCH(request: Request) {
     .single();
 
   if (error) {
-    return Response.json({ error: error.message }, { status: 500 });
+    return dbErrorResponse("PATCH auth/me username", error);
   }
 
   return Response.json({

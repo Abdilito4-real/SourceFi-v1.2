@@ -3,11 +3,11 @@
 // components/SupplierVerificationForm.tsx
 //
 // Extracted from SupplierDashboard.tsx so it can be reused from
-// BuyerDashboard.tsx too — a REJECTED first-time applicant is still
+// BuyerDashboard.tsx too, a REJECTED first-time applicant is still
 // role='buyer' (only approval flips the role) and, until this component
 // was shared, had no way to reapply at all: the re-apply form only ever
 // lived inside /supplier, which a plain buyer can't reach. Same POST
-// /api/supplier-verification either way — first application, expired-
+// /api/supplier-verification either way, first application, expired-
 // supplier re-verification, and a rejected applicant trying again all go
 // through this one form.
 import React, { useState } from "react";
@@ -39,7 +39,7 @@ export default function SupplierVerificationForm({ onSubmitted }: { onSubmitted:
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to submit application.");
-      notify("success", "Verification application submitted — an admin will review it.");
+      notify("success", "Verification application submitted. An admin will review it.");
       onSubmitted();
     } catch (err) {
       notify("error", err instanceof Error ? err.message : "Failed to submit application.");

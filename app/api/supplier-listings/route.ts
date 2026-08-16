@@ -1,16 +1,18 @@
 // app/api/supplier-listings/route.ts
 //
-// A supplier managing their own material/product catalog — GET returns
+// A supplier managing their own material/product catalog, GET returns
 // every listing they own (active and inactive, so they can see what's
 // paused), POST creates a new one. Supplier-only; resolved from the
 // session's own supplier_profiles row, never a client-supplied
-// supplier id. Does NOT require the supplier to be currently verified —
+// supplier id. Does NOT require the supplier to be currently verified
 // verification gates whether buyers can SEE a listing (GET
 // /api/materials) and whether an order can be FUNDED against them, not
 // whether a supplier can manage their own catalog during a brief
 // re-verification gap.
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
 import { requireRole } from "../../../lib/authz";
+import { isSafeHttpUrl } from "../../../lib/safeUrl";
+import { dbErrorResponse } from "../../../lib/dbErrorResponse";
 
 async function resolveSupplierProfileId(supabase: ReturnType<typeof getSupabaseServerClient>, userId: number): Promise<number | null> {
   const { data } = await supabase.from("supplier_profiles").select("id").eq("user_id", userId).maybeSingle();
@@ -31,7 +33,7 @@ export async function GET() {
     .eq("supplier_id", supplierId)
     .is("deleted_at", null)
     .order("created_at", { ascending: false });
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbErrorResponse("GET supplier-listings", error);
 
   return Response.json({ listings: data || [] });
 }
@@ -49,7 +51,8 @@ export async function POST(request: Request) {
   const category = typeof body?.category === "string" ? body.category.trim() || null : null;
   const description = typeof body?.description === "string" ? body.description.trim() || null : null;
   const unit = typeof body?.unit === "string" ? body.unit.trim() || null : null;
-  const imageUrl = typeof body?.imageUrl === "string" ? body.imageUrl.trim() || null : null;
+  const rawImageUrl = typeof body?.imageUrl === "string" ? body.imageUrl.trim() : "";
+  const imageUrl = rawImageUrl && isSafeHttpUrl(rawImageUrl) ? rawImageUrl : null;
 
   if (!name) return Response.json({ error: "A name is required." }, { status: 400 });
 
@@ -74,7 +77,7 @@ export async function POST(request: Request) {
     })
     .select("*")
     .single();
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbErrorResponse("POST supplier-listings", error);
 
   return Response.json({ listing: data });
 }

@@ -1,6 +1,6 @@
 // lib/privyServer.ts
 //
-// Server-side Privy verification — the ONE place in this codebase allowed
+// Server-side Privy verification, the ONE place in this codebase allowed
 // to say "this request really is from the person it claims to be." Every
 // protected API route goes through this (via lib/authz.ts), never through
 // a client-supplied email/role again.
@@ -8,12 +8,13 @@
 // Deliberately does NOT use @privy-io/react-auth's client hooks or trust
 // anything the browser sends except the access token itself. The access
 // token is a short-lived (~1hr), auto-refreshed JWT obtained client-side
-// via `usePrivy().getAccessToken()` — see components/App.tsx's session
+// via `usePrivy().getAccessToken()`, see components/App.tsx's session
 // bootstrap. Privy's own httpOnly-cookie session mode requires a verified
 // production domain configured in their Dashboard (not available in local
-// dev, and not something this codebase can configure for you) — so instead
+// dev, and not something this codebase can configure for you), so instead
 // we verify this token ONCE per session establishment and mint our own
 // first-party session cookie (lib/session.ts) for every request after that.
+import "server-only";
 import { PrivyClient, type User as PrivyUser } from "@privy-io/node";
 
 const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID;
@@ -41,7 +42,7 @@ function getPrivyClient(): PrivyClient {
 }
 
 export interface VerifiedPrivyIdentity {
-  /** The user's Privy DID (e.g. "did:privy:clxxxxxxx") — the one
+  /** The user's Privy DID (e.g. "did:privy:clxxxxxxx"), the one
    * cryptographically-proven fact this module hands back. Everything else
    * about "who this is" is derived from OUR OWN users table, keyed on
    * this, not from anything else in the request. */
@@ -50,26 +51,26 @@ export interface VerifiedPrivyIdentity {
 
 export interface VerifiedPrivyProfile {
   privyUserId: string;
-  /** Privy guarantees an email can only ever be linked to one Privy user —
+  /** Privy guarantees an email can only ever be linked to one Privy user
    * this is what makes it safe to bind a pre-Stage-4 users row (looked up
    * by this exact email) to a verified DID the first time that DID logs
    * in. Never sourced from client-supplied request data. */
   email: string | null;
-  /** First linked EVM/Solana wallet address, if any — used to derive the
+  /** First linked EVM/Solana wallet address, if any, used to derive the
    * same `web3_<address>` pseudo-email convention the pre-Stage-4 code
    * already used, for wallet-only logins with no email account linked. */
   walletAddress: string | null;
 }
 
 /** Fetches the authoritative Privy user record for an already-verified DID
- * — this is where email/wallet get pulled from when linking or creating a
+ *, this is where email/wallet get pulled from when linking or creating a
  * users row, specifically so that step never has to trust anything the
  * client sent in its request body. */
 export async function getVerifiedPrivyProfile(privyUserId: string): Promise<VerifiedPrivyProfile> {
   const privy = getPrivyClient();
   const user: PrivyUser = await privy.users()._get(privyUserId);
 
-  // Privy's real User type has no top-level `email` convenience field —
+  // Privy's real User type has no top-level `email` convenience field
   // only `linked_accounts` (snake_case), a union of account types. Narrow
   // with both the discriminant and an `in` check rather than casting, so
   // this stays correct if the SDK's union shape changes under us.
@@ -84,7 +85,7 @@ export async function getVerifiedPrivyProfile(privyUserId: string): Promise<Veri
 
 /** Extracts a Bearer token from the Authorization header and verifies it
  * against Privy. Returns null (never throws) on anything short of a valid,
- * unexpired token — callers should treat null as "not authenticated" and
+ * unexpired token, callers should treat null as "not authenticated" and
  * respond 401, not as a caught error to log and forget. */
 export async function verifyPrivyAccessToken(request: Request): Promise<VerifiedPrivyIdentity | null> {
   const authHeader = request.headers.get("authorization");
@@ -98,11 +99,11 @@ export async function verifyPrivyAccessToken(request: Request): Promise<Verified
     if (!claims?.user_id) return null;
     return { privyUserId: claims.user_id };
   } catch (err) {
-    // Expired/tampered/malformed token, or Privy unreachable — all the
+    // Expired/tampered/malformed token, or Privy unreachable, all the
     // same outcome from the CALLER's perspective: not authenticated, so
     // the return value here stays null either way. But collapsing every
     // failure into that one generic case at the log level too was a real
-    // debugging cost — a missing PRIVY_APP_SECRET and an actually-expired
+    // debugging cost, a missing PRIVY_APP_SECRET and an actually-expired
     // token look identical from outside this function without this line.
     // Server-side only, never reaches the client response.
     console.error("verifyPrivyAccessToken failed:", err);

@@ -3,11 +3,11 @@
 // components/DashboardShell.tsx
 //
 // The shared sidebar + header shell for both /buyer and /sourcer. Replaces
-// TopBar.tsx's single horizontal bar — this is a real dashboard layout
+// TopBar.tsx's single horizontal bar, this is a real dashboard layout
 // (persistent left nav, distinct content sections), not a role-toggle
 // pill sitting on top of one long scrolling page. The sidebar's dark navy
 // surface is Rebrand-I's own design (see the --color-nav-* tokens in
-// app/globals.css) — it was defined back in Stage 2 but nothing used it
+// app/globals.css), it was defined back in Stage 2 but nothing used it
 // until now.
 import React, { useState } from "react";
 import Link from "next/link";
@@ -33,7 +33,7 @@ export interface SwitchLink {
 
 export interface DashboardShellProps {
   activeDashboard: "buyer" | "supplier" | "admin";
-  /** Which other dashboards this account can jump to — each caller
+  /** Which other dashboards this account can jump to, each caller
    * computes its own list from the real, server-verified role (see
    * BuyerDashboard/SourcerDashboard/AdminDashboard), not a single binary
    * toggle. Empty array renders no switch links at all. */
@@ -46,6 +46,7 @@ export interface DashboardShellProps {
   pageSubtitle?: string;
   headerAction?: React.ReactNode;
   accountCluster?: React.ReactNode;
+  notificationBell?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -146,13 +147,14 @@ export default function DashboardShell({
   pageSubtitle,
   headerAction,
   accountCluster,
+  notificationBell,
   children,
 }: DashboardShellProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   return (
     <div className="min-h-screen bg-bg font-body md:flex">
-      {/* Desktop sidebar — persistent, full height */}
+      {/* Desktop sidebar, persistent, full height */}
       <aside className="hidden w-64 shrink-0 md:block">
         <div className="sticky top-0 h-screen">
           <SidebarContent
@@ -216,6 +218,7 @@ export default function DashboardShell({
           </div>
           <div className="flex flex-wrap items-center gap-3">
             {accountCluster}
+            {notificationBell}
             <ThemeToggle />
             {headerAction}
           </div>

@@ -1,6 +1,6 @@
 "use client";
 
-// components/ui/Field.tsx — label, input, textarea, and error/helper text as
+// components/ui/Field.tsx, label, input, textarea, and error/helper text as
 // a matched set, since they're never used independently in this product.
 import React from "react";
 import { cn } from "./cn";

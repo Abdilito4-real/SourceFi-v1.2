@@ -33,7 +33,7 @@ export default function Badge({ tone = "neutral", className = "", children, ...p
 }
 
 // Maps the order lifecycle (lib/orderStateMachine.ts) to a tone. This is
-// the one place that mapping is defined — components import
+// the one place that mapping is defined, components import
 // ORDER_STATUS_TONE rather than re-deciding per status what color means
 // what.
 export const ORDER_STATUS_TONE: Record<OrderStatus, BadgeTone> = {

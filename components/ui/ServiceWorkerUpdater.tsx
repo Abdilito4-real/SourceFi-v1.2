@@ -4,7 +4,7 @@
 //
 // The service worker is registered with skipWaiting/clientsClaim OFF (see
 // next.config.mjs) specifically so a new version sits "waiting" instead of
-// silently taking over — a sourcer mid-audit must not have the app swap
+// silently taking over, a sourcer mid-audit must not have the app swap
 // out from under them. This is the other half of that contract: offer the
 // reload as a sticky toast with an explicit action, on the user's terms,
 // never force it.
@@ -17,7 +17,7 @@ export default function ServiceWorkerUpdater() {
 
   useEffect(() => {
     if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
-    if (process.env.NODE_ENV !== "production") return; // SW is disabled in dev — see next.config.mjs
+    if (process.env.NODE_ENV !== "production") return; // SW is disabled in dev, see next.config.mjs
 
     let cancelled = false;
 
@@ -26,10 +26,10 @@ export default function ServiceWorkerUpdater() {
       const wb = new Workbox("/sw.js");
 
       const offerReload = () => {
-        if (offeredRef.current) return; // one offer per waiting worker — don't nag
+        if (offeredRef.current) return; // one offer per waiting worker, don't nag
         offeredRef.current = true;
         notify("info", "New version available. Reload to update.", {
-          duration: 0, // sticky — this is a decision, not a status update
+          duration: 0, // sticky, this is a decision, not a status update
           action: {
             label: "Reload",
             onClick: () => {
@@ -41,7 +41,7 @@ export default function ServiceWorkerUpdater() {
       };
 
       // "externalwaiting" (fires when a different tab registers the newer
-      // worker) isn't in this workbox-window version's typed event map —
+      // worker) isn't in this workbox-window version's typed event map
       // dropped rather than cast around; "waiting" alone covers the case
       // that matters here (this tab's own registration going stale).
       wb.addEventListener("waiting", offerReload);

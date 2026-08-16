@@ -2,7 +2,7 @@
 
 // app/design-system/page.tsx
 //
-// Stage 2 preview route — every shared primitive in one place, both
+// Stage 2 preview route, every shared primitive in one place, both
 // themes, checked here before it gets used in the buyer/sourcer
 // dashboards. Not linked from product nav; reachable at /design-system.
 import React, { useState } from "react";
@@ -15,9 +15,13 @@ import { Card, CardHeader, CardBody, CardFooter } from "../../components/ui/Card
 import { Table, Thead, Tbody, Tr, Th, Td } from "../../components/ui/Table";
 import Badge, { ORDER_STATUS_TONE } from "../../components/ui/Badge";
 import Modal from "../../components/ui/Modal";
+import ConfirmDialog from "../../components/ui/ConfirmDialog";
+import ErrorPanel from "../../components/ui/ErrorPanel";
+import TransactionProgress, { type TransactionStep } from "../../components/ui/TransactionProgress";
 import { useToast } from "../../components/ui/Toast";
 import EmptyState from "../../components/ui/EmptyState";
 import Skeleton from "../../components/ui/Skeleton";
+import { formatMoney, TYPED_CONFIRMATION_THRESHOLD_MINOR } from "../../lib/money";
 import type { OrderStatus } from "../../lib/types";
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
@@ -97,20 +101,27 @@ const SAMPLE_ROWS: SampleRow[] = [
 ];
 
 export default function DesignSystemPreview() {
-  const { notify } = useToast();
+  const { notify, update } = useToast();
   const [modalOpen, setModalOpen] = useState(false);
   const [invalidDemo, setInvalidDemo] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [typedConfirmOpen, setTypedConfirmOpen] = useState(false);
+  const [confirmLoading, setConfirmLoading] = useState(false);
+  const [txStep, setTxStep] = useState<TransactionStep>("submitted");
+  const [txFailed, setTxFailed] = useState(false);
+  const [showErrorPanel, setShowErrorPanel] = useState(true);
+  const [retrying, setRetrying] = useState(false);
+  const bigAmount = formatMoney(TYPED_CONFIRMATION_THRESHOLD_MINOR + 50_000_00, "NGN");
 
   return (
     <div className="min-h-screen bg-bg pb-24">
       <header className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-bg px-5 py-4">
-        {/* Same opacity-modifier caveat as Toast.tsx — var()-based colors
-            don't support Tailwind's /alpha suffix, so this stays fully opaque. */}
+        {/* var()-based colors don't support Tailwind's /alpha suffix, stays opaque. */}
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-md bg-accent">
             <Package size={16} className="text-accent-contrast" />
           </div>
-          <span className="font-display text-lg font-semibold text-text-primary">SourceFi — Design System</span>
+          <span className="font-display text-lg font-semibold text-text-primary">SourceFi Design System</span>
         </div>
         <ThemeToggle />
       </header>
@@ -118,8 +129,8 @@ export default function DesignSystemPreview() {
       <main className="mx-auto max-w-3xl px-5 pt-10">
         <p className="mb-14 max-w-xl text-base text-text-secondary">
           Stage 2 preview. Everything below is styled entirely through Tailwind color names that resolve to the CSS
-          custom properties in <code className="font-mono text-accent-text">app/globals.css</code>. Toggle the theme
-          — nothing here should need a code change to look right in either mode.
+          custom properties in <code className="font-mono text-accent-text">app/globals.css</code>. Toggle the theme:
+          nothing here should need a code change to look right in either mode.
         </p>
 
         <Section title="Color tokens (current theme)">
@@ -130,7 +141,7 @@ export default function DesignSystemPreview() {
           </div>
         </Section>
 
-        <Section title="Type scale — Circular (Lineto) display, falls back to Roboto / Roboto body / IBM Plex Mono labels">
+        <Section title="Type scale: Circular (Lineto) display, Roboto body, IBM Plex Mono labels">
           <div className="flex flex-col gap-3">
             {TYPE_SCALE.map(([label, classes]) => (
               <div key={label} className="flex flex-wrap items-baseline gap-3 border-b border-border pb-3">
@@ -143,9 +154,7 @@ export default function DesignSystemPreview() {
 
         <Section title="Radii & shadow">
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            {/* Tailwind's JIT only picks up class names it can see literally in
-                source — no string-interpolated class names, so each radius
-                gets its own explicit div rather than a computed className. */}
+            {/* Tailwind's JIT needs literal class names, so no computed className here. */}
             <div className="flex h-16 items-center justify-center rounded-sm border border-border bg-surface text-xs text-text-secondary">
               sm
             </div>
@@ -188,19 +197,162 @@ export default function DesignSystemPreview() {
             <div className="flex flex-wrap items-center gap-3">
               <Button loading>Loading</Button>
               <Button disabled>Disabled</Button>
-              <Button
-                onClick={() => notify("success", "Escrow deposit recorded successfully.")}
-              >
-                Trigger success toast
-              </Button>
-              <Button variant="danger" onClick={() => notify("error", "Sourcing claim failed to submit.")}>
-                Trigger error toast
-              </Button>
             </div>
             <Button fullWidth className="max-w-sm">
               Full width
             </Button>
           </div>
+        </Section>
+
+        <Section title="Toasts: transient, non-critical feedback only">
+          <p className="mb-4 max-w-xl text-sm text-text-secondary">
+            Success/info/loading auto-dismiss after 4s. Error and warning don't, the user dismisses them. Fire the
+            same message twice fast to see it dedupe into a count instead of stacking.
+          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={() => notify("success", "Draft saved.")}>Success</Button>
+            <Button variant="danger" onClick={() => notify("error", "Couldn't fund escrow. Your bank declined the transfer. No money has left your account.")}>
+              Error (sticky)
+            </Button>
+            <Button variant="secondary" onClick={() => notify("warning", "This is taking longer than usual.")}>
+              Warning (sticky)
+            </Button>
+            <Button variant="secondary" onClick={() => notify("info", "Filters cleared.")}>
+              Info
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                // update() turns the sticky "loading" toast into "success"
+                // in place instead of stacking a second toast.
+                const id = notify("loading", "Submitting…");
+                setTimeout(() => update(id, "success", "Submitted."), 1400);
+              }}
+            >
+              Loading → success (update() demo)
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                notify("error", "Failed to load orders.");
+                notify("error", "Failed to load orders.");
+                notify("error", "Failed to load orders.");
+              }}
+            >
+              Fire same error ×3 (dedupe demo)
+            </Button>
+          </div>
+        </Section>
+
+        <Section title="Transaction progress: submitted / processing / confirmed">
+          <p className="mb-4 max-w-xl text-sm text-text-secondary">
+            Escalates a bare spinner into three distinguishable, non-color-only states. Used inline in{" "}
+            <code className="font-mono text-accent-text">OrderDetailsModal</code> while a fund/release leg is in
+            flight.
+          </p>
+          <div className="max-w-sm rounded-lg border border-border bg-surface-sunken p-4">
+            <TransactionProgress state={txStep} failed={txFailed} />
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={() => { setTxStep("submitted"); setTxFailed(false); }}>
+              Submitted
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => { setTxStep("processing"); setTxFailed(false); }}>
+              Processing
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => { setTxStep("confirmed"); setTxFailed(false); }}>
+              Confirmed
+            </Button>
+            <Button size="sm" variant="danger" onClick={() => setTxFailed(true)}>
+              Mark current step failed
+            </Button>
+          </div>
+        </Section>
+
+        <Section title="Confirm dialog: irreversible/financial actions">
+          <p className="mb-4 max-w-xl text-sm text-text-secondary">
+            Non-dismissible by backdrop click or Escape, only its own buttons close it. Above a configurable
+            threshold ({formatMoney(TYPED_CONFIRMATION_THRESHOLD_MINOR, "NGN")}), Confirm stays disabled until the
+            exact amount is typed back.
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <Button onClick={() => setConfirmOpen(true)}>Release {formatMoney(45_000_00, "NGN")} (plain confirm)</Button>
+            <Button variant="danger" onClick={() => setTypedConfirmOpen(true)}>
+              Release {bigAmount} (typed confirm)
+            </Button>
+          </div>
+          <ConfirmDialog
+            open={confirmOpen}
+            tone="danger"
+            title="Confirm release"
+            body={
+              <>
+                You&rsquo;re about to release <strong>{formatMoney(45_000_00, "NGN")}</strong> to{" "}
+                <strong>Lagos BuildCo</strong>. This can&rsquo;t be undone once the transfer confirms.
+              </>
+            }
+            confirmLabel={`Yes, release ${formatMoney(45_000_00, "NGN")}`}
+            loading={confirmLoading}
+            onConfirm={() => {
+              setConfirmLoading(true);
+              setTimeout(() => {
+                setConfirmLoading(false);
+                setConfirmOpen(false);
+                notify("success", "Funds released.");
+              }, 900);
+            }}
+            onCancel={() => setConfirmOpen(false)}
+          />
+          <ConfirmDialog
+            open={typedConfirmOpen}
+            tone="danger"
+            title="Confirm release"
+            body={
+              <>
+                You&rsquo;re about to release <strong>{bigAmount}</strong> to <strong>Lagos BuildCo</strong>. This
+                can&rsquo;t be undone once the transfer confirms.
+              </>
+            }
+            confirmLabel={`Yes, release ${bigAmount}`}
+            requireTypedConfirmation={bigAmount}
+            loading={confirmLoading}
+            onConfirm={() => {
+              setConfirmLoading(true);
+              setTimeout(() => {
+                setConfirmLoading(false);
+                setTypedConfirmOpen(false);
+                notify("success", "Funds released.");
+              }, 900);
+            }}
+            onCancel={() => setTypedConfirmOpen(false)}
+          />
+        </Section>
+
+        <Section title="Error panel: persistent financial failure state">
+          <p className="mb-4 max-w-xl text-sm text-text-secondary">
+            A toast is never the only confirmation of a financial event, failures included. This stays on screen
+            until dismissed, always states the fund position explicitly, and Retry reruns the same action.
+          </p>
+          {showErrorPanel ? (
+            <div className="max-w-md">
+              <ErrorPanel
+                title="Couldn't fund escrow. Your bank declined the transfer."
+                detail="Try another card, or contact your bank."
+                fundPosition="No money has left your account."
+                referenceCode="ERR-M1A2B3-C4D5"
+                retrying={retrying}
+                onRetry={() => {
+                  setRetrying(true);
+                  setTimeout(() => setRetrying(false), 900);
+                }}
+                onDismiss={() => setShowErrorPanel(false)}
+              />
+            </div>
+          ) : (
+            <Button size="sm" variant="secondary" onClick={() => setShowErrorPanel(true)}>
+              Reset demo
+            </Button>
+          )}
         </Section>
 
         <Section title="Form fields">
@@ -257,7 +409,7 @@ export default function DesignSystemPreview() {
                 </div>
               </CardHeader>
               <CardBody>
-                <p className="text-sm text-text-secondary">Lagos, NG — posted 2 days ago.</p>
+                <p className="text-sm text-text-secondary">Lagos, NG · posted 2 days ago.</p>
               </CardBody>
               <CardFooter>
                 <Badge tone={ORDER_STATUS_TONE.funded}>Funded · awaiting fulfillment</Badge>
@@ -328,6 +480,19 @@ export default function DesignSystemPreview() {
             description="Post a new request or use the material library to launch your mandate."
             action={<Button size="sm">New Sourcing Request</Button>}
           />
+        </Section>
+
+        <Section title="Connection state">
+          <p className="mb-3 max-w-xl text-sm text-text-secondary">
+            The real thing is a fixed, unmissable banner mounted globally in <code className="font-mono text-accent-text">app/layout.tsx</code> (
+            <code className="font-mono text-accent-text">components/ui/OfflineBanner.tsx</code>). It appears the moment
+            <code className="font-mono text-accent-text"> navigator.onLine</code> goes false anywhere in the app, and posts a
+            &ldquo;Back online&rdquo; toast on reconnect. Turn off your connection (or DevTools&rsquo; network throttling) to
+            see the real one; this is a static copy of its markup for reference without leaving this page.
+          </p>
+          <div className="relative flex items-center justify-center gap-2 rounded-lg bg-danger px-4 py-2 text-center text-sm font-semibold text-white">
+            You&rsquo;re offline. Payment actions are paused until your connection comes back.
+          </div>
         </Section>
 
         <Section title="Modal">

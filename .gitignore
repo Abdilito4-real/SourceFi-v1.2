@@ -14,3 +14,9 @@ public/swe-worker*.js
 public/swe-worker*.js.map
 public/workbox-*.js
 public/workbox-*.js.map
+# Prompt 2's custom worker (worker/index.ts, customWorkerPrefix "worker" in
+# next.config.mjs) — same "regenerated every build, not source" posture as
+# the rest of this block, just a filename pattern the existing rules above
+# didn't happen to cover.
+public/worker-*.js
+public/worker-*.js.map

@@ -1,9 +1,9 @@
-// components/ui/StatusBadge.tsx — the order lifecycle badge used
+// components/ui/StatusBadge.tsx, the order lifecycle badge used
 // throughout the product. Single source of truth for status -> tone/label
 // so a new status only needs to be added here, not at every call site.
 // Buyer-facing language avoids blockchain/payment-provider jargon
 // (design doc: "buyer should experience this as a normal NGN marketplace
-// payment") — "processing your payment" not "converting NGN to USDC".
+// payment"), "processing your payment" not "converting NGN to USDC".
 import Badge, { ORDER_STATUS_TONE } from "./Badge";
 import type { OrderStatus } from "../../lib/types";
 

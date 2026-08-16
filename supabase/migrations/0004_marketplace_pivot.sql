@@ -3,7 +3,7 @@
 -- Implements the approved design in docs/marketplace-payments-design.md.
 -- Run this AFTER whichever lineage you're on (0000_fresh_project_full_schema.sql,
 -- OR 0001_stage4_auth.sql + 0002_stage5_data_layer.sql + 0003_align_sourcing_requests.sql)
--- PLUS fresh_0001_sourcer_applications.sql either way — same as every migration
+-- PLUS fresh_0001_sourcer_applications.sql either way, same as every migration
 -- before it, both lineages converge to the same end state this file assumes.
 --
 -- What this does, in one sentence: retires the "sourcer visits a supplier on
@@ -13,7 +13,7 @@
 -- why this is a pivot, not a rename, and Section J for the open decisions
 -- this migration encodes a specific (documented, reversible-in-code) answer
 -- for: platform fee kept on a buyer-ruled refund is NOT decided by this
--- migration (that's application-layer logic, not schema) — flagged again
+-- migration (that's application-layer logic, not schema), flagged again
 -- here so it isn't missed.
 --
 -- Deliberately NOT destructive: sourcing_requests, sourcer_profiles,
@@ -24,14 +24,14 @@
 -- separate cleanup migration once you've confirmed nothing needs them.
 --
 -- Idempotent where practical, matching the style of every migration before
--- this one — safe to re-run.
+-- this one, safe to re-run.
 
 -- ============================================================================
 -- 1. Role: sourcer -> supplier
 --
 -- Order matters here and previously didn't: the UPDATE has to run AFTER
 -- the old constraint (role in ('buyer','sourcer','admin')) is dropped,
--- not before — 'supplier' isn't a legal value under the old constraint,
+-- not before, 'supplier' isn't a legal value under the old constraint
 -- so updating rows to it while that constraint is still in force trips
 -- users_role_check on the very first row touched. Caught via a real
 -- failed run against a live Supabase project, not just review.
@@ -49,7 +49,7 @@ alter table users add constraint users_role_check check (role in ('buyer', 'supp
 
 -- ============================================================================
 -- 2. Rename the old, passive per-transaction tables out of the way.
---    Preserved, not dropped — see header.
+--    Preserved, not dropped, see header.
 -- ============================================================================
 do $$
 begin
@@ -66,7 +66,7 @@ begin
     alter table audit_reports rename to deprecated_audit_reports;
   end if;
   -- The OLD passive suppliers table (name/CAC/location/verified boolean,
-  -- never a users row, never paid directly) — superseded by
+  -- never a users row, never paid directly), superseded by
   -- supplier_profiles below, which IS a users row. Renamed, not merged:
   -- the two shapes aren't compatible enough to auto-migrate rows
   -- responsibly (no user_id to attach old rows to), and per the demo note
@@ -76,12 +76,12 @@ begin
   end if;
 end $$;
 
--- disputes stays — nothing has ever written to it (README confirms "no
+-- disputes stays, nothing has ever written to it (README confirms "no
 -- dispute path exists"), so there's no data to preserve, and its shape is
 -- extended in place in Section 6 below rather than renamed+recreated.
 
 -- ============================================================================
--- 3. supplier_profiles — a supplier IS a users row (role = 'supplier') with
+-- 3. supplier_profiles, a supplier IS a users row (role = 'supplier') with
 --    this profile attached. Verification lifecycle lives here.
 -- ============================================================================
 create table if not exists supplier_profiles (
@@ -100,7 +100,7 @@ create table if not exists supplier_profiles (
   verified_by bigint references users(id),
   verification_expires_at timestamptz,
   -- Increments when an order involving this supplier reaches `funded`
-  -- (app-layer responsibility, Stage 2 of this rework) — resets to 0 at
+  -- (app-layer responsibility, Stage 2 of this rework), resets to 0 at
   -- each (re)verification approval.
   orders_since_verification integer not null default 0,
 
@@ -121,7 +121,7 @@ create trigger trg_supplier_profiles_updated_at
   for each row execute function set_updated_at();
 
 -- Single source of truth for "is this supplier allowed to receive a
--- funded order right now" — computed live from the two expiry conditions
+-- funded order right now", computed live from the two expiry conditions
 -- (90 days OR 20 orders, whichever comes first), never just the cached
 -- verification_status column alone. See design doc Section D.2 for why:
 -- a scheduled job keeps verification_status roughly in sync for display,
@@ -144,7 +144,7 @@ returns boolean as $$
 $$ language sql stable;
 
 -- What a verified supplier is understood to produce/sell, structured (in
--- addition to the free-text what_they_sell) — lets buyers filter the
+-- addition to the free-text what_they_sell), lets buyers filter the
 -- supplier directory by material.
 create table if not exists supplier_materials (
   supplier_id bigint not null references supplier_profiles(id),
@@ -153,11 +153,11 @@ create table if not exists supplier_materials (
 );
 
 -- ============================================================================
--- 4. supplier_verification_applications — repurposed sourcer_applications.
+-- 4. supplier_verification_applications, repurposed sourcer_applications.
 --    Same admin-review shape (pending/approved/rejected, one-pending-per-
 --    user, reviewed_by/reviewed_at/review_notes, compare-and-swap in the
 --    API layer), different fields, different consequence on approval (see
---    Section F of the design doc — approval creates/updates a full
+--    Section F of the design doc, approval creates/updates a full
 --    supplier_profiles row with verification metadata, not just a role
 --    flip).
 -- ============================================================================
@@ -177,7 +177,7 @@ create table if not exists supplier_verification_applications (
   updated_at timestamptz not null default now()
 );
 
--- Covers both first-time verification AND re-verification after expiry —
+-- Covers both first-time verification AND re-verification after expiry
 -- same table, same one-pending-per-user rule either way.
 create unique index if not exists idx_supplier_verif_apps_one_pending_per_user
   on supplier_verification_applications (user_id) where status = 'pending';
@@ -189,7 +189,7 @@ create trigger trg_supplier_verif_apps_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- 5. orders — supersedes sourcing_requests. Buyer orders directly against
+-- 5. orders, supersedes sourcing_requests. Buyer orders directly against
 --    a specific, currently-verified supplier; no claim/fee-naming step.
 -- ============================================================================
 do $$
@@ -222,7 +222,7 @@ create table if not exists orders (
   quantity text,
   delivery_location text not null,
 
-  -- Buyer-facing amount is always NGN (see design doc Section 3 — the
+  -- Buyer-facing amount is always NGN (see design doc Section 3, the
   -- buyer never interacts with USDC directly). USDC amounts live on
   -- payment_events/ledger_entries rows, computed at funding/settlement
   -- time from whatever rate the payment layer reports.
@@ -230,7 +230,7 @@ create table if not exists orders (
   currency text not null default 'NGN' check (currency = 'NGN'),
   platform_fee_minor bigint not null default 0,
 
-  -- Audit trail snapshot only — NOT the authorization check. The real
+  -- Audit trail snapshot only, NOT the authorization check. The real
   -- check is is_supplier_currently_verified(), called live at both
   -- order-creation and order-funding time.
   supplier_verified_at_order_time timestamptz,
@@ -252,7 +252,7 @@ create trigger trg_orders_updated_at
   for each row execute function set_updated_at();
 
 -- ============================================================================
--- 6. payment_events — the fine-grained async trail for both the funding
+-- 6. payment_events, the fine-grained async trail for both the funding
 --    leg (NGN -> USDC -> escrow) and the release leg (approval -> transfer
 --    -> confirmation), per design doc Section C.4. Distinct from
 --    orders.status (coarse, user-facing) and ledger_entries (accounting).
@@ -266,7 +266,7 @@ create table if not exists payment_events (
   event_type text not null,
   provider_state text,
   -- Only ever set from a real, confirmed provider lookup (Circle's
-  -- getTransaction, e.g.) — never fabricated. See design doc Section D.0.
+  -- getTransaction, e.g.), never fabricated. See design doc Section D.0.
   tx_hash text,
   amount_minor bigint,
   currency text,
@@ -299,9 +299,9 @@ create table if not exists delivery_proofs (
 create index if not exists idx_delivery_proofs_order on delivery_proofs (order_id);
 
 -- ============================================================================
--- 8. ledger_entries — double-entry, invariant-checked. Per-currency
+-- 8. ledger_entries, double-entry, invariant-checked. Per-currency
 --    balancing with an FX_CLEARING contra-account for NGN<->USDC
---    conversions — see design doc Section C.6 for why NOT one blended
+--    conversions, see design doc Section C.6 for why NOT one blended
 --    ledger.
 -- ============================================================================
 create table if not exists ledger_entries (
@@ -323,11 +323,11 @@ create index if not exists idx_ledger_entries_txn on ledger_entries (ledger_tran
 create index if not exists idx_ledger_entries_order on ledger_entries (order_id);
 
 -- Invariant: for a given (ledger_transaction_id, currency), debits must
--- equal credits. A DEFERRED constraint trigger — fires at COMMIT, after
+-- equal credits. A DEFERRED constraint trigger, fires at COMMIT, after
 -- every row of a ledger transaction has been inserted, not per-row (which
 -- would reject the normal, transiently-unbalanced-until-the-last-row case).
 -- This requires application code to insert every row of one
--- ledger_transaction_id within a single DB transaction — that's the
+-- ledger_transaction_id within a single DB transaction, that's the
 -- discipline this trigger enforces, not just documents.
 create or replace function check_ledger_balance() returns trigger as $$
 declare
@@ -357,10 +357,10 @@ create constraint trigger trg_ledger_balance_check
   for each row execute function check_ledger_balance();
 
 -- ============================================================================
--- 9. disputes — extended in place (nothing has ever written to this table,
+-- 9. disputes, extended in place (nothing has ever written to this table
 --    per README, so no data migration concern). Adds dispute_type
 --    (distinguishes a pre-approval rejection from a genuinely new
---    post-settlement report — design doc Section C.7), category, evidence,
+--    post-settlement report, design doc Section C.7), category, evidence
 --    and repoints from sourcing_request_id to order_id.
 -- ============================================================================
 do $$
@@ -369,14 +369,14 @@ declare
 begin
   if exists (select 1 from information_schema.tables where table_name = 'disputes') then
     -- Drop ANY foreign key on disputes that points at sourcing_requests
-    -- (under either its original name or its renamed deprecated_ form) —
+    -- (under either its original name or its renamed deprecated_ form)
     -- found dynamically via pg_constraint rather than guessed by name.
     -- The exact auto-generated constraint name depends on which
     -- migration lineage originally created this column
     -- (0000_fresh_project_full_schema.sql vs. 0001_stage4_auth.sql +
     -- 0002_stage5_data_layer.sql), and guessing wrong here silently
     -- leaves a stale FK pointing at the renamed deprecated table instead
-    -- of the new orders table — caught via a real failed run, not just
+    -- of the new orders table, caught via a real failed run, not just
     -- review, same as the role-constraint ordering bug above.
     for fk in
       select con.conname
@@ -395,7 +395,7 @@ begin
     end if;
 
     -- Guarded so a second run of this migration doesn't fail on "constraint
-    -- already exists" — the file's own header promises "safe to re-run".
+    -- already exists", the file's own header promises "safe to re-run".
     if not exists (
       select 1 from pg_constraint con
       join pg_class rel on rel.oid = con.conrelid
@@ -446,7 +446,7 @@ create trigger trg_disputes_updated_at
   before update on disputes
   for each row execute function set_updated_at();
 
--- Every state change, every ruling, every admin note on a dispute —
+-- Every state change, every ruling, every admin note on a dispute
 -- required for the audit history the pack asks for.
 create table if not exists dispute_events (
   id bigint generated always as identity primary key,
@@ -460,7 +460,7 @@ create table if not exists dispute_events (
 create index if not exists idx_dispute_events_dispute on dispute_events (dispute_id);
 
 -- ============================================================================
--- 10. ratings — DB cache of an on-chain source of truth, not the source
+-- 10. ratings, DB cache of an on-chain source of truth, not the source
 --     of truth itself. on_chain_tx_hash is what makes a rating
 --     independently verifiable, per the pack's requirement.
 -- ============================================================================
@@ -480,7 +480,7 @@ create unique index if not exists idx_ratings_one_per_order on ratings (order_id
 create index if not exists idx_ratings_supplier on ratings (supplier_id);
 
 -- ============================================================================
--- 11. Row-level security — same posture as every table before it: enabled,
+-- 11. Row-level security, same posture as every table before it: enabled
 --     zero policies, default-deny backstop. Real visibility stays in the
 --     API route layer (service-role client bypasses RLS by design).
 -- ============================================================================
@@ -497,11 +497,11 @@ alter table ratings enable row level security;
 
 -- ============================================================================
 -- Not decided by this migration, deliberately (design doc Section J):
---   - Platform fee treatment on a buyer-ruled refund (#2) — application
+--   - Platform fee treatment on a buyer-ruled refund (#2), application
 --     logic when a refund is issued, not a schema concern.
 --   - Whether a dispute ruling triggers real money movement automatically
---     in this stage, or just records the ruling (#9) — application logic
+--     in this stage, or just records the ruling (#9), application logic
 --     in the dispute-resolution route, not this migration.
---   - Exact timeout durations (#4) — application-layer scheduled-job
+--   - Exact timeout durations (#4), application-layer scheduled-job
 --     config, not schema.
 -- ============================================================================

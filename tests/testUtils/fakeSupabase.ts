@@ -6,9 +6,15 @@
 // .in().maybeSingle()/.single(), .insert(row|rows) (awaitable directly,
 // AND chainable with .select().single()/.maybeSingle()), .update(patch)
 // with the same two shapes, and .rpc(name, args). Not a general
-// supabase-js mock — just faithful enough to this codebase's actual call
+// supabase-js mock, just faithful enough to this codebase's actual call
 // patterns to let lib/orderService.ts run against something real without
 // a live database.
+//
+// Prompt 3 additions: .gte()/.order().limit() (getOrderTimeline,
+// handleRefundConfirmed's "most recent cancellation" lookup) and
+// .select(cols, {count, head}) (lib/notifications/dispatch.ts's rate
+// limit check), same "extend as real call patterns grow" posture the
+// header above already states.
 type Row = Record<string, unknown>;
 
 class FakeTable {
@@ -18,13 +24,18 @@ class FakeTable {
 
 type Filter = (row: Row) => boolean;
 
-class FakeQueryBuilder implements PromiseLike<{ data: unknown; error: null }> {
+class FakeQueryBuilder implements PromiseLike<{ data: unknown; error: null; count?: number }> {
   private filters: Filter[] = [];
   private pendingInsert: Row[] | null = null;
   private pendingUpdatePatch: Row | null = null;
   private wantsSelect = false;
+  private wantsCount = false;
+  private isHeadOnly = false;
+  private sortKey: string | null = null;
+  private sortAscending = true;
+  private limitN: number | null = null;
 
-  constructor(private readonly table: FakeTable, private readonly kind: "select" | "insert" | "update", payload?: Row | Row[]) {
+  constructor(private readonly table: FakeTable, private readonly kind: "select" | "insert" | "update" | "delete", payload?: Row | Row[]) {
     if (kind === "insert") this.pendingInsert = Array.isArray(payload) ? payload : [payload as Row];
     if (kind === "update") this.pendingUpdatePatch = payload as Row;
   }
@@ -44,8 +55,21 @@ class FakeQueryBuilder implements PromiseLike<{ data: unknown; error: null }> {
     return this;
   }
 
+  gte(key: string, value: unknown): this {
+    this.filters.push((row) => (row[key] as string) >= (value as string));
+    return this;
+  }
+
   lt(key: string, value: unknown): this {
     this.filters.push((row) => (row[key] as number) < (value as number));
+    return this;
+  }
+
+  not(key: string, operator: string, value: unknown): this {
+    // Only the shape this codebase actually uses: .not(col, "is", null).
+    if (operator === "is" && value === null) {
+      this.filters.push((row) => (row[key] ?? null) !== null);
+    }
     return this;
   }
 
@@ -54,17 +78,37 @@ class FakeQueryBuilder implements PromiseLike<{ data: unknown; error: null }> {
     return this;
   }
 
-  select(_cols?: string): this {
+  select(_cols?: string, options?: { count?: "exact"; head?: boolean }): this {
     this.wantsSelect = true;
+    if (options?.count) this.wantsCount = true;
+    if (options?.head) this.isHeadOnly = true;
     return this;
   }
 
-  order(): this {
+  order(key: string, options?: { ascending?: boolean }): this {
+    this.sortKey = key;
+    this.sortAscending = options?.ascending !== false;
+    return this;
+  }
+
+  limit(n: number): this {
+    this.limitN = n;
     return this;
   }
 
   private matches(): Row[] {
-    return this.table.rows.filter((row) => this.filters.every((f) => f(row)));
+    let rows = this.table.rows.filter((row) => this.filters.every((f) => f(row)));
+    if (this.sortKey) {
+      const key = this.sortKey;
+      rows = [...rows].sort((a, b) => {
+        const av = a[key] as string | number;
+        const bv = b[key] as string | number;
+        const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+        return this.sortAscending ? cmp : -cmp;
+      });
+    }
+    if (this.limitN != null) rows = rows.slice(0, this.limitN);
+    return rows;
   }
 
   private runInsert(): { data: Row[]; error: null } {
@@ -84,13 +128,27 @@ class FakeQueryBuilder implements PromiseLike<{ data: unknown; error: null }> {
     return { data: matched.map((r) => ({ ...r })), error: null };
   }
 
-  private runSelect(): { data: Row[]; error: null } {
-    return { data: this.matches().map((r) => ({ ...r })), error: null };
+  private runDelete(): { data: Row[]; error: null } {
+    const matched = this.matches();
+    const matchedIds = new Set(matched.map((r) => r.id));
+    this.table.rows = this.table.rows.filter((r) => !matchedIds.has(r.id));
+    return { data: matched.map((r) => ({ ...r })), error: null };
   }
 
-  private run(): { data: Row[]; error: null } {
+  private runSelect(): { data: Row[]; error: null; count?: number } {
+    const matched = this.matches();
+    const result: { data: Row[]; error: null; count?: number } = {
+      data: this.isHeadOnly ? [] : matched.map((r) => ({ ...r })),
+      error: null,
+    };
+    if (this.wantsCount) result.count = matched.length;
+    return result;
+  }
+
+  private run(): { data: Row[]; error: null; count?: number } {
     if (this.kind === "insert") return this.runInsert();
     if (this.kind === "update") return this.runUpdate();
+    if (this.kind === "delete") return this.runDelete();
     return this.runSelect();
   }
 
@@ -104,10 +162,10 @@ class FakeQueryBuilder implements PromiseLike<{ data: unknown; error: null }> {
   }
 
   // Makes `await supabase.from(x).insert(y)` (no .select()) work exactly
-  // like real supabase-js — resolving directly to {data, error} without
+  // like real supabase-js, resolving directly to {data, error} without
   // needing an explicit .then() call site.
-  then<TResult1 = { data: unknown; error: null }, TResult2 = never>(
-    onfulfilled?: ((value: { data: unknown; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
+  then<TResult1 = { data: unknown; error: null; count?: number }, TResult2 = never>(
+    onfulfilled?: ((value: { data: unknown; error: null; count?: number }) => TResult1 | PromiseLike<TResult1>) | null,
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
   ): PromiseLike<TResult1 | TResult2> {
     const result = this.run();
@@ -149,9 +207,10 @@ export class FakeSupabase {
   from(name: string) {
     const table = this.table(name);
     return {
-      select: (cols?: string) => new FakeQueryBuilder(table, "select").select(cols),
+      select: (cols?: string, options?: { count?: "exact"; head?: boolean }) => new FakeQueryBuilder(table, "select").select(cols, options),
       insert: (payload: Row | Row[]) => new FakeQueryBuilder(table, "insert", payload),
       update: (payload: Row) => new FakeQueryBuilder(table, "update", payload),
+      delete: () => new FakeQueryBuilder(table, "delete"),
     };
   }
 
@@ -161,7 +220,7 @@ export class FakeSupabase {
   }
 }
 
-/** Cast-to-SupabaseClient escape hatch — this fake deliberately doesn't
+/** Cast-to-SupabaseClient escape hatch, this fake deliberately doesn't
  * implement the full supabase-js surface, only what this codebase uses.
  * Returns the real SupabaseClient type (not `never`) so call sites can
  * both pass it to functions typed against SupabaseClient AND call

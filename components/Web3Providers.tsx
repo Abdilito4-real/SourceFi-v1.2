@@ -25,8 +25,8 @@ const arcTestnet = {
   },
 };
 
-// PrivyProvider throws synchronously — an unhandled runtime error, full red
-// Next.js overlay — the instant it's handed anything that isn't a
+// PrivyProvider throws synchronously, an unhandled runtime error, full red
+// Next.js overlay, the instant it's handed anything that isn't a
 // well-formed app ID. That's the exact crash this screen replaces: a
 // missing/placeholder NEXT_PUBLIC_PRIVY_APP_ID is a setup step, not a bug,
 // so it gets a plain explanation instead of a stack trace.

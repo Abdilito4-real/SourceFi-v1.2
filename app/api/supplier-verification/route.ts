@@ -1,18 +1,19 @@
 // app/api/supplier-verification/route.ts
 //
-// Repurposed from app/api/sourcer-applications/route.ts — a user applying
+// Repurposed from app/api/sourcer-applications/route.ts, a user applying
 // to become a verified supplier. Same rule as before, just renamed:
 // submitting a row here grants nothing by itself (see CLAUDE.md: "a user
 // cannot self-assign" a service-provider role). Only an admin approving
 // it at app/api/admin/supplier-verification/[id]/route.ts creates a real
 // supplier_profiles row and flips users.role.
 //
-// Also used for RE-verification after expiry — same table, same
+// Also used for RE-verification after expiry, same table, same
 // one-pending-per-user constraint, same flow. A supplier whose
 // verification expired applies again exactly the same way a brand-new
 // applicant does.
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
 import { requireSession } from "../../../lib/authz";
+import { dbErrorResponse } from "../../../lib/dbErrorResponse";
 
 export async function POST(request: Request) {
   const auth = await requireSession();
@@ -33,7 +34,7 @@ export async function POST(request: Request) {
   const supabase = getSupabaseServerClient();
 
   // The unique partial index (migration 0004) is what actually enforces
-  // "one pending application per user" under concurrent submits — this
+  // "one pending application per user" under concurrent submits, this
   // check is just a friendlier error message ahead of that.
   const { data: existingPending } = await supabase
     .from("supplier_verification_applications")
@@ -65,7 +66,7 @@ export async function POST(request: Request) {
     if (error.code === "23505") {
       return Response.json({ error: "You already have a pending verification application." }, { status: 409 });
     }
-    return Response.json({ error: error.message }, { status: 500 });
+    return dbErrorResponse("POST supplier-verification", error);
   }
 
   return Response.json({ application: data });

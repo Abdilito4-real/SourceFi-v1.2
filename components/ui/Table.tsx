@@ -1,6 +1,6 @@
 // components/ui/Table.tsx
 //
-// Wrapped in its own horizontal scroll container — the page must never
+// Wrapped in its own horizontal scroll container, the page must never
 // scroll sideways just because a table is wide (sourcer screens start at
 // 360px; the order/shipment tables in the mockups are not going to fit
 // there without scrolling internally).

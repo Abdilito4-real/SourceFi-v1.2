@@ -3,13 +3,13 @@
 // components/SessionProvider.tsx
 //
 // The session-bootstrap logic (Privy token -> our own cookie) and the
-// shared orders list live here — mounted once in app/(main)/layout.tsx,
+// shared orders list live here, mounted once in app/(main)/layout.tsx
 // above every route in the group, so navigating between /buyer and
 // /supplier doesn't re-run the Privy handshake or refetch everything from
 // scratch.
 //
 // Marketplace pivot: the old wallet-balance polling (Arc testnet native
-// balance, shown in BuyerDashboard's header) is gone on purpose — the
+// balance, shown in BuyerDashboard's header) is gone on purpose, the
 // buyer never sees a wallet or a balance now (design doc Section 3: "the
 // buyer should experience this as a normal NGN marketplace payment").
 // Privy's wallet hooks stay (auth still goes through Privy), just not
@@ -25,14 +25,14 @@ interface SessionContextValue {
   checkingSession: boolean;
   user: AppUser | null;
   needsOnboarding: boolean;
-  /** True while /api/auth/me is being patched with the chosen username —
+  /** True while /api/auth/me is being patched with the chosen username
    * distinct from checkingSession so the onboarding form's own submit
    * button can show a loading state without re-triggering the full-page
    * spinner. */
   completingOnboarding: boolean;
   completeOnboarding: (username: string) => Promise<{ success: boolean; error?: string }>;
   /** Server-verified: role is 'supplier' or 'admin'. A UX hint for which
-   * nav links to show — never the actual authorization boundary, which
+   * nav links to show, never the actual authorization boundary, which
    * every route re-checks via requireRole() server-side regardless. */
   canBeSupplier: boolean;
   orders: OrderRow[];
@@ -73,7 +73,7 @@ export default function SessionProvider({ children }: { children: React.ReactNod
 
   // Stage 4 session bootstrap: exchange a verified Privy access token for
   // our own httpOnly session cookie (POST /api/auth/session), once per
-  // Privy auth state change — not per render, and not stored anywhere
+  // Privy auth state change, not per render, and not stored anywhere
   // ourselves. See lib/session.ts for why this app runs its own session
   // layer instead of trusting Privy's client-side auth state directly for
   // API authorization.

@@ -7,13 +7,13 @@ import { Sun, Moon } from "lucide-react";
 type Theme = "light" | "dark";
 
 // Matches the theme_color values in app/manifest.ts and app/layout.tsx's
-// viewport export (light/dark meta tags) — kept as one constant since a
+// viewport export (light/dark meta tags), kept as one constant since a
 // mismatch here would make the manual toggle and the OS-driven status bar
 // color disagree.
 const THEME_COLOR: Record<Theme, string> = { light: "#0b1b38", dark: "#080f14" };
 
 // The two <meta name="theme-color" media="..."> tags Next renders from the
-// viewport export only track the OS setting — a media query can't see our
+// viewport export only track the OS setting, a media query can't see our
 // in-app localStorage toggle. This upserts one unconditional tag (no
 // `media` attribute, so it always matches) after them, which browsers
 // resolve in favor of over the conditional ones once it's present.
@@ -30,7 +30,7 @@ function syncThemeColorMeta(theme: Theme) {
 
 export default function ThemeToggle({ className = "" }: { className?: string }) {
   // Starts null so we render nothing meaningful until we've read the DOM
-  // attribute ThemeScript already set — avoids a hydration mismatch between
+  // attribute ThemeScript already set, avoids a hydration mismatch between
   // server-rendered "light" and whatever the client actually resolved.
   const [theme, setTheme] = useState<Theme | null>(null);
 
@@ -48,7 +48,7 @@ export default function ThemeToggle({ className = "" }: { className?: string }) 
     try {
       localStorage.setItem("sourcefi_theme", next);
     } catch (e) {
-      /* localStorage unavailable — theme just won't persist across visits */
+      /* localStorage unavailable, theme just won't persist across visits */
     }
   };
 

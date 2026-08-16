@@ -1,7 +1,7 @@
 // app/(main)/layout.tsx
 //
 // Web3Providers (Privy + wagmi) is scoped to the actual buyer/sourcer app
-// only, not the root layout — routes outside this group (e.g.
+// only, not the root layout, routes outside this group (e.g.
 // /design-system) don't pay for the wallet/auth bundle and don't need a
 // real NEXT_PUBLIC_PRIVY_APP_ID to render.
 //

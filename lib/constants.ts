@@ -1,9 +1,9 @@
 // lib/constants.ts
 //
 // Styling tokens (C, inputStyle, primaryBtn, Label, StatusBadge) used to
-// live here as inline-style objects — superseded by components/ui/* and
+// live here as inline-style objects, superseded by components/ui/* and
 // the Tailwind tokens in app/globals.css. This file is now chain config
-// and the on-chain transfer helper only — the material catalog that used
+// and the on-chain transfer helper only, the material catalog that used
 // to live here (materialLibrary) is gone: materials are now
 // supplier-uploaded listings (supplier_listings, migration 0006), not an
 // admin-curated static array. See app/api/materials/route.ts for the

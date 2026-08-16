@@ -4,7 +4,7 @@
 // CSS custom property declared once in app/globals.css (light values on
 // :root, dark overrides on [data-theme="dark"]). Components style against
 // role names (bg-surface, text-secondary, border-strong…) and get the
-// correct palette automatically — there's nothing theme-specific to update
+// correct palette automatically, there's nothing theme-specific to update
 // when a component is written.
 //
 module.exports = {
@@ -58,7 +58,7 @@ module.exports = {
         },
       },
       fontFamily: {
-        // "Circular"/"CircularStd" tried first — a paid Lineto typeface
+        // "Circular"/"CircularStd" tried first, a paid Lineto typeface
         // this repo doesn't (and shouldn't) bundle; renders automatically
         // if a viewer's device already has it, or once this app is
         // deployed with a real licensed self-host. var(--font-sans) is

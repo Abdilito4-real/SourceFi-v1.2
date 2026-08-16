@@ -1,6 +1,6 @@
 // tests/orderService.test.ts
 //
-// lib/orderService.ts is the highest-risk, newest file in this rewrite —
+// lib/orderService.ts is the highest-risk, newest file in this rewrite
 // it's where every other tested primitive (state machine, ledger,
 // verification check, payment boundary) actually gets wired together
 // against real(-ish) Supabase calls. This exercises it against
@@ -90,7 +90,7 @@ beforeEach(() => {
   vi.useRealTimers();
 });
 
-describe("createOrder — the live verification gate", () => {
+describe("createOrder: the live verification gate", () => {
   it("creates an order against a currently-verified supplier", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
@@ -104,7 +104,7 @@ describe("createOrder — the live verification gate", () => {
     expect(order.buyer_id).toBe(1);
     expect(order.supplier_id).toBe(1);
     // The call room name must never be derivable from anything
-    // user-visible — order_code is a guessable 6-digit string; the room
+    // user-visible, order_code is a guessable 6-digit string; the room
     // id is a real random UUID and must differ from it.
     expect(order.verification_call_room_id).toBeTruthy();
     expect(order.verification_call_room_id).not.toBe(order.order_code);
@@ -115,7 +115,7 @@ describe("createOrder — the live verification gate", () => {
     const fake = freshFakeSupabase();
     // Simulate the exact staleness scenario design doc Section D.2 warns
     // about: the cached column hasn't been swept yet, but the expiry
-    // date has passed — the live RPC check must still catch it.
+    // date has passed, the live RPC check must still catch it.
     const supplier = fake.getRows("supplier_profiles")[0]!;
     await asSupabaseClient(fake)
       .from("supplier_profiles")
@@ -169,7 +169,7 @@ describe("the full happy-path lifecycle: create -> fund -> proof -> approve -> s
     });
     expect(proofSubmitted.status).toBe("proof_submitted");
 
-    // Mandatory live verification call — approveOrder rejects below the
+    // Mandatory live verification call, approveOrder rejects below the
     // threshold (a separate test covers that directly); satisfy it here
     // so the rest of the happy path can proceed.
     await recordVerificationCallProgress(supabase, created.id, 1, MIN_VERIFICATION_CALL_SECONDS);
@@ -180,17 +180,17 @@ describe("the full happy-path lifecycle: create -> fund -> proof -> approve -> s
     await confirmed;
 
     // handleReleaseConfirmed auto-advances into settlement_processing but
-    // does NOT auto-settle — that needs its own, separate confirmation
+    // does NOT auto-settle, that needs its own, separate confirmation
     // (design doc Section D.0's whole point, applied to the settlement
     // leg too).
     const afterRelease = fake.getRows("orders").find((o) => o.id === created.id)!;
     expect(afterRelease.status).toBe("settlement_processing");
 
     // The stub chains a settlement confirmation after release on its own
-    // (lib/paymentBoundary.ts — otherwise every order would hang in
+    // (lib/paymentBoundary.ts, otherwise every order would hang in
     // settlement_processing forever, since nothing else would ever
     // report that leg in the stub world). Wait for THAT second event
-    // rather than fabricating one — this is what the real callback chain
+    // rather than fabricating one, this is what the real callback chain
     // production code goes through actually produces.
     confirmed = waitForConfirmation();
     await confirmed;
@@ -199,7 +199,7 @@ describe("the full happy-path lifecycle: create -> fund -> proof -> approve -> s
     expect(settled.status).toBe("settled");
 
     const rating = await submitRating(supabase, provider, created.id, 1, 5, "Great supplier");
-    expect(rating.confirmed).toBe(false); // stub never auto-confirms ratings — Open Question 10
+    expect(rating.confirmed).toBe(false); // stub never auto-confirms ratings, Open Question 10
 
     // The ledger invariant, checked end to end: every account touched
     // across the whole lifecycle nets to zero except the two legitimate
@@ -217,7 +217,7 @@ describe("the full happy-path lifecycle: create -> fund -> proof -> approve -> s
   });
 });
 
-describe("fundOrder — ownership and re-verification at funding time", () => {
+describe("fundOrder: ownership and re-verification at funding time", () => {
   it("rejects funding an order that isn't the caller's own", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
@@ -239,7 +239,7 @@ describe("fundOrder — ownership and re-verification at funding time", () => {
   });
 });
 
-describe("handlePaymentStatusEvent — idempotency", () => {
+describe("handlePaymentStatusEvent: idempotency", () => {
   it("a duplicate/replayed funding confirmation is a no-op, not a double-write", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
@@ -344,7 +344,7 @@ describe("InvalidOrderTransitionError surfaces from orderService, not just order
   });
 });
 
-describe("ensureCallRoomId — backfill for orders that predate migration 0008", () => {
+describe("ensureCallRoomId: backfill for orders that predate migration 0008", () => {
   it("returns the existing room id untouched when already set", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
@@ -366,7 +366,7 @@ describe("ensureCallRoomId — backfill for orders that predate migration 0008",
   });
 });
 
-describe("createOrder — minimum order amount", () => {
+describe("createOrder: minimum order amount", () => {
   it("rejects an order below MIN_ORDER_AMOUNT_MINOR, since the flat platform fee would leave the supplier a negative payout", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
@@ -393,12 +393,12 @@ describe("mandatory live verification call before approval", () => {
     const supabase = asSupabaseClient(fake);
     const { provider, waitForConfirmation } = synchronousProvider(supabase);
     // A realistic amount, not the trivial 1000 (NGN 10) other tests in
-    // this file use — several tests below call approveOrder/resolveDispute,
+    // this file use, several tests below call approveOrder/resolveDispute
     // which (since the StubPaymentProvider fix) now chains a REAL
     // settlement confirmation afterward, which needs a sane (non-negative)
     // supplier/fee split. createOrder() now enforces MIN_ORDER_AMOUNT_MINOR
     // itself (see "rejects an order below the minimum amount" below), so
-    // this amount just needs to clear that floor — it's not sidestepping
+    // this amount just needs to clear that floor, it's not sidestepping
     // anything anymore.
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
     const confirmed = waitForConfirmation();
@@ -452,7 +452,7 @@ describe("mandatory live verification call before approval", () => {
     expect(approved.status).toBe("release_submitted");
   });
 
-  it("either the buyer or the assigned supplier can report a segment — nobody else can", async () => {
+  it("either the buyer or the assigned supplier can report a segment: nobody else can", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
     const order = await orderAtProofSubmitted(fake);
@@ -473,7 +473,7 @@ describe("mandatory live verification call before approval", () => {
     expect(result.verification_call_seconds).toBe(2 * 60 * 60);
   });
 
-  it("a dispute resolved for the supplier bypasses this requirement entirely — it's an admin ruling, not the buyer's own approval", async () => {
+  it("a dispute resolved for the supplier bypasses this requirement entirely: it's an admin ruling, not the buyer's own approval", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
     const { provider } = synchronousProvider(supabase);
@@ -483,7 +483,7 @@ describe("mandatory live verification call before approval", () => {
     expect(rejected.status).toBe("disputed");
     const dispute = fake.getRows("disputes").find((d) => d.order_id === order.id)!;
 
-    // No call time recorded at all — the admin ruling still proceeds,
+    // No call time recorded at all, the admin ruling still proceeds
     // because resolveDispute's supplier-ruling path calls
     // initiateEscrowRelease directly, not through approveOrder.
     const result = await resolveDispute(supabase, provider, dispute.id as number, 3, "supplier", "Proof was valid.");
@@ -491,16 +491,14 @@ describe("mandatory live verification call before approval", () => {
   });
 });
 
-describe("approveOrder — a real payment provider's initiateEscrowRelease can throw (CircleEscrowProvider can, the stub never does)", () => {
-  /** A minimal PaymentBoundary stand-in whose release leg always fails —
-   * the failure mode a real CircleEscrowProvider hits on day one if a
-   * supplier hasn't set wallet_address yet (MissingSupplierWalletError)
-   * or the escrow wallet has no USDC balance. */
+describe("approveOrder: a real payment provider's initiateEscrowRelease can throw (CircleEscrowProvider can, the stub never does)", () => {
+  /** Release leg always fails, like a real CircleEscrowProvider would if
+   * the supplier has no wallet_address or the escrow wallet has no USDC. */
   function alwaysFailingReleaseProvider() {
     return {
       initiateOrderFunding: async (orderId: number) => ({ paymentReference: `fund-${orderId}`, status: "processing" as const }),
       initiateEscrowRelease: async () => {
-        throw new Error("Supplier 1 has no wallet_address on file — cannot send a real USDC release to nowhere.");
+        throw new Error("Supplier 1 has no wallet_address on file.");
       },
       initiateRefund: async (orderId: number) => ({ refundReference: `refund-${orderId}`, status: "processing" as const }),
       submitRatingOnChain: async () => ({ txHash: null, status: "submitted" as const }),

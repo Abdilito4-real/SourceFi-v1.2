@@ -1,7 +1,7 @@
 // app/offline/page.tsx
 //
 // Served by the service worker's navigation fallback when a page isn't
-// cached and the network request fails — replaces the browser's default
+// cached and the network request fails, replaces the browser's default
 // "no internet" dinosaur page. Lives outside app/(main) deliberately: it
 // must render with zero dependencies (no Privy, no fetch) since the whole
 // point is that the network is down.

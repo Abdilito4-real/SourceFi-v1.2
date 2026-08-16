@@ -3,12 +3,12 @@
 // components/OnboardingCarousel.tsx
 //
 // First-time-visitor intro, shown once before SignInScreen (see RootGate.tsx
-// — gated behind a localStorage flag, same pattern as the theme
+//, gated behind a localStorage flag, same pattern as the theme
 // preference). Mobile-first: each slide is a vertical image/content split
 // on narrow viewports, switching to a horizontal split at sm+. Swipeable on
 // touch, arrow/dot navigation everywhere else.
 //
-// Images are real photography, not icons — CLAUDE.md's "keep bundles
+// Images are real photography, not icons, CLAUDE.md's "keep bundles
 // small, metered mobile data" constraint is why only the active and
 // adjacent slides' images are ever requested (next/image, no eager-loading
 // the whole set up front) rather than preloading all five at once.
@@ -94,12 +94,9 @@ export default function OnboardingCarousel({ onComplete }: { onComplete: () => v
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
       >
-        {/* Background: full-bleed on mobile (content overlays on top of it —
-            every slide, including the closing one, now gets this same
-            treatment), left half on desktop. What renders inside differs:
-            real photography for the first four slides, the brand mark on a
-            solid brand-color backdrop for the closing slide, since there's
-            no photo for it. */}
+        {/* Background: full-bleed on mobile, left half on desktop. Real
+            photography for the first four slides, brand mark on a solid
+            backdrop for the closing slide. */}
         <div className="absolute inset-0 shrink-0 overflow-hidden bg-nav-bg sm:relative sm:inset-auto sm:w-1/2">
           {slide.image ? (
             <Image

@@ -31,7 +31,7 @@ describe("computeVerificationExpiry", () => {
   });
 });
 
-describe("isSupplierCurrentlyVerified — always delegates to the live DB function", () => {
+describe("isSupplierCurrentlyVerified: always delegates to the live DB function", () => {
   function mockSupabaseRpc(returnValue: boolean, error: unknown = null) {
     const rpc = vi.fn(async () => ({ data: returnValue, error }));
     return { rpc } as never as import("@supabase/supabase-js").SupabaseClient;

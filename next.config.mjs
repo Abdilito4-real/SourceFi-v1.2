@@ -2,12 +2,12 @@
 //
 // This is the file Next.js actually loads. A sibling file named
 // `next.config` (no .js/.mjs extension) previously held real webpack
-// fixes for the wallet-connector dependency noise — Next.js never reads
+// fixes for the wallet-connector dependency noise, Next.js never reads
 // unextensioned config files, so that file was silent dead weight with
 // zero effect. Its logic is folded in below; the dead file has been removed.
 //
 // Next 16 defaults `next dev` AND `next build` to Turbopack, which does not
-// run webpack plugins — but @ducanh2912/next-pwa wraps workbox-webpack-plugin,
+// run webpack plugins, but @ducanh2912/next-pwa wraps workbox-webpack-plugin
 // a webpack-only tool, and the IgnorePlugin fix below is webpack-specific
 // too. That's why package.json's dev/build scripts pass `--webpack`
 // explicitly: this project has a hard webpack dependency via its PWA
@@ -18,7 +18,7 @@ import withPWAInit from "@ducanh2912/next-pwa";
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // lucide-react is imported by name (import { X, Y } from "lucide-react")
-  // across most components in this app — without this, webpack has to
+  // across most components in this app, without this, webpack has to
   // resolve and consider tracing the ENTIRE icon package on every one of
   // those imports instead of just the icons actually used. This is a
   // documented, safe win specifically for large named-export packages like
@@ -28,7 +28,7 @@ const nextConfig = {
   },
   images: {
     // next/image needs an explicit allowlist for any external host it's
-    // asked to optimize — components/OnboardingCarousel.tsx is the one
+    // asked to optimize, components/OnboardingCarousel.tsx is the one
     // place that does (real photography for the intro slides). Everywhere
     // else that references an Unsplash URL uses a plain <img>, which
     // doesn't go through next/image and doesn't need this.
@@ -71,12 +71,12 @@ const withPWA = withPWAInit({
   reloadOnOnline: true,
   fallbacks: {
     // Served for any navigation that isn't precached and the network
-    // request fails — replaces the browser's default offline page.
+    // request fails, replaces the browser's default offline page.
     document: "/offline",
   },
   workboxOptions: {
     disableDevLogs: true,
-    // A waiting worker must NOT take over on its own — see
+    // A waiting worker must NOT take over on its own, see
     // components/ui/ServiceWorkerUpdater.js, which offers the reload as an
     // explicit user action instead. (These are workbox-webpack-plugin's own
     // defaults; set explicitly here so the intent survives a library upgrade.)
@@ -86,7 +86,7 @@ const withPWA = withPWAInit({
       {
         // Read-only, non-financial: safe to serve a recent cached copy if
         // the network is slow/down, but always prefer a fresh fetch first.
-        // Workbox route matching is GET-only by default — every mutating
+        // Workbox route matching is GET-only by default, every mutating
         // escrow/request action in this app is POST/PATCH, so none of them
         // are reachable through this cache layer at all, deliberately.
         urlPattern: /\/api\/requests(\/.*)?$/,
@@ -109,7 +109,7 @@ const withPWA = withPWAInit({
         },
       },
       {
-        // Self-hosted next/font files — effectively immutable per build.
+        // Self-hosted next/font files, effectively immutable per build.
         urlPattern: ({ request }) => request.destination === "font",
         handler: "StaleWhileRevalidate",
         options: {

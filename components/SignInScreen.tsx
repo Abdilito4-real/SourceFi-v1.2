@@ -4,7 +4,7 @@
 // version leaned on crypto-security theater copy ("Establish Secure
 // Connection", "Multi-factor hardware key management", a glowing green
 // shield SVG with colors hardcoded outside the token system, "CONFORMS TO
-// SECURE CUSTODY STANDARDS ON SYSTEM NETWORK INFRASTRUCTURE" — a sentence
+// SECURE CUSTODY STANDARDS ON SYSTEM NETWORK INFRASTRUCTURE", a sentence
 // that doesn't actually mean anything). None of that is what SourceFi
 // does. What it does: a person physically visits a supplier and proves
 // it, before money moves. That's the pitch now.
@@ -14,12 +14,12 @@ import { ArrowRight, Loader2, MapPin, Camera, ShieldCheck, HandCoins } from "luc
 import ThemeToggle from "./ui/ThemeToggle";
 
 // How long the button stays suspended after a click. This isn't guessing at
-// how long Privy's own modal takes — it's just long enough to absorb a
+// how long Privy's own modal takes, it's just long enough to absorb a
 // rapid double-click before the modal has visibly opened, without ever
 // getting permanently stuck if the user closes that modal without
 // finishing (Privy doesn't give a clean "the user cancelled" callback to
 // key a real loading state off of; RootGate's own checkingSession already
-// covers the real slow phase — session establishment — once the user is
+// covers the real slow phase, session establishment, once the user is
 // actually authenticated).
 const CLICK_SUSPEND_MS = 4000;
 

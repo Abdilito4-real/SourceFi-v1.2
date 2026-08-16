@@ -1,12 +1,13 @@
 // app/api/orders/[id]/route.ts
 //
-// Single order detail — ownership-checked (buyer who placed it, the
+// Single order detail, ownership-checked (buyer who placed it, the
 // assigned supplier, or any admin for oversight). Also returns the
 // order's payment_events trail and any delivery_proofs/disputes/rating
 // so the detail screen doesn't need N separate requests.
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { requireSession } from "../../../../lib/authz";
 import { ensureCallRoomId } from "../../../../lib/orderService";
+import { dbErrorResponse } from "../../../../lib/dbErrorResponse";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireSession();
@@ -18,7 +19,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 
   const supabase = getSupabaseServerClient();
   const { data: order, error } = await supabase.from("orders").select("*").eq("id", orderId).maybeSingle();
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbErrorResponse(`GET orders/${orderId}`, error);
   if (!order) return Response.json({ error: "Order not found." }, { status: 404 });
 
   if (auth.user.role === "buyer" && order.buyer_id !== auth.user.id) {
@@ -30,13 +31,13 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       return Response.json({ error: "You are not the assigned supplier for this order." }, { status: 403 });
     }
   }
-  // admin: no ownership check — full oversight, view-only (see design doc
-  // Section G — admin can view but every state-changing route below still
+  // admin: no ownership check, full oversight, view-only (see design doc
+  // Section G, admin can view but every state-changing route below still
   // checks the specific role it's meant for, never falls back to admin).
   const isPartyToOrder = auth.user.role === "buyer" || auth.user.role === "supplier";
 
   // Only the buyer and the assigned supplier ever get the real call room
-  // ID — admin oversight is view-only for order data, but the live
+  // ID, admin oversight is view-only for order data, but the live
   // verification call is explicitly a private, two-party conversation,
   // not something oversight should be able to silently join. Backfilling
   // it here (rather than in createOrder() only) covers any order created
@@ -52,7 +53,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       supabase.from("disputes").select("*").eq("order_id", orderId).order("created_at", { ascending: false }),
       supabase.from("ratings").select("*").eq("order_id", orderId).maybeSingle(),
       // Only for the "total = unit price x quantity" breakdown shown on
-      // the order detail screen — orders created without picking a
+      // the order detail screen, orders created without picking a
       // listing (freeform amount) just won't have one to join.
       order.supplier_listing_id
         ? supabase.from("supplier_listings").select("price_minor, unit").eq("id", order.supplier_listing_id).maybeSingle()

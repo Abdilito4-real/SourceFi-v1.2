@@ -1,7 +1,7 @@
 // app/api/supplier-verification/me/route.ts
 //
 // The current user's own supplier profile (if any) + verification status
-// + their most recent verification application — what the supplier
+// + their most recent verification application, what the supplier
 // dashboard's status card needs. Read-only, self-only: no id param, only
 // ever the caller's own row, same "you can only ever act on what the
 // session proves is yours" pattern as PATCH /api/auth/me.
