@@ -16,7 +16,7 @@
 // app/api/admin/supplier-verification/[id]/route.ts).
 import React, { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Info, LayoutGrid, ShieldCheck, Users as UsersIcon, Check, X, UserCog, FileText, AlertTriangle } from "lucide-react";
+import { Loader2, Info, LayoutGrid, ShieldCheck, Users as UsersIcon, Check, X, UserCog, FileText, AlertTriangle, Scale } from "lucide-react";
 
 import { useSession } from "./SessionProvider";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
@@ -30,9 +30,15 @@ import { Textarea } from "./ui/Field";
 import { Table, Thead, Tbody, Tr, Th, Td } from "./ui/Table";
 import { useToast } from "./ui/Toast";
 import { formatMoney } from "../lib/money";
-import type { AdminUserRow, ApplicationStatus, DisputeRow, DisputeRuling, DisputeStatus, OrderRow, Role, SupplierVerificationApplicationRow } from "../lib/types";
+import type { AdminUserRow, ApplicationStatus, DisputeRow, DisputeRuling, DisputeStatus, LedgerEntryRow, OrderRow, Role, SupplierVerificationApplicationRow } from "../lib/types";
 
-type Section = "overview" | "verification" | "orders" | "disputes" | "users";
+type Section = "overview" | "verification" | "orders" | "disputes" | "ledger" | "users";
+
+interface LedgerBalance {
+  account: string;
+  currency: string;
+  net_minor: number;
+}
 
 const ROLE_TONE: Record<Role, BadgeTone> = {
   buyer: "neutral",
@@ -66,6 +72,10 @@ export default function AdminDashboard() {
   const [disputesStatus, setDisputesStatus] = useState<DisputeStatus>("open");
   const [loadingDisputes, setLoadingDisputes] = useState(true);
   const [resolvingId, setResolvingId] = useState<number | null>(null);
+
+  const [ledgerEntries, setLedgerEntries] = useState<(LedgerEntryRow & { order_code: string | null })[]>([]);
+  const [ledgerBalances, setLedgerBalances] = useState<LedgerBalance[]>([]);
+  const [loadingLedger, setLoadingLedger] = useState(true);
 
   const isAdmin = user?.role === "admin";
 
@@ -161,6 +171,27 @@ export default function AdminDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, disputesStatus]);
 
+  const loadLedger = useCallback(async () => {
+    setLoadingLedger(true);
+    try {
+      const res = await fetch("/api/admin/ledger");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load ledger.");
+      setLedgerEntries(data.entries || []);
+      setLedgerBalances(data.balances || []);
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to load ledger.");
+    } finally {
+      setLoadingLedger(false);
+    }
+  }, [notify]);
+
+  useEffect(() => {
+    if (!isAdmin || section !== "ledger") return;
+    loadLedger();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, section]);
+
   const handleReview = async (application: SupplierVerificationApplicationRow, action: "approve" | "reject") => {
     setReviewingId(application.id);
     try {
@@ -250,6 +281,7 @@ export default function AdminDashboard() {
       onClick: () => setSection("disputes"),
       badge: disputesStatus === "open" ? disputes.length : undefined,
     },
+    { key: "ledger", label: "Ledger", icon: <Scale size={16} />, active: section === "ledger", onClick: () => setSection("ledger") },
     { key: "users", label: "Users", icon: <UsersIcon size={16} />, active: section === "users", onClick: () => setSection("users") },
   ];
 
@@ -286,6 +318,8 @@ export default function AdminDashboard() {
           ? "Orders"
           : section === "disputes"
           ? "Disputes"
+          : section === "ledger"
+          ? "Ledger"
           : "Users"
       }
       pageSubtitle={
@@ -297,6 +331,8 @@ export default function AdminDashboard() {
           ? "Full-platform order visibility."
           : section === "disputes"
           ? "Buyer-raised issues, before and after settlement."
+          : section === "ledger"
+          ? "The double-entry record behind every order — every account should net to what you'd expect."
           : "Every account on SourceFi and its current role."
       }
     >
@@ -429,6 +465,74 @@ export default function AdminDashboard() {
                 />
               ))}
             </div>
+          )}
+        </div>
+      )}
+
+      {section === "ledger" && (
+        <div className="flex flex-col gap-6">
+          {loadingLedger ? (
+            <div className="flex justify-center py-10">
+              <Loader2 size={22} className="spin-icon text-accent" />
+            </div>
+          ) : (
+            <>
+              <div>
+                <h2 className="mb-3 font-display text-lg italic text-text-primary">Account balances (all-time, net)</h2>
+                {ledgerBalances.length === 0 ? (
+                  <EmptyState message="No ledger activity yet — entries appear once an order reaches funded." />
+                ) : (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                    {ledgerBalances.map((b) => (
+                      <div key={`${b.account}:${b.currency}`} className="rounded-lg border border-border bg-surface p-3">
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">{b.account.replace(/_/g, " ")}</div>
+                        <div className="mt-1 font-mono text-sm font-semibold text-text-primary">
+                          {(b.net_minor / 100).toLocaleString()} {b.currency}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h2 className="mb-3 font-display text-lg italic text-text-primary">Recent entries</h2>
+                {ledgerEntries.length === 0 ? (
+                  <EmptyState message="No ledger entries yet." />
+                ) : (
+                  <Table>
+                    <Thead>
+                      <Tr>
+                        <Th>Order</Th>
+                        <Th>Account</Th>
+                        <Th>Direction</Th>
+                        <Th>Amount</Th>
+                        <Th>Txn</Th>
+                        <Th>When</Th>
+                      </Tr>
+                    </Thead>
+                    <Tbody>
+                      {ledgerEntries.map((e) => (
+                        <Tr key={e.id}>
+                          <Td className="font-mono text-xs">{e.order_code || `#${e.order_id}`}</Td>
+                          <Td>{e.account.replace(/_/g, " ")}</Td>
+                          <Td>
+                            <Badge tone={e.direction === "debit" ? "accent" : "neutral"}>{e.direction}</Badge>
+                          </Td>
+                          <Td>
+                            {(e.amount_minor / 100).toLocaleString()} {e.currency}
+                          </Td>
+                          <Td className="font-mono text-[10px] text-text-tertiary" title={e.ledger_transaction_id}>
+                            {e.ledger_transaction_id.slice(0, 8)}…
+                          </Td>
+                          <Td className="text-text-secondary">{new Date(e.created_at).toLocaleString()}</Td>
+                        </Tr>
+                      ))}
+                    </Tbody>
+                  </Table>
+                )}
+              </div>
+            </>
           )}
         </div>
       )}

@@ -10,7 +10,7 @@
 // (design doc Section 3).
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Info, ArrowRight, Layers, Coins, Building2, Package, HardHat, LayoutGrid, FileText, History, X, ChevronRight, Store, ShieldCheck } from "lucide-react";
+import { Loader2, Info, ArrowRight, Layers, Coins, Building2, Package, HardHat, LayoutGrid, FileText, History, X, ChevronRight, Store, ShieldCheck, XCircle } from "lucide-react";
 
 import { materialLibrary } from "../lib/constants";
 import { formatMoney } from "../lib/money";
@@ -18,6 +18,7 @@ import { useSession } from "./SessionProvider";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
 import OrderCard from "./OrderCard";
 import OrderDetailsModal from "./OrderDetailsModal";
+import SupplierVerificationForm from "./SupplierVerificationForm";
 import Button from "./ui/Button";
 import { Card } from "./ui/Card";
 import Modal from "./ui/Modal";
@@ -190,7 +191,8 @@ export default function BuyerDashboard() {
   const [orderingSupplier, setOrderingSupplier] = useState<SupplierListing | null>(null);
   const [creatingOrder, setCreatingOrder] = useState(false);
   const [viewingMaterial, setViewingMaterial] = useState<Material | null>(null);
-  const [pendingSupplierApplication, setPendingSupplierApplication] = useState<SupplierVerificationApplicationRow | null>(null);
+  const [latestSupplierApplication, setLatestSupplierApplication] = useState<SupplierVerificationApplicationRow | null>(null);
+  const [showReapplyForm, setShowReapplyForm] = useState(false);
 
   const isBuyer = user?.role === "buyer";
 
@@ -207,16 +209,21 @@ export default function BuyerDashboard() {
   // runs again and shows the real pending screen, rather than quietly
   // landing on a working buyer dashboard while pending — per explicit
   // product direction, that account is not a buyer during this window.
-  useEffect(() => {
-    if (!user || !isBuyer) return;
+  const loadSupplierApplication = () => {
     fetch("/api/supplier-verification/me")
       .then((res) => res.json())
       .then((data) => {
-        const pending = data.latestApplication?.status === "pending" ? data.latestApplication : null;
-        setPendingSupplierApplication(pending);
-        if (pending) router.replace("/");
+        const latest: SupplierVerificationApplicationRow | null = data.latestApplication ?? null;
+        setLatestSupplierApplication(latest);
+        if (latest?.status === "pending") router.replace("/");
       })
       .catch(() => {});
+  };
+
+  useEffect(() => {
+    if (!user || !isBuyer) return;
+    loadSupplierApplication();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, isBuyer, router]);
 
   useEffect(() => {
@@ -312,6 +319,36 @@ export default function BuyerDashboard() {
           : undefined
       }
     >
+      {latestSupplierApplication?.status === "rejected" && (
+        <div className="mb-6 rounded-lg border border-danger bg-danger-soft p-4 text-sm text-danger-text">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="flex items-center gap-2">
+              <XCircle size={15} className="shrink-0" />
+              Your supplier verification application for <strong>{latestSupplierApplication.business_name}</strong> was
+              not approved.
+            </span>
+            {!showReapplyForm && (
+              <Button size="sm" variant="secondary" onClick={() => setShowReapplyForm(true)}>
+                Reapply
+              </Button>
+            )}
+          </div>
+          {latestSupplierApplication.review_notes && (
+            <p className="mt-2 text-xs leading-relaxed text-danger-text">Admin note: {latestSupplierApplication.review_notes}</p>
+          )}
+          {showReapplyForm && (
+            <div className="mt-4">
+              <SupplierVerificationForm
+                onSubmitted={() => {
+                  setShowReapplyForm(false);
+                  loadSupplierApplication();
+                }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       {section === "overview" && (
         <div className="flex flex-col gap-8">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">

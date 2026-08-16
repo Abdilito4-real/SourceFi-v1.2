@@ -53,6 +53,11 @@ describe("assertTransition — the happy path, full order lifecycle", () => {
     expect(() => assertTransition("fulfilling", "proof_submitted")).not.toThrow();
   });
 
+  it("allows a buyer to dispute before any delivery proof exists, from either funded or fulfilling", () => {
+    expect(() => assertTransition("funded", "disputed")).not.toThrow();
+    expect(() => assertTransition("fulfilling", "disputed")).not.toThrow();
+  });
+
   it("allows a failed payment to be retried", () => {
     expect(() => assertTransition("payment_processing", "payment_failed")).not.toThrow();
     expect(() => assertTransition("payment_failed", "payment_processing")).not.toThrow();

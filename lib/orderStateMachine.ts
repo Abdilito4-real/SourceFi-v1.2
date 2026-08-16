@@ -28,8 +28,13 @@ const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
 
   // `fulfilling` is optional UX (design doc Section D.1) — a supplier can
   // submit proof directly from `funded` without ever passing through it.
+  // Both allow a direct dispute: a buyer flagging a problem before any
+  // delivery proof exists at all isn't limited to the narrow `funded`
+  // window — "still waiting, something's wrong" is just as real once a
+  // supplier has marked an order `fulfilling` and proof still hasn't
+  // shown up.
   funded: ["fulfilling", "proof_submitted", "disputed"],
-  fulfilling: ["proof_submitted"],
+  fulfilling: ["proof_submitted", "disputed"],
 
   proof_submitted: ["buyer_approved", "rejected"],
   // rejected is NOT terminal — it always routes to disputed automatically
@@ -98,11 +103,12 @@ export const TERMINAL_ORDER_STATUSES: OrderStatus[] = (
  * it being a post-settlement report — i.e. dispute_type would be
  * 'pre_approval_rejection'-adjacent (before or during review, funds
  * still in escrow). Route handlers use this to decide which dispute_type
- * to stamp, not to gate whether the order.status itself changes (only
- * `funded` and `rejected` actually transition the order's own status
- * into `disputed`; a dispute filed in another pre-settlement state is
- * still a disputes row, but see design doc Section D.1 — only those two
- * edges exist on the order itself). */
+ * to stamp, not to gate whether the order.status itself changes: `funded`,
+ * `fulfilling`, and `rejected` all transition the order's own status into
+ * `disputed` directly (see TRANSITIONS above); `proof_submitted` doesn't
+ * — a buyer disputing AFTER proof exists goes through the reject flow
+ * first (`proof_submitted -> rejected -> disputed`), which is what
+ * captures the rejection reason. */
 export const PRE_SETTLEMENT_DISPUTE_ELIGIBLE_STATUSES: OrderStatus[] = [
   "funded",
   "fulfilling",

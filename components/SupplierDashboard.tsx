@@ -16,88 +16,17 @@ import { useSession } from "./SessionProvider";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
 import OrderCard from "./OrderCard";
 import OrderDetailsModal from "./OrderDetailsModal";
+import SupplierVerificationForm from "./SupplierVerificationForm";
 import Button from "./ui/Button";
 import { Card } from "./ui/Card";
 import StatCard from "./ui/StatCard";
 import Badge from "./ui/Badge";
-import { Label, Input, Textarea } from "./ui/Field";
 import { useToast } from "./ui/Toast";
 import type { SupplierProfileRow, SupplierVerificationApplicationRow } from "../lib/types";
 
 type Section = "overview" | "orders" | "verification";
 
 const TERMINAL_STATUSES = new Set(["settled", "refunded", "cancelled", "expired"]);
-
-function VerificationApplicationForm({ onSubmitted }: { onSubmitted: () => void }) {
-  const { notify } = useToast();
-  const [businessName, setBusinessName] = useState("");
-  const [businessLocation, setBusinessLocation] = useState("");
-  const [whatTheySell, setWhatTheySell] = useState("");
-  const [cacRegistrationNumber, setCacRegistrationNumber] = useState("");
-  const [taxIdNumber, setTaxIdNumber] = useState("");
-  const [supportingDocumentUrl, setSupportingDocumentUrl] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  const valid = businessName.trim() && businessLocation.trim() && whatTheySell.trim();
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!valid) return;
-    setSubmitting(true);
-    try {
-      const res = await fetch("/api/supplier-verification", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ businessName, businessLocation, whatTheySell, cacRegistrationNumber, taxIdNumber, supportingDocumentUrl }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to submit application.");
-      notify("success", "Verification application submitted — an admin will review it.");
-      onSubmitted();
-    } catch (err) {
-      notify("error", err instanceof Error ? err.message : "Failed to submit application.");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-3.5 rounded-xl border border-border bg-surface p-5">
-      <div>
-        <Label htmlFor="verif-business-name">Business name</Label>
-        <Input id="verif-business-name" value={businessName} onChange={(e) => setBusinessName(e.target.value)} required />
-      </div>
-      <div>
-        <Label htmlFor="verif-cac">CAC registration number (optional)</Label>
-        <Input id="verif-cac" value={cacRegistrationNumber} onChange={(e) => setCacRegistrationNumber(e.target.value)} />
-      </div>
-      <div>
-        <Label htmlFor="verif-tax">Tax ID number (optional)</Label>
-        <Input id="verif-tax" value={taxIdNumber} onChange={(e) => setTaxIdNumber(e.target.value)} />
-      </div>
-      <div>
-        <Label htmlFor="verif-location">Business location</Label>
-        <Input id="verif-location" value={businessLocation} onChange={(e) => setBusinessLocation(e.target.value)} required />
-      </div>
-      <div>
-        <Label htmlFor="verif-doc">Supporting document (optional)</Label>
-        <Input
-          id="verif-doc"
-          placeholder="Link to your CAC certificate, utility bill, etc."
-          value={supportingDocumentUrl}
-          onChange={(e) => setSupportingDocumentUrl(e.target.value)}
-        />
-      </div>
-      <div>
-        <Label htmlFor="verif-sells">What do you produce or sell?</Label>
-        <Textarea id="verif-sells" value={whatTheySell} onChange={(e) => setWhatTheySell(e.target.value)} required />
-      </div>
-      <Button type="submit" loading={submitting} disabled={!valid || submitting}>
-        Submit for verification
-      </Button>
-    </form>
-  );
-}
 
 export default function SupplierDashboard() {
   const router = useRouter();
@@ -319,7 +248,7 @@ export default function SupplierDashboard() {
                       <h3 className="mb-3 font-display text-lg italic text-text-primary">
                         {profile ? "Re-apply for verification" : "Apply for verification"}
                       </h3>
-                      <VerificationApplicationForm onSubmitted={loadVerification} />
+                      <SupplierVerificationForm onSubmitted={loadVerification} />
                     </>
                   )}
                 </div>

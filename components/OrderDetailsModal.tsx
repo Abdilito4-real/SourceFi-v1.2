@@ -79,6 +79,9 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const [showReportIssue, setShowReportIssue] = useState(false);
   const [issueCategory, setIssueCategory] = useState<DisputeCategory>("quality_issue");
   const [issueDescription, setIssueDescription] = useState("");
+  const [showEarlyIssueForm, setShowEarlyIssueForm] = useState(false);
+  const [earlyIssueCategory, setEarlyIssueCategory] = useState<DisputeCategory>("item_not_delivered");
+  const [earlyIssueDescription, setEarlyIssueDescription] = useState("");
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -245,6 +248,53 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
       )}
       {isSupplier && order.status !== "funded" && order.status !== "fulfilling" && order.status !== "pending_payment" && !proof && (
         <div className="mt-5 text-sm text-text-secondary">Waiting on the buyer to fund this order before you can begin.</div>
+      )}
+
+      {/* Buyer: waiting on fulfillment — with an out if something's
+          already wrong before any proof has even been submitted (design
+          doc's "rare, allowed" funded/fulfilling -> disputed edge). */}
+      {isBuyer && (order.status === "funded" || order.status === "fulfilling") && (
+        <div className="mt-5">
+          <div className="rounded-xl border border-border bg-surface-sunken p-4 text-sm text-text-secondary">
+            {order.status === "fulfilling" ? "Your supplier is preparing this order." : "Waiting on your supplier to begin fulfilling this order."}
+          </div>
+          {!showEarlyIssueForm ? (
+            <button type="button" onClick={() => setShowEarlyIssueForm(true)} className="mt-3 text-xs font-semibold text-danger-text underline">
+              Something's already wrong — report it now
+            </button>
+          ) : (
+            <div className="mt-3 flex flex-col gap-3 rounded-xl border border-danger bg-danger-soft p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-danger-text">Report a problem</div>
+              <Select value={earlyIssueCategory} onChange={(e) => setEarlyIssueCategory(e.target.value as DisputeCategory)}>
+                {DISPUTE_CATEGORIES.map((c) => (
+                  <option key={c.value} value={c.value}>
+                    {c.label}
+                  </option>
+                ))}
+              </Select>
+              <Textarea value={earlyIssueDescription} onChange={(e) => setEarlyIssueDescription(e.target.value)} placeholder="What's wrong?" required />
+              <div className="flex gap-2">
+                <Button
+                  variant="danger"
+                  loading={acting}
+                  disabled={!earlyIssueDescription.trim()}
+                  onClick={() =>
+                    runAction(
+                      "/report-early-issue",
+                      { category: earlyIssueCategory, description: earlyIssueDescription },
+                      "Reported — this order is now under review."
+                    )
+                  }
+                >
+                  Submit report
+                </Button>
+                <Button variant="ghost" disabled={acting} onClick={() => setShowEarlyIssueForm(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Delivery proof review (both roles can see it once submitted) */}

@@ -501,6 +501,54 @@ export async function rejectProof(
   return fetchOrder(supabase, orderId);
 }
 
+export interface ReportEarlyIssueInput {
+  category: DisputeCategory;
+  description?: string | null;
+  evidenceUrls?: string[];
+}
+
+/** Buyer flags a problem BEFORE any delivery proof exists at all — the
+ * design doc's "funded -> disputed: buyer disputes before any audit
+ * (rare, allowed)" edge (Section D.1), also reachable from `fulfilling`.
+ * Unlike rejectProof, there's no proof to reject — this transitions the
+ * order straight into `disputed`. Still `pre_approval_rejection` for
+ * dispute_type (no money has moved, same refund-eligibility class as a
+ * post-proof rejection — see lib/ledger.ts's recordRefundFromEscrow). */
+export async function reportEarlyIssue(
+  supabase: SupabaseClient,
+  orderId: number,
+  buyerId: number,
+  input: ReportEarlyIssueInput
+): Promise<OrderRow> {
+  const order = await fetchOrder(supabase, orderId);
+  if (order.buyer_id !== buyerId) throw new NotOrderOwnerError();
+  if (order.status !== "funded" && order.status !== "fulfilling") {
+    throw new InvalidOrderTransitionError(order.status, "disputed");
+  }
+
+  const moved = await tryTransition(supabase, orderId, order.status, "disputed");
+  if (!moved) throw new InvalidOrderTransitionError(order.status, "disputed");
+
+  const { data: dispute, error } = await supabase
+    .from("disputes")
+    .insert({
+      order_id: orderId,
+      raised_by: buyerId,
+      dispute_type: "pre_approval_rejection" as DisputeType,
+      category: input.category,
+      description: input.description ?? null,
+      evidence_urls: input.evidenceUrls ?? [],
+      status: "open",
+    })
+    .select("id")
+    .single();
+  if (error) throw error;
+
+  await supabase.from("dispute_events").insert({ dispute_id: dispute.id, actor_id: buyerId, event_type: "opened" });
+
+  return fetchOrder(supabase, orderId);
+}
+
 // ============================================================================
 // Post-settlement report — the genuinely new mechanism (design doc
 // Section 5 / C.7). Deliberately does NOT touch orders.status — see
