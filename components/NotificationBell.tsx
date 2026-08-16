@@ -132,7 +132,13 @@ export default function NotificationBell() {
         <div
           role="dialog"
           aria-label="Notifications"
-          className="absolute right-0 z-[1100] mt-2 max-h-[70vh] w-80 overflow-y-auto rounded-xl border border-border bg-surface-elevated shadow-lg sm:w-96"
+          // On mobile the header stacks (DashboardShell), so this bell
+          // isn't reliably near the right edge of the screen, anchoring
+          // the panel to the button's own right-0 can push most of it
+          // off-screen. Fixed + viewport-relative below sm avoids that;
+          // sm and up reverts to anchored-to-button, which is correct
+          // once the header is a single flush-right row.
+          className="fixed inset-x-3 top-[4.5rem] z-[1100] max-h-[70vh] overflow-y-auto rounded-xl border border-border bg-surface-elevated shadow-lg sm:absolute sm:inset-x-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-96"
         >
           <div className="sticky top-0 flex items-center justify-between border-b border-border bg-surface-elevated px-4 py-3">
             <span className="font-display text-sm font-semibold text-text-primary">Notifications</span>

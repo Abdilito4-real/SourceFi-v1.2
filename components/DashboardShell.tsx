@@ -9,12 +9,13 @@
 // surface is Rebrand-I's own design (see the --color-nav-* tokens in
 // app/globals.css), it was defined back in Stage 2 but nothing used it
 // until now.
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { Menu, X, LogOut, ArrowLeftRight } from "lucide-react";
 import { cn } from "./ui/cn";
 import ThemeToggle from "./ui/ThemeToggle";
+import PushSoftPrompt from "./PushSoftPrompt";
 import type { AppUser } from "../lib/types";
 
 export interface NavItem {
@@ -152,6 +153,16 @@ export default function DashboardShell({
 }: DashboardShellProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
+  // First thing after sign-in: this shell is what mounts the moment a
+  // signed-in user lands on their dashboard, so this is that moment.
+  // PushSoftPrompt itself still gates on the real rule (permission
+  // still "default", never soft-declined before), so this is a no-op
+  // and shows nothing once the user has actually answered once.
+  const [pushPromptOpen, setPushPromptOpen] = useState(false);
+  useEffect(() => {
+    setPushPromptOpen(true);
+  }, []);
+
   return (
     <div className="min-h-screen bg-bg font-body md:flex">
       {/* Desktop sidebar, persistent, full height */}
@@ -177,7 +188,11 @@ export default function DashboardShell({
           type="button"
           onClick={() => setMobileNavOpen(true)}
           aria-label="Open navigation"
-          className="rounded-md p-2 text-nav-text hover:bg-white/5"
+          // Stays mounted (not conditionally rendered) so the layout
+          // doesn't jump, but invisible while the drawer's own close
+          // button is up, otherwise this peeks through the drawer's
+          // semi-transparent backdrop as a second, confusing menu icon.
+          className={cn("rounded-md p-2 text-nav-text hover:bg-white/5", mobileNavOpen && "invisible")}
         >
           <Menu size={20} />
         </button>
@@ -226,6 +241,12 @@ export default function DashboardShell({
 
         <main className="px-6 py-8">{children}</main>
       </div>
+
+      <PushSoftPrompt
+        open={pushPromptOpen}
+        onClose={() => setPushPromptOpen(false)}
+        reason="You're signed in."
+      />
     </div>
   );
 }
