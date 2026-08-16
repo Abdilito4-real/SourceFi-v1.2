@@ -73,7 +73,10 @@ export default function Web3Providers({ children }: { children: React.ReactNode 
         appearance: {
           theme: "light",
           accentColor: "#C08A3E",
-          logo: "https://avatars.githubusercontent.com/u/17922993",
+          // Same-origin asset, not an external URL: the CSP's img-src is
+          // locked to 'self' plus a couple of named hosts (middleware.ts),
+          // so an external logo URL just gets silently blocked.
+          logo: "/logo-mark.png",
         },
         loginMethods: ["wallet", "email", "google"],
         defaultChain: arcTestnet,

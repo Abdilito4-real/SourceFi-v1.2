@@ -81,7 +81,16 @@ begin
   end if;
 end $$;
 
-create table if not exists notifications (
+-- `notifications` already exists as a schema-only placeholder from
+-- 0000/0002 ("nothing writes to this yet"), with a completely different
+-- shape (type/related_request_id instead of category/event_type/
+-- pushed_at). `create table if not exists` would silently keep that old
+-- shape and every column below would be missing, drop and recreate
+-- instead: the old table was confirmed never written to by any app code,
+-- so there's no data to preserve.
+drop table if exists notifications;
+
+create table notifications (
   id bigint generated always as identity primary key,
   user_id bigint not null references users(id) on delete cascade,
   category notification_category not null,
