@@ -83,6 +83,7 @@ export default function AdminDashboard() {
   const [ledgerEntries, setLedgerEntries] = useState<(LedgerEntryRow & { order_code: string | null })[]>([]);
   const [ledgerBalances, setLedgerBalances] = useState<LedgerBalance[]>([]);
   const [loadingLedger, setLoadingLedger] = useState(true);
+  const [ledgerPaymentMode, setLedgerPaymentMode] = useState<{ ngnLive: boolean; usdcLive: boolean } | null>(null);
 
   const isAdmin = user?.role === "admin";
 
@@ -197,6 +198,7 @@ export default function AdminDashboard() {
       if (!res.ok) throw new Error(data.error || "Failed to load ledger.");
       setLedgerEntries(data.entries || []);
       setLedgerBalances(data.balances || []);
+      setLedgerPaymentMode(data.paymentMode || null);
     } catch (err) {
       notify("error", err instanceof Error ? err.message : "Failed to load ledger.");
     } finally {
@@ -542,6 +544,18 @@ export default function AdminDashboard() {
             </div>
           ) : (
             <>
+              {ledgerPaymentMode && (
+                <div className="flex items-start gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2.5 text-xs text-warning-text">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                  <span>
+                    No real money has moved in any entry below. NGN funding and settlement (Yellow Card) are
+                    always simulated, no integration exists yet.{" "}
+                    {ledgerPaymentMode.usdcLive
+                      ? "USDC escrow release is live via Circle."
+                      : "USDC escrow release is simulated too, until Circle credentials are configured."}
+                  </span>
+                </div>
+              )}
               <div>
                 <h2 className="mb-3 font-display text-lg italic text-text-primary">Account balances (all-time, net)</h2>
                 {ledgerBalances.length === 0 ? (

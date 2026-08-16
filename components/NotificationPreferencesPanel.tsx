@@ -32,15 +32,15 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
       aria-label={label}
       onClick={() => onChange(!checked)}
       className={cn(
-        "relative h-6 w-11 shrink-0 rounded-pill transition-colors duration-base ease-base",
-        checked ? "bg-accent" : "bg-surface-sunken border border-border-strong"
+        "inline-flex h-6 w-11 shrink-0 items-center rounded-pill transition-colors duration-base ease-base",
+        checked ? "bg-accent" : "bg-surface-sunken ring-1 ring-inset ring-border-strong"
       )}
     >
       <span
         aria-hidden="true"
         className={cn(
-          "absolute top-0.5 h-5 w-5 rounded-pill bg-white shadow-sm transition-transform duration-base ease-base",
-          checked ? "translate-x-[22px]" : "translate-x-0.5"
+          "inline-block h-4 w-4 rounded-pill bg-white shadow-sm transition-transform duration-base ease-base",
+          checked ? "translate-x-6" : "translate-x-1"
         )}
       />
     </button>
