@@ -14,7 +14,7 @@
 // components/ui/StatusBadge.tsx's same rule. The buyer sees "processing
 // your payment", not the underlying rails (design doc Section 3).
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, XCircle, Loader2, Clock, Star, AlertTriangle, Image as ImageIcon, Receipt, Video } from "lucide-react";
+import { CheckCircle2, Loader2, Clock, Star, AlertTriangle, Image as ImageIcon, Receipt, Video } from "lucide-react";
 import Modal from "./ui/Modal";
 import Button from "./ui/Button";
 import Badge from "./ui/Badge";
@@ -86,11 +86,8 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const [detail, setDetail] = useState<OrderDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
-  const [showRejectForm, setShowRejectForm] = useState(false);
   const [showApproveConfirm, setShowApproveConfirm] = useState(false);
   const [showCall, setShowCall] = useState(false);
-  const [rejectCategory, setRejectCategory] = useState<DisputeCategory>("item_not_as_described");
-  const [rejectDescription, setRejectDescription] = useState("");
   const [proofPhotoUrl, setProofPhotoUrl] = useState("");
   const [proofReceiptUrl, setProofReceiptUrl] = useState("");
   const [proofNotes, setProofNotes] = useState("");
@@ -448,25 +445,30 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
         </div>
       )}
 
-      {/* Buyer: approve or reject. Approve is deliberately two steps —
-          releasing funds is irreversible once the transfer confirms, so
-          a single click isn't enough; this makes the buyer explicitly
-          review the amount/supplier and confirm a second time before the
-          real API call ever fires. (This is a confirmation/review step,
-          not a new authentication factor — the actual authorization
-          boundary is still the existing session check on the /approve
-          route itself, same as every other action here.) */}
+      {/* Buyer: accept delivery — the only action here now (Reject was
+          removed per explicit product direction; a buyer with a problem
+          uses "Something's already wrong" above or a post-settlement
+          report instead of a separate reject-with-reason flow). Suspended
+          until the verification call requirement clears, and still two
+          steps once it does — releasing funds is irreversible once the
+          transfer confirms, so a single click isn't enough. (The confirm
+          step is a review/confirmation step, not a new authentication
+          factor — the actual authorization boundary is still the existing
+          session check on the /approve route itself, same as every other
+          action here; the call requirement itself IS enforced server-side,
+          see lib/orderService.ts's approveOrder.) */}
       {isBuyer && order.status === "proof_submitted" && (
         <div className="mt-5">
           {!callRequirementMet && !showApproveConfirm && (
             <div className="mb-3 flex items-start gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2.5 text-xs text-warning-text">
               <Video size={14} className="mt-0.5 shrink-0" />
               <span>
-                A live verification call of at least 5 minutes with your supplier is required before you can approve —{" "}
+                Accepting delivery is suspended until you complete a live verification call of at least 5 minutes with your
+                supplier —{" "}
                 <strong>
                   {Math.floor(verificationCallSeconds / 60)}:{(verificationCallSeconds % 60).toString().padStart(2, "0")} / 5:00
                 </strong>{" "}
-                so far. Rejecting doesn't require a call.
+                so far.
               </span>
             </div>
           )}
@@ -482,7 +484,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
                 <Button
                   variant="danger"
                   loading={acting}
-                  onClick={() => runAction("/approve", undefined, "Order approved — releasing funds to your supplier.")}
+                  onClick={() => runAction("/approve", undefined, "Order accepted — releasing funds to your supplier.")}
                 >
                   <CheckCircle2 size={15} /> Yes, release {formatMoney(order.amount_minor, "NGN")}
                 </Button>
@@ -491,50 +493,12 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
                 </Button>
               </div>
             </div>
-          ) : !showRejectForm ? (
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <span title={callRequirementMet ? undefined : "Complete the 5-minute verification call above first."}>
-                <Button fullWidth disabled={!callRequirementMet} onClick={() => setShowApproveConfirm(true)}>
-                  <CheckCircle2 size={15} /> Approve delivery
-                </Button>
-              </span>
-              <Button fullWidth variant="secondary" disabled={acting} onClick={() => setShowRejectForm(true)}>
-                <XCircle size={15} /> Reject delivery
-              </Button>
-            </div>
           ) : (
-            <div className="flex flex-col gap-3 rounded-xl border border-danger bg-danger-soft p-4">
-              <div className="text-xs font-semibold uppercase tracking-wide text-danger-text">Reject delivery proof</div>
-              <div>
-                <Label htmlFor="reject-category">Reason</Label>
-                <Select id="reject-category" value={rejectCategory} onChange={(e) => setRejectCategory(e.target.value as DisputeCategory)}>
-                  {DISPUTE_CATEGORIES.map((c) => (
-                    <option key={c.value} value={c.value}>
-                      {c.label}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-              <div>
-                <Label htmlFor="reject-description">Details</Label>
-                <Textarea id="reject-description" value={rejectDescription} onChange={(e) => setRejectDescription(e.target.value)} required />
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  variant="danger"
-                  loading={acting}
-                  disabled={!rejectDescription.trim()}
-                  onClick={() =>
-                    runAction("/reject", { category: rejectCategory, description: rejectDescription }, "Delivery rejected — this order is now under review.")
-                  }
-                >
-                  Confirm rejection
-                </Button>
-                <Button variant="ghost" disabled={acting} onClick={() => setShowRejectForm(false)}>
-                  Cancel
-                </Button>
-              </div>
-            </div>
+            <span title={callRequirementMet ? undefined : "Complete the 5-minute verification call above first."}>
+              <Button fullWidth disabled={!callRequirementMet} onClick={() => setShowApproveConfirm(true)}>
+                <CheckCircle2 size={15} /> Accept delivery
+              </Button>
+            </span>
           )}
         </div>
       )}

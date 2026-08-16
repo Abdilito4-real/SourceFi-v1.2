@@ -10,8 +10,8 @@
 // service_role).
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
 import { requireSession, requireRole } from "../../../lib/authz";
-import { toMinorUnits } from "../../../lib/money";
-import { createOrder, SupplierNotCurrentlyVerifiedError } from "../../../lib/orderService";
+import { toMinorUnits, MIN_ORDER_AMOUNT_MINOR, formatMoney } from "../../../lib/money";
+import { createOrder, SupplierNotCurrentlyVerifiedError, InvalidOrderAmountError } from "../../../lib/orderService";
 import type { OrderRow } from "../../../lib/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -88,6 +88,12 @@ export async function POST(request: Request) {
   if (amountMinor <= 0) {
     return Response.json({ error: "Order amount must be greater than zero." }, { status: 400 });
   }
+  if (amountMinor < MIN_ORDER_AMOUNT_MINOR) {
+    return Response.json(
+      { error: `Order amount must be at least ${formatMoney(MIN_ORDER_AMOUNT_MINOR, "NGN")}.` },
+      { status: 400 }
+    );
+  }
 
   const supabase = getSupabaseServerClient();
 
@@ -105,6 +111,12 @@ export async function POST(request: Request) {
   } catch (err) {
     if (err instanceof SupplierNotCurrentlyVerifiedError) {
       return Response.json({ error: "This supplier is not currently verified and cannot receive new orders." }, { status: 409 });
+    }
+    if (err instanceof InvalidOrderAmountError) {
+      return Response.json(
+        { error: `Order amount must be at least ${formatMoney(MIN_ORDER_AMOUNT_MINOR, "NGN")}.` },
+        { status: 400 }
+      );
     }
     const message = err instanceof Error ? err.message : "Failed to create order.";
     return Response.json({ error: message }, { status: 500 });

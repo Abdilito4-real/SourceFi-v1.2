@@ -22,7 +22,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { assertTransition, InvalidOrderTransitionError } from "./orderStateMachine";
 import { isSupplierCurrentlyVerified } from "./supplierVerification";
 import { recordFundingConfirmed, recordEscrowRelease, recordSettlement, recordRefundFromEscrow } from "./ledger";
-import { ORDER_PLATFORM_FEE_MINOR } from "./money";
+import { ORDER_PLATFORM_FEE_MINOR, MIN_ORDER_AMOUNT_MINOR } from "./money";
 import type { PaymentBoundary, PaymentStatusEvent } from "./paymentBoundary";
 import type { DisputeCategory, DisputeRuling, DisputeType, OrderRow, OrderStatus } from "./types";
 
@@ -141,6 +141,19 @@ export class SupplierNotCurrentlyVerifiedError extends Error {
   }
 }
 
+/** Thrown when an order's amount is too small to leave the supplier a
+ * sane payout once the flat ORDER_PLATFORM_FEE_MINOR is deducted — see
+ * MIN_ORDER_AMOUNT_MINOR's comment in lib/money.ts for why this floor
+ * exists at all. */
+export class InvalidOrderAmountError extends Error {
+  constructor(amountMinor: number) {
+    super(
+      `Order amount (${amountMinor} kobo) is below the ${MIN_ORDER_AMOUNT_MINOR} kobo minimum required to cover the platform fee.`
+    );
+    this.name = "InvalidOrderAmountError";
+  }
+}
+
 /** Buyer creates an order directly against a specific, currently-verified
  * supplier — no claim/fee-naming step (see design doc Section 0). The
  * live verification check happens here AND again in fundOrder — state
@@ -148,6 +161,8 @@ export class SupplierNotCurrentlyVerifiedError extends Error {
 export async function createOrder(supabase: SupabaseClient, buyerId: number, input: CreateOrderInput): Promise<OrderRow> {
   const verified = await isSupplierCurrentlyVerified(supabase, input.supplierId);
   if (!verified) throw new SupplierNotCurrentlyVerifiedError(input.supplierId);
+
+  if (input.amountMinor < MIN_ORDER_AMOUNT_MINOR) throw new InvalidOrderAmountError(input.amountMinor);
 
   const platformFeeMinor = ORDER_PLATFORM_FEE_MINOR;
 

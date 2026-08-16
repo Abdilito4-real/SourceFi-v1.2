@@ -12,7 +12,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Info, Coins, Package, LayoutGrid, FileText, History, Store, ShieldCheck, XCircle, Search } from "lucide-react";
 
-import { formatMoney } from "../lib/money";
+import { formatMoney, MIN_ORDER_AMOUNT_MINOR } from "../lib/money";
 import { useSession } from "./SessionProvider";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
 import OrderCard from "./OrderCard";
@@ -138,7 +138,7 @@ function NewOrderModal({ onClose, onSubmit, supplier, prefillListing, submitting
     setAmount(Number.isFinite(n) && n > 0 ? (unitPriceMajor * n).toString() : "");
   }, [unitPriceMajor, unitCount]);
 
-  const validAmount = amount.trim() !== "" && !isNaN(Number(amount)) && Number(amount) > 0;
+  const validAmount = amount.trim() !== "" && !isNaN(Number(amount)) && Math.round(Number(amount) * 100) >= MIN_ORDER_AMOUNT_MINOR;
   const quantity = unitPriceMinor !== null ? `${unitCount}${prefillListing?.unit ? ` (${prefillListing.unit})` : ""}` : freeformQuantity;
 
   const handleFormSubmit = (e: React.FormEvent<HTMLFormElement>) => {
@@ -174,8 +174,11 @@ function NewOrderModal({ onClose, onSubmit, supplier, prefillListing, submitting
                 {prefillListing?.unit ? ` ${prefillListing.unit}` : ""} × {unitCount || 0}
               </div>
               <div className="mt-0.5 font-semibold text-text-primary">
-                Total: {validAmount ? formatMoney(Math.round(Number(amount) * 100), "NGN") : "—"}
+                Total: {amount.trim() !== "" && !isNaN(Number(amount)) ? formatMoney(Math.round(Number(amount) * 100), "NGN") : "—"}
               </div>
+              {amount.trim() !== "" && !validAmount && (
+                <div className="mt-1 text-xs text-danger">Order total must be at least {formatMoney(MIN_ORDER_AMOUNT_MINOR, "NGN")}.</div>
+              )}
             </div>
           </>
         ) : (
@@ -183,6 +186,9 @@ function NewOrderModal({ onClose, onSubmit, supplier, prefillListing, submitting
             <div className="flex-1">
               <Label htmlFor="new-order-amount">Order amount (₦)</Label>
               <Input id="new-order-amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 500000" required />
+              {amount.trim() !== "" && !validAmount && (
+                <div className="mt-1 text-xs text-danger">Must be at least {formatMoney(MIN_ORDER_AMOUNT_MINOR, "NGN")}.</div>
+              )}
             </div>
             <div className="flex-1">
               <Label htmlFor="new-order-quantity">Quantity</Label>

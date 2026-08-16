@@ -73,22 +73,31 @@ export default function JitsiMeetRoom({ orderCode, onSegmentComplete }: JitsiMee
 
     function init() {
       if (cancelled || !containerRef.current || !window.JitsiMeetExternalAPI) return;
-      const api = new window.JitsiMeetExternalAPI(JITSI_DOMAIN, {
-        roomName: `SourceFi_${orderCode}`,
-        parentNode: containerRef.current,
-        width: "100%",
-        height: "100%",
-        configOverwrite: { prejoinPageEnabled: false },
-        interfaceConfigOverwrite: { TOOLBAR_BUTTONS: ["microphone", "camera", "fullscreen", "hangup", "chat"] },
-      });
-      apiRef.current = api;
+      // Defensive: if external_api.js loaded but the constructor itself
+      // throws (a malformed room name, a Jitsi-side error, a version
+      // mismatch), fall back to the same friendly error state as a failed
+      // script load — the alternative is an unstyled DOM fragment or raw
+      // error text sitting inside the call panel instead of a real call.
+      try {
+        const api = new window.JitsiMeetExternalAPI!(JITSI_DOMAIN, {
+          roomName: `SourceFi_${orderCode}`,
+          parentNode: containerRef.current,
+          width: "100%",
+          height: "100%",
+          configOverwrite: { prejoinPageEnabled: false },
+          interfaceConfigOverwrite: { TOOLBAR_BUTTONS: ["microphone", "camera", "fullscreen", "hangup", "chat"] },
+        });
+        apiRef.current = api;
 
-      api.addEventListener("videoConferenceJoined", () => {
-        joinedAtRef.current = Date.now();
-        setInCall(true);
-      });
-      api.addEventListener("videoConferenceLeft", reportSegmentIfJoined);
-      api.addEventListener("readyToClose", reportSegmentIfJoined);
+        api.addEventListener("videoConferenceJoined", () => {
+          joinedAtRef.current = Date.now();
+          setInCall(true);
+        });
+        api.addEventListener("videoConferenceLeft", reportSegmentIfJoined);
+        api.addEventListener("readyToClose", reportSegmentIfJoined);
+      } catch {
+        if (!cancelled) setLoadError(true);
+      }
     }
 
     if (window.JitsiMeetExternalAPI) {

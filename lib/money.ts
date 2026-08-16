@@ -61,3 +61,15 @@ export const PLATFORM_FEE_MINOR = 500; // $5.00
  * orders.platform_fee_minor — never re-derived from client input on a
  * later read, same discipline as the fee it replaces. */
 export const ORDER_PLATFORM_FEE_MINOR = 200_000; // ₦2,000.00
+
+/** The smallest order amount the platform will accept, in NGN minor
+ * units. Exists because ORDER_PLATFORM_FEE_MINOR is flat, not
+ * percentage-based: without a floor, an order smaller than the fee
+ * produces a NEGATIVE supplier payout (amount - fee < 0), which
+ * lib/ledger.ts's balance invariant correctly refuses to write (see the
+ * "mandatory live verification call" describe block in
+ * tests/orderService.test.ts for how that surfaced). ₦5,000 is a round
+ * number comfortably above the ₦2,000 fee — enough that a supplier is
+ * never left with a token payout — not a precise revenue-model number.
+ * Enforced in createOrder() below, the single place orders are created. */
+export const MIN_ORDER_AMOUNT_MINOR = 500_000; // ₦5,000.00

@@ -22,9 +22,11 @@ import {
   SupplierNotCurrentlyVerifiedError,
   NotOrderOwnerError,
   VerificationCallIncompleteError,
+  InvalidOrderAmountError,
 } from "../lib/orderService";
 import { InvalidOrderTransitionError } from "../lib/orderStateMachine";
 import { StubPaymentProvider, type PaymentStatusEvent } from "../lib/paymentBoundary";
+import { MIN_ORDER_AMOUNT_MINOR } from "../lib/money";
 
 const NOW = Date.now();
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
@@ -214,7 +216,7 @@ describe("fundOrder — ownership and re-verification at funding time", () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
     const { provider } = synchronousProvider(supabase);
-    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1000 });
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000 });
     await expect(fundOrder(supabase, provider, order.id, 999)).rejects.toThrow(NotOrderOwnerError);
   });
 
@@ -222,7 +224,7 @@ describe("fundOrder — ownership and re-verification at funding time", () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
     const { provider } = synchronousProvider(supabase);
-    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1000 });
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000 });
 
     // Verification expires AFTER the order was created but BEFORE funding.
     await supabase.from("supplier_profiles").update({ verification_expires_at: new Date(NOW - 1000).toISOString() }).eq("id", 1);
@@ -331,8 +333,30 @@ describe("InvalidOrderTransitionError surfaces from orderService, not just order
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
     const { provider } = synchronousProvider(supabase);
-    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1000 });
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000 });
     await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(InvalidOrderTransitionError);
+  });
+});
+
+describe("createOrder — minimum order amount", () => {
+  it("rejects an order below MIN_ORDER_AMOUNT_MINOR, since the flat platform fee would leave the supplier a negative payout", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    await expect(
+      createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1000 })
+    ).rejects.toThrow(InvalidOrderAmountError);
+  });
+
+  it("accepts an order right at the minimum", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await createOrder(supabase, 1, {
+      supplierId: 1,
+      title: "x",
+      deliveryLocation: "y",
+      amountMinor: MIN_ORDER_AMOUNT_MINOR,
+    });
+    expect(order.amount_minor).toBe(MIN_ORDER_AMOUNT_MINOR);
   });
 });
 
@@ -343,19 +367,11 @@ describe("mandatory live verification call before approval", () => {
     // A realistic amount, not the trivial 1000 (NGN 10) other tests in
     // this file use — several tests below call approveOrder/resolveDispute,
     // which (since the StubPaymentProvider fix) now chains a REAL
-    // settlement confirmation afterward. That surfaced a genuine, separate
-    // bug: ORDER_PLATFORM_FEE_MINOR is a flat NGN 2,000 fee regardless of
-    // order size, so an order smaller than that produces a NEGATIVE
-    // computed supplier/fee USDC split in lib/orderService.ts's
-    // computeUsdcSplit — which lib/ledger.ts correctly refuses to write
-    // (a negative-amount leg gets filtered, leaving nothing left to write,
-    // which assertBalanced correctly rejects) rather than record something
-    // nonsensical. That's the ledger safety net doing its job, not a bug
-    // in the ledger — the real bug is a flat fee with no relationship to
-    // order size, which needs a real product decision (cap the fee at
-    // some % of order value? enforce a minimum order size?), not a silent
-    // fix here. Using a realistic amount sidesteps it for this test file;
-    // the underlying issue is flagged, not fixed, pending that decision.
+    // settlement confirmation afterward, which needs a sane (non-negative)
+    // supplier/fee split. createOrder() now enforces MIN_ORDER_AMOUNT_MINOR
+    // itself (see "rejects an order below the minimum amount" below), so
+    // this amount just needs to clear that floor — it's not sidestepping
+    // anything anymore.
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
     const confirmed = waitForConfirmation();
     await fundOrder(supabase, provider, order.id, 1);
