@@ -230,6 +230,7 @@ export interface SupplierProfileRow {
   user_id: number;
   business_name: string;
   cac_registration_number: string | null;
+  tax_id_number: string | null;
   business_location: string;
   what_they_sell: string;
   phone: string | null;
@@ -255,6 +256,7 @@ export interface SupplierVerificationApplicationRow {
   status: ApplicationStatus;
   business_name: string;
   cac_registration_number: string | null;
+  tax_id_number: string | null;
   business_location: string;
   what_they_sell: string;
   supporting_document_url: string | null;

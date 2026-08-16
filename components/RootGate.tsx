@@ -17,6 +17,8 @@ import { useSession } from "./SessionProvider";
 import SignInScreen from "./SignInScreen";
 import OnboardingScreen, { type OnboardingForm } from "./OnboardingScreen";
 import OnboardingCarousel from "./OnboardingCarousel";
+import PendingVerificationScreen from "./PendingVerificationScreen";
+import type { SupplierVerificationApplicationRow } from "../lib/types";
 
 const INTRO_SEEN_KEY = "sourcefi_intro_seen";
 
@@ -83,6 +85,7 @@ export default function RootGate() {
     completeOnboarding,
     completingOnboarding,
     handleSignOut,
+    signingOut,
   } = useSession();
 
   const [form, setForm] = useState<OnboardingForm>({
@@ -93,6 +96,7 @@ export default function RootGate() {
     primaryLocation: "",
     path: "buyer",
     cacRegistrationNumber: "",
+    taxIdNumber: "",
     whatTheySell: "",
     supportingDocumentUrl: "",
   });
@@ -100,6 +104,15 @@ export default function RootGate() {
   // null while unknown (avoids a flash of the wrong screen before the
   // localStorage read resolves on mount) — true/false once it has.
   const [introSeen, setIntroSeen] = useState<boolean | null>(null);
+
+  // A first-time supplier applicant stays role='buyer' until an admin
+  // approves them — per explicit product direction, that account does
+  // NOT get normal buyer access while pending (see
+  // PendingVerificationScreen.tsx's header comment). Re-verification
+  // after expiry is different: that account is already role='supplier'
+  // and isn't gated here at all, only checked for role==='buyer' below.
+  const [pendingApplication, setPendingApplication] = useState<SupplierVerificationApplicationRow | null>(null);
+  const [pendingApplicationChecked, setPendingApplicationChecked] = useState(false);
 
   useEffect(() => {
     try {
@@ -121,12 +134,64 @@ export default function RootGate() {
   const readyForDashboard = !checkingSession && !!user && !needsOnboarding;
 
   useEffect(() => {
-    if (readyForDashboard) router.replace(user?.role === "admin" ? "/admin" : "/buyer");
-  }, [readyForDashboard, user, router]);
+    if (!readyForDashboard) return;
+    // Already resolved once (including the direct-from-submit path in
+    // handleSubmit below, which sets both these synchronously right
+    // after a successful application POST) — skip re-checking. Without
+    // this guard, this effect firing on the SAME render pass that
+    // needsOnboarding flips (readyForDashboard becoming true) can race
+    // the just-submitted application's own insert and briefly read back
+    // "no pending application yet", clobbering the correct value handleSubmit
+    // just set and causing a flash toward /buyer before self-correcting.
+    if (pendingApplicationChecked) return;
+    if (user?.role !== "buyer") {
+      // Only a still-role='buyer' account can have a BLOCKING first-time
+      // application — an already-'supplier' account's re-verification
+      // pending state is handled inside SupplierDashboard instead, with
+      // full dashboard access kept.
+      setPendingApplicationChecked(true);
+      return;
+    }
+    let cancelled = false;
+    fetch("/api/supplier-verification/me")
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled) return;
+        setPendingApplication(data.latestApplication?.status === "pending" ? data.latestApplication : null);
+      })
+      .catch(() => {
+        if (!cancelled) setPendingApplication(null);
+      })
+      .finally(() => {
+        if (!cancelled) setPendingApplicationChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // pendingApplicationChecked is read (as a guard), not a re-trigger —
+    // deliberately excluded so this doesn't re-run the instant it flips.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readyForDashboard, user]);
 
-  if (checkingSession || readyForDashboard || introSeen === null) {
-    const phase: Phase = readyForDashboard ? 2 : authenticated ? 1 : 0;
+  useEffect(() => {
+    if (!readyForDashboard) return;
+    if (!pendingApplicationChecked) return; // wait for the pending-application check first
+    if (pendingApplication) return; // blocked — PendingVerificationScreen renders instead of redirecting
+    router.replace(user?.role === "admin" ? "/admin" : "/buyer");
+  }, [readyForDashboard, pendingApplicationChecked, pendingApplication, user, router]);
+
+  if (checkingSession || introSeen === null) {
+    const phase: Phase = authenticated ? 1 : 0;
     return <FullPageLoader phase={phase} />;
+  }
+
+  if (readyForDashboard) {
+    if (pendingApplicationChecked && pendingApplication) {
+      return <PendingVerificationScreen application={pendingApplication} onSignOut={handleSignOut} signingOut={signingOut} />;
+    }
+    // Either still checking, or checked-clear and the redirect effect
+    // above is about to fire — both cases show the same loader.
+    return <FullPageLoader phase={2} />;
   }
 
   if (!user) {
@@ -168,12 +233,18 @@ export default function RootGate() {
             businessLocation: form.primaryLocation,
             whatTheySell: form.whatTheySell,
             cacRegistrationNumber: form.cacRegistrationNumber,
+            taxIdNumber: form.taxIdNumber,
             supportingDocumentUrl: form.supportingDocumentUrl,
           }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed to submit your application.");
         notify("success", "Verification application submitted — an admin will review it.");
+        // Set directly from the response rather than waiting on the
+        // pending-application effect to refetch — avoids a flash of the
+        // redirect-to-/buyer race between this submit and that fetch.
+        setPendingApplicationChecked(true);
+        setPendingApplication(data.application);
       } catch (err) {
         notify("error", err instanceof Error ? err.message : "Failed to submit your application.");
       }

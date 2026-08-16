@@ -23,6 +23,7 @@ export async function POST(request: Request) {
   const businessLocation = typeof body?.businessLocation === "string" ? body.businessLocation.trim() : "";
   const whatTheySell = typeof body?.whatTheySell === "string" ? body.whatTheySell.trim() : "";
   const cacRegistrationNumber = typeof body?.cacRegistrationNumber === "string" ? body.cacRegistrationNumber.trim() || null : null;
+  const taxIdNumber = typeof body?.taxIdNumber === "string" ? body.taxIdNumber.trim() || null : null;
   const supportingDocumentUrl = typeof body?.supportingDocumentUrl === "string" ? body.supportingDocumentUrl.trim() || null : null;
 
   if (!businessName || !businessLocation || !whatTheySell) {
@@ -52,6 +53,7 @@ export async function POST(request: Request) {
       business_location: businessLocation,
       what_they_sell: whatTheySell,
       cac_registration_number: cacRegistrationNumber,
+      tax_id_number: taxIdNumber,
       supporting_document_url: supportingDocumentUrl,
       status: "pending",
     })

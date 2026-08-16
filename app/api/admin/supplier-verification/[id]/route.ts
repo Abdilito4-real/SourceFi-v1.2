@@ -89,6 +89,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const profilePatch = {
       business_name: application.business_name,
       cac_registration_number: application.cac_registration_number,
+      tax_id_number: application.tax_id_number,
       business_location: application.business_location,
       what_they_sell: application.what_they_sell,
       verification_status: "verified" as const,

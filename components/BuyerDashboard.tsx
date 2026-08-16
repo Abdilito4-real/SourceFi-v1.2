@@ -10,7 +10,7 @@
 // (design doc Section 3).
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Info, ArrowRight, Layers, Coins, Building2, Package, HardHat, LayoutGrid, FileText, History, X, ChevronRight, Store, ShieldCheck, Clock } from "lucide-react";
+import { Loader2, Info, ArrowRight, Layers, Coins, Building2, Package, HardHat, LayoutGrid, FileText, History, X, ChevronRight, Store, ShieldCheck } from "lucide-react";
 
 import { materialLibrary } from "../lib/constants";
 import { formatMoney } from "../lib/money";
@@ -199,18 +199,25 @@ export default function BuyerDashboard() {
     if (!user) router.replace("/");
   }, [checkingSession, user, router]);
 
-  // A first-time supplier applicant stays role='buyer' — and lands here,
-  // not on /supplier — until an admin approves the application (only a
-  // RE-verification after expiry happens from an already-'supplier'
-  // account, which does reach /supplier). Without this, someone who just
-  // applied gets no indication anything is happening at all.
+  // RootGate is the real gate for this (a first-time supplier applicant
+  // doesn't get redirected to /buyer at all while pending — see
+  // PendingVerificationScreen.tsx). This is the defensive second layer:
+  // someone reaching /buyer directly anyway (a bookmark, browser back
+  // button, a stale tab) gets bounced back to "/" so RootGate's check
+  // runs again and shows the real pending screen, rather than quietly
+  // landing on a working buyer dashboard while pending — per explicit
+  // product direction, that account is not a buyer during this window.
   useEffect(() => {
     if (!user || !isBuyer) return;
     fetch("/api/supplier-verification/me")
       .then((res) => res.json())
-      .then((data) => setPendingSupplierApplication(data.latestApplication?.status === "pending" ? data.latestApplication : null))
+      .then((data) => {
+        const pending = data.latestApplication?.status === "pending" ? data.latestApplication : null;
+        setPendingSupplierApplication(pending);
+        if (pending) router.replace("/");
+      })
       .catch(() => {});
-  }, [user, isBuyer]);
+  }, [user, isBuyer, router]);
 
   useEffect(() => {
     if (!user) return;
@@ -305,15 +312,6 @@ export default function BuyerDashboard() {
           : undefined
       }
     >
-      {pendingSupplierApplication && (
-        <div className="mb-6 flex items-center gap-2.5 rounded-lg border border-border bg-accent-soft px-4 py-3 text-sm text-accent-text">
-          <Clock size={15} className="shrink-0" />
-          Your supplier verification application for <strong>{pendingSupplierApplication.business_name}</strong> is under
-          review — most reviews complete within a couple of minutes, but it can take up to 48 hours. You'll get supplier
-          access on this account as soon as it's approved; everything below still works as a buyer in the meantime.
-        </div>
-      )}
-
       {section === "overview" && (
         <div className="flex flex-col gap-8">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">

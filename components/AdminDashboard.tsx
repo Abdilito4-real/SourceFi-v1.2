@@ -528,7 +528,7 @@ function ApplicationCard({
         <span className="text-xs text-text-tertiary">{new Date(application.created_at).toLocaleDateString()}</span>
       </div>
 
-      <dl className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <dl className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div>
           <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Location</dt>
           <dd className="mt-0.5 text-sm text-text-primary">{application.business_location || "Not specified"}</dd>
@@ -536,6 +536,10 @@ function ApplicationCard({
         <div>
           <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">CAC number</dt>
           <dd className="mt-0.5 text-sm text-text-primary">{application.cac_registration_number || "Not provided"}</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Tax ID number</dt>
+          <dd className="mt-0.5 text-sm text-text-primary">{application.tax_id_number || "Not provided"}</dd>
         </div>
         <div>
           <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Supporting document</dt>
@@ -549,7 +553,7 @@ function ApplicationCard({
             )}
           </dd>
         </div>
-        <div className="sm:col-span-3">
+        <div className="sm:col-span-2 lg:col-span-4">
           <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">What they sell</dt>
           <dd className="mt-0.5 text-sm leading-relaxed text-text-primary">{application.what_they_sell || "Not specified"}</dd>
         </div>

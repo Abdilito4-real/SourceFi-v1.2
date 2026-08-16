@@ -5,14 +5,17 @@
 // app/api/supplier-verification/route.ts. Every account still starts
 // (and stays) buyer until an admin approves it; this screen just decides
 // whether that application gets submitted alongside the normal profile
-// setup, never a role itself. Repurposed from the old "become a sourcing
-// partner" (field-agent) application — see docs/marketplace-payments-design.md
-// Section 0 for why that's a pivot, not a rename: this form now asks what
-// the design doc's verification requirement actually needs (is the
-// business real, where is it, what do they sell), not field-agent
-// experience.
-import React from "react";
-import { HardHat, Package, Store, Check } from "lucide-react";
+// setup, never a role itself.
+//
+// Multi-step on purpose (was one long single-page form — real feedback
+// from actually using it: "too tall/long"). Buyer path is 2 steps
+// (about you -> profile details); supplier path is 3 (about you ->
+// business identity -> what you sell + verification submit). The form
+// stays a single <form> spanning every step so onSubmit only fires on
+// the real final-step submit button — intermediate "Next" controls are
+// type="button" and just advance local step state, no partial POSTs.
+import React, { useState } from "react";
+import { HardHat, Package, Store, Check, ArrowLeft } from "lucide-react";
 import Button from "./ui/Button";
 import Select from "./ui/Select";
 import { Label, Input, Textarea, ErrorText, HelperText } from "./ui/Field";
@@ -26,6 +29,7 @@ export interface OnboardingForm {
   primaryLocation: string;
   path: "buyer" | "supplier";
   cacRegistrationNumber: string;
+  taxIdNumber: string;
   whatTheySell: string;
   supportingDocumentUrl: string;
 }
@@ -74,8 +78,47 @@ function PathCard({
   );
 }
 
+function StepDots({ count, current }: { count: number; current: number }) {
+  return (
+    <div className="mb-6 flex items-center justify-center gap-1.5" role="tablist" aria-label="Onboarding progress">
+      {Array.from({ length: count }, (_, i) => (
+        <span
+          key={i}
+          className={cn("h-1.5 rounded-pill transition-[width,background-color] duration-base ease-base", i === current ? "w-6 bg-accent" : "w-1.5 bg-border-strong")}
+        />
+      ))}
+    </div>
+  );
+}
+
 export default function OnboardingScreen({ form, setForm, error, onSubmit, onSignOut, submitting = false }: OnboardingScreenProps) {
   const isSupplierPath = form.path === "supplier";
+  const totalSteps = isSupplierPath ? 3 : 2;
+  const [step, setStep] = useState(0);
+
+  const step0Valid = form.username.trim().length >= 3;
+  const step1SupplierValid = form.companyName.trim() && form.primaryLocation.trim();
+  const finalStepValid = isSupplierPath ? form.whatTheySell.trim().length > 0 : true;
+
+  const goNext = () => setStep((s) => Math.min(totalSteps - 1, s + 1));
+  const goBack = () => setStep((s) => Math.max(0, s - 1));
+
+  // Switching path mid-flow could leave `step` pointing past the new
+  // path's total steps (buyer has fewer) — clamp rather than let a stale
+  // step index render nothing.
+  const handleSelectPath = (path: OnboardingForm["path"]) => {
+    setForm({ ...form, path });
+    setStep(0);
+  };
+
+  const handleFormSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (step < totalSteps - 1) {
+      goNext();
+      return;
+    }
+    onSubmit(e);
+  };
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-bg p-5">
@@ -88,66 +131,61 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
           <p className="text-base leading-relaxed text-text-secondary">Choose a username and tell us what brings you to SourceFi.</p>
         </div>
 
-        <form onSubmit={onSubmit} className="flex flex-col gap-4">
-          <div className="flex gap-3">
-            <PathCard
-              icon={Package}
-              title="I'm sourcing materials"
-              desc="Order directly from verified suppliers, pay in Naira, approve delivery before funds release."
-              selected={!isSupplierPath}
-              onSelect={() => setForm({ ...form, path: "buyer" })}
-            />
-            <PathCard
-              icon={Store}
-              title="I want to sell as a verified supplier"
-              desc="Apply for one-time business verification, then receive and fulfill orders directly."
-              selected={isSupplierPath}
-              onSelect={() => setForm({ ...form, path: "supplier" })}
-            />
-          </div>
+        <StepDots count={totalSteps} current={step} />
 
-          <div>
-            <Label htmlFor="onboard-username">Username</Label>
-            <Input
-              id="onboard-username"
-              placeholder="e.g. kano_materials"
-              value={form.username}
-              onChange={(e) => setForm({ ...form, username: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "") })}
-              required
-            />
-            <HelperText>Only lowercase letters, numbers, and underscores allowed.</HelperText>
-          </div>
+        <form onSubmit={handleFormSubmit} className="flex flex-col gap-4">
+          {step === 0 && (
+            <>
+              <div className="flex gap-3">
+                <PathCard
+                  icon={Package}
+                  title="I'm sourcing materials"
+                  desc="Order directly from verified suppliers, pay in Naira, approve delivery before funds release."
+                  selected={!isSupplierPath}
+                  onSelect={() => handleSelectPath("buyer")}
+                />
+                <PathCard
+                  icon={Store}
+                  title="I want to sell as a verified supplier"
+                  desc="Apply for one-time business verification, then receive and fulfill orders directly."
+                  selected={isSupplierPath}
+                  onSelect={() => handleSelectPath("supplier")}
+                />
+              </div>
 
-          <div>
-            <Label htmlFor="onboard-fullname">Full name</Label>
-            <Input
-              id="onboard-fullname"
-              placeholder="e.g. Alhaji Ibrahim Kano"
-              value={form.fullName}
-              onChange={(e) => setForm({ ...form, fullName: e.target.value })}
-            />
-          </div>
+              <div>
+                <Label htmlFor="onboard-username">Username</Label>
+                <Input
+                  id="onboard-username"
+                  placeholder="e.g. kano_materials"
+                  value={form.username}
+                  onChange={(e) => setForm({ ...form, username: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "") })}
+                  required
+                />
+                <HelperText>Only lowercase letters, numbers, and underscores allowed.</HelperText>
+              </div>
 
-          <div>
-            <Label htmlFor="onboard-company">{isSupplierPath ? "Business name" : "Company name"}</Label>
-            <Input
-              id="onboard-company"
-              placeholder="e.g. Ibrahim Building Materials Ltd"
-              value={form.companyName}
-              onChange={(e) => setForm({ ...form, companyName: e.target.value })}
-              required={isSupplierPath}
-            />
-          </div>
+              <div>
+                <Label htmlFor="onboard-fullname">Full name</Label>
+                <Input
+                  id="onboard-fullname"
+                  placeholder="e.g. Alhaji Ibrahim Kano"
+                  value={form.fullName}
+                  onChange={(e) => setForm({ ...form, fullName: e.target.value })}
+                />
+              </div>
+            </>
+          )}
 
-          <div className="flex gap-3">
-            {!isSupplierPath && (
-              <div className="flex-[1.2]">
+          {step === 1 && !isSupplierPath && (
+            <>
+              <div>
+                <Label htmlFor="onboard-company">Company name</Label>
+                <Input id="onboard-company" placeholder="e.g. Ibrahim Sourcing & Slabs Ltd" value={form.companyName} onChange={(e) => setForm({ ...form, companyName: e.target.value })} />
+              </div>
+              <div>
                 <Label htmlFor="onboard-role">Professional role</Label>
-                <Select
-                  id="onboard-role"
-                  value={form.professionalRole}
-                  onChange={(e) => setForm({ ...form, professionalRole: e.target.value })}
-                >
+                <Select id="onboard-role" value={form.professionalRole} onChange={(e) => setForm({ ...form, professionalRole: e.target.value })}>
                   {["Contractor", "Developer", "Specialty Supplier", "Accredited Auditor"].map((r) => (
                     <option key={r} value={r}>
                       {r}
@@ -155,29 +193,54 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
                   ))}
                 </Select>
               </div>
-            )}
-            <div className="flex-1">
-              <Label htmlFor="onboard-location">{isSupplierPath ? "Business location" : "Primary location"}</Label>
-              <Input
-                id="onboard-location"
-                placeholder="e.g. Lagos"
-                value={form.primaryLocation}
-                onChange={(e) => setForm({ ...form, primaryLocation: e.target.value })}
-                required={isSupplierPath}
-              />
-            </div>
-          </div>
-
-          {isSupplierPath && (
-            <div className="flex flex-col gap-4 rounded-xl border border-border bg-surface-sunken p-4">
-              <div className="text-xs font-semibold uppercase tracking-wide text-accent-text">Supplier verification application</div>
               <div>
-                <Label htmlFor="onboard-cac">CAC registration number (optional)</Label>
+                <Label htmlFor="onboard-location">Primary location</Label>
+                <Input id="onboard-location" placeholder="e.g. Lagos" value={form.primaryLocation} onChange={(e) => setForm({ ...form, primaryLocation: e.target.value })} />
+              </div>
+            </>
+          )}
+
+          {step === 1 && isSupplierPath && (
+            <div className="flex flex-col gap-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-accent-text">Business identity</div>
+              <div>
+                <Label htmlFor="onboard-company">Business name</Label>
                 <Input
-                  id="onboard-cac"
-                  placeholder="e.g. RC1234567"
-                  value={form.cacRegistrationNumber}
-                  onChange={(e) => setForm({ ...form, cacRegistrationNumber: e.target.value })}
+                  id="onboard-company"
+                  placeholder="e.g. Ibrahim Building Materials Ltd"
+                  value={form.companyName}
+                  onChange={(e) => setForm({ ...form, companyName: e.target.value })}
+                  required
+                />
+              </div>
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <Label htmlFor="onboard-cac">CAC number (optional)</Label>
+                  <Input id="onboard-cac" placeholder="e.g. RC1234567" value={form.cacRegistrationNumber} onChange={(e) => setForm({ ...form, cacRegistrationNumber: e.target.value })} />
+                </div>
+                <div className="flex-1">
+                  <Label htmlFor="onboard-tax">Tax ID (optional)</Label>
+                  <Input id="onboard-tax" placeholder="e.g. TIN12345678" value={form.taxIdNumber} onChange={(e) => setForm({ ...form, taxIdNumber: e.target.value })} />
+                </div>
+              </div>
+              <div>
+                <Label htmlFor="onboard-location">Business location</Label>
+                <Input id="onboard-location" placeholder="e.g. Lagos" value={form.primaryLocation} onChange={(e) => setForm({ ...form, primaryLocation: e.target.value })} required />
+              </div>
+            </div>
+          )}
+
+          {step === 2 && isSupplierPath && (
+            <div className="flex flex-col gap-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-accent-text">Verification details</div>
+              <div>
+                <Label htmlFor="onboard-sells">What do you produce or sell?</Label>
+                <Textarea
+                  id="onboard-sells"
+                  placeholder="e.g. LC3 cement, compressed earth blocks — materials and typical quantities."
+                  value={form.whatTheySell}
+                  onChange={(e) => setForm({ ...form, whatTheySell: e.target.value })}
+                  required
                 />
               </div>
               <div>
@@ -190,16 +253,6 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
                 />
                 <HelperText>A link (Google Drive, Dropbox, etc.) — no file upload yet, so paste a shareable URL.</HelperText>
               </div>
-              <div>
-                <Label htmlFor="onboard-sells">What do you produce or sell?</Label>
-                <Textarea
-                  id="onboard-sells"
-                  placeholder="e.g. LC3 cement, compressed earth blocks — materials and typical quantities."
-                  value={form.whatTheySell}
-                  onChange={(e) => setForm({ ...form, whatTheySell: e.target.value })}
-                  required
-                />
-              </div>
               <p className="m-0 text-xs leading-relaxed text-text-tertiary">
                 An admin reviews this once — confirming your business is real, your location, and what you sell.
                 Verification is valid for 90 days or 20 orders, whichever comes first, then you re-apply the same
@@ -210,18 +263,32 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
 
           <ErrorText>{error}</ErrorText>
 
-          <Button
-            type="submit"
-            fullWidth
-            loading={submitting}
-            disabled={
-              submitting ||
-              form.username.trim().length < 3 ||
-              (isSupplierPath && !(form.companyName.trim() && form.primaryLocation.trim() && form.whatTheySell.trim()))
-            }
-          >
-            {submitting ? "Saving…" : isSupplierPath ? "Save profile & apply for verification" : "Save profile & enter portal"}
-          </Button>
+          <div className="flex gap-3">
+            {step > 0 && (
+              <Button type="button" variant="secondary" onClick={goBack} disabled={submitting}>
+                <ArrowLeft size={14} /> Back
+              </Button>
+            )}
+            <Button
+              type="submit"
+              fullWidth
+              loading={submitting}
+              disabled={
+                submitting ||
+                (step === 0 && !step0Valid) ||
+                (step === 1 && isSupplierPath && !step1SupplierValid) ||
+                (step === totalSteps - 1 && !finalStepValid)
+              }
+            >
+              {step < totalSteps - 1
+                ? "Continue"
+                : submitting
+                ? "Saving…"
+                : isSupplierPath
+                ? "Save profile & apply for verification"
+                : "Save profile & enter portal"}
+            </Button>
+          </div>
         </form>
 
         <div className="mt-4.5 text-center">

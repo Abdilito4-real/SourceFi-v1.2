@@ -34,6 +34,7 @@ function VerificationApplicationForm({ onSubmitted }: { onSubmitted: () => void 
   const [businessLocation, setBusinessLocation] = useState("");
   const [whatTheySell, setWhatTheySell] = useState("");
   const [cacRegistrationNumber, setCacRegistrationNumber] = useState("");
+  const [taxIdNumber, setTaxIdNumber] = useState("");
   const [supportingDocumentUrl, setSupportingDocumentUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -47,7 +48,7 @@ function VerificationApplicationForm({ onSubmitted }: { onSubmitted: () => void 
       const res = await fetch("/api/supplier-verification", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ businessName, businessLocation, whatTheySell, cacRegistrationNumber, supportingDocumentUrl }),
+        body: JSON.stringify({ businessName, businessLocation, whatTheySell, cacRegistrationNumber, taxIdNumber, supportingDocumentUrl }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to submit application.");
@@ -69,6 +70,10 @@ function VerificationApplicationForm({ onSubmitted }: { onSubmitted: () => void 
       <div>
         <Label htmlFor="verif-cac">CAC registration number (optional)</Label>
         <Input id="verif-cac" value={cacRegistrationNumber} onChange={(e) => setCacRegistrationNumber(e.target.value)} />
+      </div>
+      <div>
+        <Label htmlFor="verif-tax">Tax ID number (optional)</Label>
+        <Input id="verif-tax" value={taxIdNumber} onChange={(e) => setTaxIdNumber(e.target.value)} />
       </div>
       <div>
         <Label htmlFor="verif-location">Business location</Label>
