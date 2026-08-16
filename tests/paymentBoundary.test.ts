@@ -49,13 +49,26 @@ describe("StubPaymentProvider — initiateEscrowRelease (the Circle leg)", () =>
     const result = await provider.initiateEscrowRelease(3);
     expect(result.status).toBe("processing");
 
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(events).toHaveLength(1);
-    const event = events[0]!; // length just asserted above
-    expect(event.leg).toBe("release");
-    expect(event.provider).toBe("circle");
-    expect(event.providerState).toBe("CONFIRMED");
-    expect(event.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // Chained: release confirms, THEN (only after that) a settlement
+    // event follows — this is the fix for orders hanging forever in
+    // settlement_processing (nothing in the stub ever reported that leg
+    // before this). See lib/paymentBoundary.ts's initiateEscrowRelease
+    // comment for why a real integration doesn't chain these — Yellow
+    // Card reports settlement back independently, on its own timeline.
+    expect(events).toHaveLength(2);
+    const [releaseEvent, settlementEvent] = events;
+    expect(releaseEvent!.leg).toBe("release");
+    expect(releaseEvent!.provider).toBe("circle");
+    expect(releaseEvent!.providerState).toBe("CONFIRMED");
+    expect(releaseEvent!.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+
+    expect(settlementEvent!.leg).toBe("settlement");
+    expect(settlementEvent!.provider).toBe("yellow_card");
+    expect(settlementEvent!.orderId).toBe(3);
+    // The settlement leg has no on-chain hash of its own — it's an NGN
+    // payout, not a blockchain transfer.
+    expect(settlementEvent!.txHash).toBeUndefined();
   });
 });
 

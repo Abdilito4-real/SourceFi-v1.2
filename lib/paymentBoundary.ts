@@ -113,7 +113,23 @@ export class StubPaymentProvider implements PaymentBoundary {
 
   async initiateEscrowRelease(orderId: number): Promise<ReleaseResult> {
     const releaseReference = this.nextReference("release");
-    void this.scheduleConfirmation(orderId, "release", "circle", releaseReference);
+    void this.scheduleConfirmation(orderId, "release", "circle", releaseReference).then(() => {
+      // lib/orderService.ts's handleReleaseConfirmed auto-advances
+      // escrow_released -> settlement_processing and then waits for a
+      // SEPARATE leg='settlement' event — by design (Section E), there's
+      // no initiateSettlement boundary call, because a real Yellow Card
+      // integration reports that back on its own timeline once the NGN
+      // payout actually completes, not something we initiate. The stub
+      // has no real Yellow Card to ever send that follow-up event on its
+      // own, though — without simulating it here, EVERY order would hang
+      // in settlement_processing forever, which is exactly the bug this
+      // fixes (an order stuck on "Processing the payment to your
+      // supplier" indefinitely). This compressed immediate chaining is
+      // stub-only; a real integration's settlement event arrives
+      // independently, whenever the actual payout clears.
+      const settlementReference = this.nextReference("settlement");
+      void this.scheduleConfirmation(orderId, "settlement", "yellow_card", settlementReference);
+    });
     return { releaseReference, status: "processing" };
   }
 

@@ -170,15 +170,14 @@ describe("the full happy-path lifecycle: create -> fund -> proof -> approve -> s
     const afterRelease = fake.getRows("orders").find((o) => o.id === created.id)!;
     expect(afterRelease.status).toBe("settlement_processing");
 
-    // Simulate the (separate, later) settlement confirmation a real
-    // Yellow Card payout webhook/poll would eventually deliver.
-    await handlePaymentStatusEvent(supabase, {
-      orderId: created.id,
-      leg: "settlement",
-      provider: "yellow_card",
-      providerReference: "settle-test-1",
-      providerState: "confirmed",
-    });
+    // The stub chains a settlement confirmation after release on its own
+    // (lib/paymentBoundary.ts — otherwise every order would hang in
+    // settlement_processing forever, since nothing else would ever
+    // report that leg in the stub world). Wait for THAT second event
+    // rather than fabricating one — this is what the real callback chain
+    // production code goes through actually produces.
+    confirmed = waitForConfirmation();
+    await confirmed;
 
     const settled = fake.getRows("orders").find((o) => o.id === created.id)!;
     expect(settled.status).toBe("settled");
@@ -310,6 +309,12 @@ describe("rejectProof -> disputed -> resolveDispute (pre-release refund path)", 
     const finalOrder = fake.getRows("orders").find((o) => o.id === order.id)!;
     expect(finalOrder.status).toBe("settlement_processing");
     void rejected;
+
+    // Drain the stub's chained settlement confirmation before the test
+    // ends, rather than leaving it to fire after teardown.
+    confirmed = waitForConfirmation();
+    await confirmed;
+    expect(fake.getRows("orders").find((o) => o.id === order.id)!.status).toBe("settled");
   });
 });
 

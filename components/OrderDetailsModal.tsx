@@ -69,6 +69,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
   const [showRejectForm, setShowRejectForm] = useState(false);
+  const [showApproveConfirm, setShowApproveConfirm] = useState(false);
   const [rejectCategory, setRejectCategory] = useState<DisputeCategory>("item_not_as_described");
   const [rejectDescription, setRejectDescription] = useState("");
   const [proofPhotoUrl, setProofPhotoUrl] = useState("");
@@ -82,6 +83,14 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const [showEarlyIssueForm, setShowEarlyIssueForm] = useState(false);
   const [earlyIssueCategory, setEarlyIssueCategory] = useState<DisputeCategory>("item_not_delivered");
   const [earlyIssueDescription, setEarlyIssueDescription] = useState("");
+  // When the CURRENT in-flight streak started, and a ticking clock to
+  // measure it — a bare spinner with no escalation is exactly what
+  // "hung" felt like from a stuck settlement (see
+  // lib/paymentBoundary.ts's fix for the actual cause). This doesn't fix
+  // a real provider hanging, but it stops leaving the buyer staring at
+  // an indefinite spinner with zero signal that anything's unusual.
+  const [inFlightSince, setInFlightSince] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(Date.now());
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -118,6 +127,27 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [detail, load]);
+
+  // Tracks how long the CURRENT in-flight status has persisted — resets
+  // the moment the status actually changes (a fresh leg starting is not
+  // "still stuck on the last one").
+  useEffect(() => {
+    const status = detail?.order.status;
+    if (status && IN_FLIGHT_STATUSES.has(status)) {
+      setInFlightSince((prev) => prev ?? Date.now());
+    } else {
+      setInFlightSince(null);
+    }
+  }, [detail?.order.status]);
+
+  useEffect(() => {
+    if (inFlightSince === null) return;
+    const tick = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [inFlightSince]);
+
+  const inFlightElapsedSeconds = inFlightSince !== null ? Math.floor((nowTick - inFlightSince) / 1000) : 0;
+  const isTakingLong = inFlightElapsedSeconds >= 20;
 
   const runAction = async (path: string, body?: unknown, successMessage?: string) => {
     setActing(true);
@@ -197,15 +227,32 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
 
       {order.description && <p className="mt-4 text-sm leading-relaxed text-text-secondary">{order.description}</p>}
 
-      {/* In-flight processing states — no jargon, just "this is happening" */}
+      {/* In-flight processing states — no jargon, just "this is happening".
+          Escalates past a plain spinner once it's run long enough that
+          "still normal" starts to look like "actually stuck" — a bare
+          indefinite spinner with no signal either way is exactly what
+          produced the "did this hang?" confusion. */}
       {IN_FLIGHT_STATUSES.has(order.status) && (
-        <div className="mt-5 flex items-center gap-2.5 rounded-lg border border-border bg-accent-soft px-4 py-3 text-sm text-accent-text">
-          <Loader2 size={15} className="spin-icon shrink-0" />
-          {order.status === "payment_processing" || order.status === "converting" || order.status === "escrow_depositing"
-            ? "Processing your payment. This usually takes a few moments."
-            : order.status === "refund_processing"
-            ? "Processing your refund."
-            : "Processing the payment to your supplier."}
+        <div className="mt-5 flex flex-col gap-2.5 rounded-lg border border-border bg-accent-soft px-4 py-3 text-sm text-accent-text">
+          <div className="flex items-center gap-2.5">
+            <Loader2 size={15} className="spin-icon shrink-0" />
+            {order.status === "payment_processing" || order.status === "converting" || order.status === "escrow_depositing"
+              ? "Processing your payment. This usually takes a few moments."
+              : order.status === "refund_processing"
+              ? "Processing your refund."
+              : "Processing the payment to your supplier."}
+          </div>
+          {isTakingLong && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning bg-warning-soft px-3 py-2 text-xs text-warning-text">
+              <span>
+                This is taking longer than usual ({inFlightElapsedSeconds}s) — it can still complete normally, but if it
+                doesn't resolve soon, that's worth flagging rather than waiting indefinitely.
+              </span>
+              <Button size="sm" variant="secondary" onClick={load}>
+                Check again
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
@@ -325,12 +372,40 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
         </div>
       )}
 
-      {/* Buyer: approve or reject */}
+      {/* Buyer: approve or reject. Approve is deliberately two steps —
+          releasing funds is irreversible once the transfer confirms, so
+          a single click isn't enough; this makes the buyer explicitly
+          review the amount/supplier and confirm a second time before the
+          real API call ever fires. (This is a confirmation/review step,
+          not a new authentication factor — the actual authorization
+          boundary is still the existing session check on the /approve
+          route itself, same as every other action here.) */}
       {isBuyer && order.status === "proof_submitted" && (
         <div className="mt-5">
-          {!showRejectForm ? (
+          {showApproveConfirm ? (
+            <div className="flex flex-col gap-3 rounded-xl border border-accent bg-accent-soft p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-accent-text">Confirm release</div>
+              <p className="text-sm leading-relaxed text-text-primary">
+                You're about to release <strong>{formatMoney(order.amount_minor, "NGN")}</strong> to{" "}
+                <strong>{order.supplier_business_name || "this supplier"}</strong>. This can't be undone once the transfer
+                confirms — only continue if you've reviewed the delivery proof above and you're satisfied.
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  variant="danger"
+                  loading={acting}
+                  onClick={() => runAction("/approve", undefined, "Order approved — releasing funds to your supplier.")}
+                >
+                  <CheckCircle2 size={15} /> Yes, release {formatMoney(order.amount_minor, "NGN")}
+                </Button>
+                <Button variant="ghost" disabled={acting} onClick={() => setShowApproveConfirm(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : !showRejectForm ? (
             <div className="flex flex-col gap-2 sm:flex-row">
-              <Button fullWidth loading={acting} onClick={() => runAction("/approve", undefined, "Order approved — releasing funds to your supplier.")}>
+              <Button fullWidth onClick={() => setShowApproveConfirm(true)}>
                 <CheckCircle2 size={15} /> Approve delivery
               </Button>
               <Button fullWidth variant="secondary" disabled={acting} onClick={() => setShowRejectForm(true)}>
