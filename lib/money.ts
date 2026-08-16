@@ -42,13 +42,22 @@ export function formatMoney(minor: number | null | undefined, currency: Currency
   }
 }
 
-/** The flat platform fee taken on every claimed request, in minor units.
+/** @deprecated Superseded by ORDER_PLATFORM_FEE_MINOR — the sourcer-claim
+ * flow this fee applied to no longer exists as of the marketplace pivot.
+ * The flat platform fee taken on every claimed request, in minor units.
  * Was a magic "+ 5.0" scattered across the client before Stage 5 — now
  * one server-side constant, computed at claim time and stored on the
  * request row rather than recomputed (and implicitly trusted from the
- * client) on every subsequent read. Naming it here instead of leaving it
- * inline is deliberate: Stage 6 is where this becomes a real, possibly
- * non-flat fee schedule — this constant is a placeholder for that, not a
- * final design.
+ * client) on every subsequent read.
  */
 export const PLATFORM_FEE_MINOR = 500; // $5.00
+
+/** The flat platform fee on every order, in NGN minor units (kobo).
+ * Same placeholder posture as PLATFORM_FEE_MINOR before it: a real,
+ * possibly non-flat or percentage-based fee schedule is a genuine
+ * business decision (design doc Section J), not something to default
+ * silently on a hackathon timeline. ₦2,000 is a round placeholder
+ * number, computed server-side at order-creation time and stored on
+ * orders.platform_fee_minor — never re-derived from client input on a
+ * later read, same discipline as the fee it replaces. */
+export const ORDER_PLATFORM_FEE_MINOR = 200_000; // ₦2,000.00
