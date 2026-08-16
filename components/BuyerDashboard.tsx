@@ -115,13 +115,31 @@ interface NewOrderModalProps {
 }
 
 function NewOrderModal({ onClose, onSubmit, supplier, prefillListing, submitting }: NewOrderModalProps) {
+  // A listing with a set per-unit price (e.g. "₦9,000 per bag") drives
+  // the total from quantity x price — it must NOT just prefill the raw
+  // per-unit price as the whole order amount and leave it there
+  // regardless of how many units the buyer actually wants (the exact bug
+  // reported: a ₦9,000/bag listing produced a ₦9,000 order no matter
+  // what quantity was entered). No listing price -> the old freeform
+  // path (buyer types both an amount and a quantity description).
+  const unitPriceMinor = prefillListing?.price_minor ?? null;
+  const unitPriceMajor = unitPriceMinor !== null ? unitPriceMinor / 100 : null;
+
   const [title, setTitle] = useState(prefillListing?.name ?? "");
-  const [amount, setAmount] = useState(prefillListing?.price_minor ? (prefillListing.price_minor / 100).toString() : "");
-  const [quantity, setQuantity] = useState("");
+  const [unitCount, setUnitCount] = useState(unitPriceMinor !== null ? "1" : "");
+  const [freeformQuantity, setFreeformQuantity] = useState("");
+  const [amount, setAmount] = useState(unitPriceMajor !== null ? unitPriceMajor.toString() : "");
   const [deliveryLocation, setDeliveryLocation] = useState("");
   const [description, setDescription] = useState("");
 
+  useEffect(() => {
+    if (unitPriceMajor === null) return;
+    const n = Number(unitCount);
+    setAmount(Number.isFinite(n) && n > 0 ? (unitPriceMajor * n).toString() : "");
+  }, [unitPriceMajor, unitCount]);
+
   const validAmount = amount.trim() !== "" && !isNaN(Number(amount)) && Number(amount) > 0;
+  const quantity = unitPriceMinor !== null ? `${unitCount}${prefillListing?.unit ? ` (${prefillListing.unit})` : ""}` : freeformQuantity;
 
   const handleFormSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -136,16 +154,43 @@ function NewOrderModal({ onClose, onSubmit, supplier, prefillListing, submitting
           <Label htmlFor="new-order-title">What are you ordering?</Label>
           <Input id="new-order-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. 500 units of compressed earth blocks" required />
         </div>
-        <div className="flex gap-3">
-          <div className="flex-1">
-            <Label htmlFor="new-order-amount">Order amount (₦)</Label>
-            <Input id="new-order-amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 500000" required />
+
+        {unitPriceMinor !== null ? (
+          <>
+            <div>
+              <Label htmlFor="new-order-unit-count">Quantity{prefillListing?.unit ? ` (${prefillListing.unit})` : ""}</Label>
+              <Input
+                id="new-order-unit-count"
+                inputMode="decimal"
+                value={unitCount}
+                onChange={(e) => setUnitCount(e.target.value.replace(/[^0-9.]/g, ""))}
+                placeholder="e.g. 100"
+                required
+              />
+            </div>
+            <div className="rounded-lg border border-border bg-surface-sunken px-3 py-2.5 text-sm">
+              <div className="text-text-secondary">
+                {formatMoney(unitPriceMinor, "NGN")}
+                {prefillListing?.unit ? ` ${prefillListing.unit}` : ""} × {unitCount || 0}
+              </div>
+              <div className="mt-0.5 font-semibold text-text-primary">
+                Total: {validAmount ? formatMoney(Math.round(Number(amount) * 100), "NGN") : "—"}
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <Label htmlFor="new-order-amount">Order amount (₦)</Label>
+              <Input id="new-order-amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 500000" required />
+            </div>
+            <div className="flex-1">
+              <Label htmlFor="new-order-quantity">Quantity</Label>
+              <Input id="new-order-quantity" value={freeformQuantity} onChange={(e) => setFreeformQuantity(e.target.value)} placeholder="e.g. 500 units" />
+            </div>
           </div>
-          <div className="flex-1">
-            <Label htmlFor="new-order-quantity">Quantity</Label>
-            <Input id="new-order-quantity" value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder="e.g. 500 units" />
-          </div>
-        </div>
+        )}
+
         <div>
           <Label htmlFor="new-order-location">Delivery location</Label>
           <Input id="new-order-location" value={deliveryLocation} onChange={(e) => setDeliveryLocation(e.target.value)} placeholder="e.g. Lekki, Lagos" required />
