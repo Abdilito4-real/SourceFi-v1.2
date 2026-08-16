@@ -17,7 +17,11 @@ export async function GET(request: Request) {
   const auth = await requireSession();
   if (!auth) return Response.json({ error: "Not authenticated." }, { status: 401 });
 
-  const materialSlug = new URL(request.url).searchParams.get("material");
+  // Free-text search across what a supplier actually uploaded — their own
+  // listings (migration 0006) — not the old fixed material catalog. A
+  // supplier matches if their business name/what_they_sell mentions the
+  // term, OR any of their active listings do.
+  const q = new URL(request.url).searchParams.get("q")?.trim() || "";
 
   const supabase = getSupabaseServerClient();
   let query = supabase
@@ -29,13 +33,21 @@ export async function GET(request: Request) {
     .is("deleted_at", null)
     .order("business_name", { ascending: true });
 
-  if (materialSlug) {
-    const { data: material } = await supabase.from("materials").select("id").eq("slug", materialSlug).maybeSingle();
-    if (material) {
-      const { data: supplierIds } = await supabase.from("supplier_materials").select("supplier_id").eq("material_id", material.id);
-      const ids = (supplierIds || []).map((r) => r.supplier_id);
-      query = query.in("id", ids.length > 0 ? ids : [-1]); // -1: no matches, but keep the query shape valid
-    }
+  if (q) {
+    const escaped = q.replace(/[%_]/g, (c) => `\\${c}`);
+    const { data: matchingListings } = await supabase
+      .from("supplier_listings")
+      .select("supplier_id")
+      .eq("active", true)
+      .is("deleted_at", null)
+      .or(`name.ilike.%${escaped}%,category.ilike.%${escaped}%,description.ilike.%${escaped}%`);
+    const supplierIdsFromListings = Array.from(new Set((matchingListings || []).map((r) => r.supplier_id)));
+
+    query = query.or(
+      `business_name.ilike.%${escaped}%,what_they_sell.ilike.%${escaped}%${
+        supplierIdsFromListings.length > 0 ? `,id.in.(${supplierIdsFromListings.join(",")})` : ""
+      }`
+    );
   }
 
   const { data, error } = await query;

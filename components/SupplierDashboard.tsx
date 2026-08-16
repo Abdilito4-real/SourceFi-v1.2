@@ -9,7 +9,7 @@
 // Section 0), receiving orders buyers place directly and fulfilling them.
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Info, Coins, ShieldCheck, ShieldAlert, LayoutGrid, FileText, History, Clock } from "lucide-react";
+import { Loader2, Info, Coins, ShieldCheck, ShieldAlert, LayoutGrid, FileText, History, Clock, Package, Plus, Pencil, Trash2, EyeOff, Eye } from "lucide-react";
 
 import { formatMoney } from "../lib/money";
 import { useSession } from "./SessionProvider";
@@ -19,14 +19,91 @@ import OrderDetailsModal from "./OrderDetailsModal";
 import SupplierVerificationForm from "./SupplierVerificationForm";
 import Button from "./ui/Button";
 import { Card } from "./ui/Card";
+import Modal from "./ui/Modal";
 import StatCard from "./ui/StatCard";
 import Badge from "./ui/Badge";
+import { Label, Input, Textarea } from "./ui/Field";
 import { useToast } from "./ui/Toast";
-import type { SupplierProfileRow, SupplierVerificationApplicationRow } from "../lib/types";
+import type { SupplierListingRow, SupplierProfileRow, SupplierVerificationApplicationRow } from "../lib/types";
 
-type Section = "overview" | "orders" | "verification";
+type Section = "overview" | "orders" | "listings" | "verification";
 
 const TERMINAL_STATUSES = new Set(["settled", "refunded", "cancelled", "expired"]);
+
+interface ListingFormValues {
+  name: string;
+  category: string;
+  description: string;
+  unit: string;
+  priceAmount: string;
+  imageUrl: string;
+}
+
+const EMPTY_LISTING_FORM: ListingFormValues = { name: "", category: "", description: "", unit: "", priceAmount: "", imageUrl: "" };
+
+function ListingFormModal({
+  title,
+  initial,
+  onClose,
+  onSubmit,
+  submitting,
+}: {
+  title: string;
+  initial: ListingFormValues;
+  onClose: () => void;
+  onSubmit: (values: ListingFormValues) => void;
+  submitting: boolean;
+}) {
+  const [values, setValues] = useState<ListingFormValues>(initial);
+
+  return (
+    <Modal open onClose={onClose} title={title} size="sm">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          onSubmit(values);
+        }}
+        className="flex flex-col gap-3.5"
+      >
+        <div>
+          <Label htmlFor="listing-name">Name</Label>
+          <Input id="listing-name" value={values.name} onChange={(e) => setValues({ ...values, name: e.target.value })} placeholder="e.g. LC3 Cement" required />
+        </div>
+        <div className="flex gap-3">
+          <div className="flex-1">
+            <Label htmlFor="listing-category">Category</Label>
+            <Input id="listing-category" value={values.category} onChange={(e) => setValues({ ...values, category: e.target.value })} placeholder="e.g. Cement" />
+          </div>
+          <div className="flex-1">
+            <Label htmlFor="listing-unit">Unit</Label>
+            <Input id="listing-unit" value={values.unit} onChange={(e) => setValues({ ...values, unit: e.target.value })} placeholder="e.g. per bag" />
+          </div>
+        </div>
+        <div>
+          <Label htmlFor="listing-price">Indicative price (₦, optional)</Label>
+          <Input
+            id="listing-price"
+            inputMode="decimal"
+            value={values.priceAmount}
+            onChange={(e) => setValues({ ...values, priceAmount: e.target.value })}
+            placeholder="e.g. 8500"
+          />
+        </div>
+        <div>
+          <Label htmlFor="listing-image">Image URL (optional)</Label>
+          <Input id="listing-image" value={values.imageUrl} onChange={(e) => setValues({ ...values, imageUrl: e.target.value })} placeholder="https://…" />
+        </div>
+        <div>
+          <Label htmlFor="listing-desc">Description</Label>
+          <Textarea id="listing-desc" value={values.description} onChange={(e) => setValues({ ...values, description: e.target.value })} placeholder="Grade, typical quantities, delivery notes…" />
+        </div>
+        <Button type="submit" fullWidth loading={submitting} disabled={submitting || !values.name.trim()}>
+          Save
+        </Button>
+      </form>
+    </Modal>
+  );
+}
 
 export default function SupplierDashboard() {
   const router = useRouter();
@@ -40,6 +117,11 @@ export default function SupplierDashboard() {
   const [currentlyVerified, setCurrentlyVerified] = useState(false);
   const [latestApplication, setLatestApplication] = useState<SupplierVerificationApplicationRow | null>(null);
   const [loadingVerification, setLoadingVerification] = useState(true);
+  const [listings, setListings] = useState<SupplierListingRow[]>([]);
+  const [loadingListings, setLoadingListings] = useState(true);
+  const [showNewListing, setShowNewListing] = useState(false);
+  const [editingListing, setEditingListing] = useState<SupplierListingRow | null>(null);
+  const [savingListing, setSavingListing] = useState(false);
 
   const isSupplier = user?.role === "supplier";
 
@@ -73,6 +155,103 @@ export default function SupplierDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, isSupplier]);
 
+  const loadListings = () => {
+    setLoadingListings(true);
+    fetch("/api/supplier-listings")
+      .then((res) => res.json())
+      .then((data) => setListings(data.listings || []))
+      .catch(() => notify("error", "Failed to load your listings."))
+      .finally(() => setLoadingListings(false));
+  };
+
+  useEffect(() => {
+    if (!user || !isSupplier) return;
+    loadListings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, isSupplier]);
+
+  const handleCreateListing = async (values: ListingFormValues) => {
+    setSavingListing(true);
+    try {
+      const res = await fetch("/api/supplier-listings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: values.name,
+          category: values.category,
+          description: values.description,
+          unit: values.unit,
+          priceAmount: values.priceAmount || null,
+          imageUrl: values.imageUrl,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to create listing.");
+      setListings((rows) => [data.listing, ...rows]);
+      notify("success", "Listing added.");
+      setShowNewListing(false);
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to create listing.");
+    } finally {
+      setSavingListing(false);
+    }
+  };
+
+  const handleEditListing = async (values: ListingFormValues) => {
+    if (!editingListing) return;
+    setSavingListing(true);
+    try {
+      const res = await fetch(`/api/supplier-listings/${editingListing.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: values.name,
+          category: values.category,
+          description: values.description,
+          unit: values.unit,
+          priceAmount: values.priceAmount || null,
+          imageUrl: values.imageUrl,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to update listing.");
+      setListings((rows) => rows.map((r) => (r.id === data.listing.id ? data.listing : r)));
+      notify("success", "Listing updated.");
+      setEditingListing(null);
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to update listing.");
+    } finally {
+      setSavingListing(false);
+    }
+  };
+
+  const handleToggleActive = async (listing: SupplierListingRow) => {
+    try {
+      const res = await fetch(`/api/supplier-listings/${listing.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active: !listing.active }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to update listing.");
+      setListings((rows) => rows.map((r) => (r.id === data.listing.id ? data.listing : r)));
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to update listing.");
+    }
+  };
+
+  const handleDeleteListing = async (listing: SupplierListingRow) => {
+    try {
+      const res = await fetch(`/api/supplier-listings/${listing.id}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to delete listing.");
+      setListings((rows) => rows.filter((r) => r.id !== listing.id));
+      notify("success", "Listing removed.");
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to delete listing.");
+    }
+  };
+
   const activeOrders = orders.filter((o) => !TERMINAL_STATUSES.has(o.status));
   const historyOrders = orders.filter((o) => TERMINAL_STATUSES.has(o.status));
   const ordersTabbed = ordersTab === "active" ? activeOrders : historyOrders;
@@ -83,6 +262,7 @@ export default function SupplierDashboard() {
   const navItems: NavItem[] = [
     { key: "overview", label: "Overview", icon: <LayoutGrid size={16} />, active: section === "overview", onClick: () => setSection("overview") },
     { key: "orders", label: "Orders", icon: <FileText size={16} />, active: section === "orders", onClick: () => setSection("orders"), badge: incomingCount },
+    { key: "listings", label: "Listings", icon: <Package size={16} />, active: section === "listings", onClick: () => setSection("listings") },
     {
       key: "verification",
       label: "Verification",
@@ -113,8 +293,22 @@ export default function SupplierDashboard() {
       user={user}
       onSignOut={handleSignOut}
       signingOut={signingOut}
-      pageTitle={section === "overview" ? `Supplier portal · @${user.username || "Supplier"}` : section === "orders" ? "Orders" : "Verification"}
-      pageSubtitle={section === "overview" ? "Fulfill orders, submit delivery proof, get paid." : undefined}
+      pageTitle={
+        section === "overview"
+          ? `Supplier portal · @${user.username || "Supplier"}`
+          : section === "orders"
+          ? "Orders"
+          : section === "listings"
+          ? "Listings"
+          : "Verification"
+      }
+      pageSubtitle={
+        section === "overview"
+          ? "Fulfill orders, submit delivery proof, get paid."
+          : section === "listings"
+          ? "What buyers see when they search or browse your business."
+          : undefined
+      }
     >
       {!loadingVerification && isSupplier && !currentlyVerified && section !== "verification" && (
         <div className="mb-6 flex items-center justify-between gap-3 rounded-lg border border-warning bg-warning-soft px-4 py-3 text-sm text-warning-text">
@@ -202,6 +396,73 @@ export default function SupplierDashboard() {
         </div>
       )}
 
+      {section === "listings" && (
+        <div>
+          <div className="mb-5 flex justify-end">
+            <Button size="sm" onClick={() => setShowNewListing(true)}>
+              <Plus size={14} /> Add listing
+            </Button>
+          </div>
+
+          {loadingListings ? (
+            <div className="flex justify-center py-10">
+              <Loader2 size={22} className="spin-icon text-accent" />
+            </div>
+          ) : listings.length === 0 ? (
+            <EmptyState message="No listings yet. Add what you sell so buyers can find it in search." />
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              {listings.map((listing) => (
+                <Card key={listing.id} className="flex flex-col gap-3 p-5">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-text">
+                      <Package size={18} />
+                    </div>
+                    <Badge tone={listing.active ? "success" : "neutral"}>{listing.active ? "Active" : "Paused"}</Badge>
+                  </div>
+                  <div>
+                    <h3 className="font-display text-lg italic leading-tight text-text-primary">{listing.name}</h3>
+                    {listing.category && <div className="mt-0.5 text-xs text-text-tertiary">{listing.category}</div>}
+                  </div>
+                  {listing.description && <p className="line-clamp-2 text-sm leading-relaxed text-text-secondary">{listing.description}</p>}
+                  <div className="mt-auto flex items-center justify-between border-t border-border pt-3">
+                    <span className="text-sm font-semibold text-text-secondary">
+                      {listing.price_minor ? `${formatMoney(listing.price_minor, "NGN")}${listing.unit ? ` ${listing.unit}` : ""}` : "No price set"}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleToggleActive(listing)}
+                        title={listing.active ? "Pause" : "Resume"}
+                        className="rounded-md p-1.5 text-text-tertiary hover:bg-surface-sunken hover:text-text-primary"
+                      >
+                        {listing.active ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditingListing(listing)}
+                        title="Edit"
+                        className="rounded-md p-1.5 text-text-tertiary hover:bg-surface-sunken hover:text-text-primary"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteListing(listing)}
+                        title="Delete"
+                        className="rounded-md p-1.5 text-text-tertiary hover:bg-danger-soft hover:text-danger-text"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {section === "verification" && (
         <div className="flex flex-col gap-6">
           {loadingVerification ? (
@@ -266,6 +527,26 @@ export default function SupplierDashboard() {
           onClose={() => setSelectedOrderId(null)}
           onOrderChange={(order) => setOrders((prev) => prev.map((o) => (o.id === order.id ? order : o)))}
           showNotification={notify}
+        />
+      )}
+
+      {showNewListing && (
+        <ListingFormModal title="Add listing" initial={EMPTY_LISTING_FORM} onClose={() => setShowNewListing(false)} onSubmit={handleCreateListing} submitting={savingListing} />
+      )}
+      {editingListing && (
+        <ListingFormModal
+          title="Edit listing"
+          initial={{
+            name: editingListing.name,
+            category: editingListing.category || "",
+            description: editingListing.description || "",
+            unit: editingListing.unit || "",
+            priceAmount: editingListing.price_minor ? (editingListing.price_minor / 100).toString() : "",
+            imageUrl: editingListing.image_url || "",
+          }}
+          onClose={() => setEditingListing(null)}
+          onSubmit={handleEditListing}
+          submitting={savingListing}
         />
       )}
     </DashboardShell>

@@ -279,7 +279,11 @@ export interface OrderRow {
   status: OrderStatus;
   buyer_id: number;
   supplier_id: number;
+  /** @deprecated References the old fixed material catalog (migration
+   * 0000), superseded by supplier_listing_id (migration 0006) — kept as
+   * an unused legacy column, never set by current order-creation code. */
   material_id: number | null;
+  supplier_listing_id: number | null;
   title: string;
   description: string | null;
   quantity: string | null;
@@ -417,14 +421,24 @@ export interface AdminUserRow {
   created_at: string;
 }
 
-export interface Material {
-  id: string;
+/** A material/product a supplier has listed, uploaded by that supplier
+ * (not admin-curated — see migration 0006). buyer-facing search
+ * (GET /api/materials) only ever returns listings belonging to a
+ * CURRENTLY verified supplier (design doc's live-verification rule,
+ * same as GET /api/suppliers) and joins in the supplier fields below;
+ * a supplier managing their own listings (GET /api/supplier-listings)
+ * gets the bare row without those joins. */
+export interface SupplierListingRow {
+  id: number;
+  supplier_id: number;
   name: string;
-  tag: string;
-  savings: string;
-  hook: string;
-  explainer: string;
-  whyRare: string;
-  metrics: string;
-  videoUrl: string;
+  category: string | null;
+  description: string | null;
+  unit: string | null;
+  price_minor: number | null;
+  image_url: string | null;
+  active: boolean;
+  created_at: string;
+  supplier_business_name?: string | null;
+  supplier_business_location?: string | null;
 }

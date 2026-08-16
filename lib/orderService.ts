@@ -122,7 +122,11 @@ async function tryTransition(
 
 export interface CreateOrderInput {
   supplierId: number;
-  materialId?: number | null;
+  /** The supplier-uploaded listing this order is for, if the buyer
+   * picked one from search/browse rather than typing a freeform order
+   * (migration 0006) — supersedes the old materialId (fixed-catalog)
+   * field, which no current code path sets anymore. */
+  supplierListingId?: number | null;
   title: string;
   description?: string | null;
   quantity?: string | null;
@@ -154,7 +158,7 @@ export async function createOrder(supabase: SupabaseClient, buyerId: number, inp
       status: "pending_payment",
       buyer_id: buyerId,
       supplier_id: input.supplierId,
-      material_id: input.materialId ?? null,
+      supplier_listing_id: input.supplierListingId ?? null,
       title: input.title,
       description: input.description ?? null,
       quantity: input.quantity ?? null,

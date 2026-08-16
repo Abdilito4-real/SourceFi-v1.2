@@ -66,7 +66,7 @@ export async function POST(request: Request) {
 
   const body = await request.json().catch(() => null);
   const supplierId = Number(body?.supplierId);
-  const materialId = body?.materialId != null ? Number(body.materialId) : null;
+  const supplierListingId = body?.supplierListingId != null ? Number(body.supplierListingId) : null;
   const title = typeof body?.title === "string" ? body.title.trim() : "";
   const description = typeof body?.description === "string" ? body.description.trim() || null : null;
   const quantity = typeof body?.quantity === "string" ? body.quantity.trim() || null : null;
@@ -94,7 +94,7 @@ export async function POST(request: Request) {
   try {
     const order = await createOrder(supabase, auth.user.id, {
       supplierId,
-      materialId,
+      supplierListingId,
       title,
       description,
       quantity,

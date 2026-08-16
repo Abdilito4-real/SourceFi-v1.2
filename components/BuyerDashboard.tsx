@@ -8,11 +8,10 @@
 // order against them (design doc Section 0). No wallet/crypto UI
 // anywhere here — Fund Order is a single button, NGN in, NGN shown
 // (design doc Section 3).
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Info, ArrowRight, Layers, Coins, Building2, Package, HardHat, LayoutGrid, FileText, History, X, ChevronRight, Store, ShieldCheck, XCircle } from "lucide-react";
+import { Loader2, Info, Coins, Package, LayoutGrid, FileText, History, Store, ShieldCheck, XCircle, Search } from "lucide-react";
 
-import { materialLibrary } from "../lib/constants";
 import { formatMoney } from "../lib/money";
 import { useSession } from "./SessionProvider";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
@@ -24,9 +23,8 @@ import { Card } from "./ui/Card";
 import Modal from "./ui/Modal";
 import StatCard from "./ui/StatCard";
 import { Label, Input, Textarea } from "./ui/Field";
-import Select from "./ui/Select";
 import { useToast } from "./ui/Toast";
-import type { Material, OrderRow, SupplierVerificationApplicationRow } from "../lib/types";
+import type { OrderRow, SupplierListingRow, SupplierVerificationApplicationRow } from "../lib/types";
 
 type Section = "overview" | "suppliers" | "orders" | "materials";
 
@@ -41,57 +39,31 @@ interface SupplierListing {
 
 const TERMINAL_STATUSES = new Set(["settled", "refunded", "cancelled", "expired"]);
 
-function materialIcon(id: string) {
-  if (id === "earthblocks" || id === "hempcrete") return <Building2 size={20} className="text-accent-text" />;
-  if (id === "bubbledeck" || id === "structuralsystems") return <Layers size={20} className="text-accent-text" />;
-  if (id === "lc3cement" || id === "cement") return <Package size={20} className="text-accent-text" />;
-  if (id === "geopolymer" || id === "passivecooling") return <HardHat size={20} className="text-accent-text" />;
-  return <Layers size={20} className="text-accent-text" />;
-}
-
-function MaterialCard({ material, onOpen }: { material: Material; onOpen: (m: Material) => void }) {
+function MaterialListingCard({ listing, onOrder }: { listing: SupplierListingRow; onOrder: (listing: SupplierListingRow) => void }) {
   return (
-    <Card interactive onClick={() => onOpen(material)} className="flex cursor-pointer flex-col gap-4 p-5">
+    <Card className="flex flex-col gap-3 p-5">
       <div className="flex items-start justify-between gap-2">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft">{materialIcon(material.id)}</div>
-        <span className="rounded bg-accent-soft px-2 py-1 text-right text-[10.5px] font-bold leading-tight text-accent-text">{material.savings}</span>
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft">
+          <Package size={20} className="text-accent-text" />
+        </div>
+        {listing.category && <span className="rounded bg-accent-soft px-2 py-1 text-[10.5px] font-bold leading-tight text-accent-text">{listing.category}</span>}
       </div>
       <div>
-        <h3 className="mb-1 font-display text-lg italic leading-tight text-text-primary">{material.name}</h3>
-        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-tertiary">{material.tag}</div>
-        <p className="line-clamp-2 text-sm leading-relaxed text-text-secondary">{material.hook}</p>
+        <h3 className="mb-1 font-display text-lg italic leading-tight text-text-primary">{listing.name}</h3>
+        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-tertiary">
+          {listing.supplier_business_name} · {listing.supplier_business_location}
+        </div>
+        {listing.description && <p className="line-clamp-2 text-sm leading-relaxed text-text-secondary">{listing.description}</p>}
       </div>
-      <div className="mt-auto flex items-center gap-1 text-sm font-semibold text-accent-text">
-        View details <ChevronRight size={14} />
+      <div className="mt-auto flex items-center justify-between pt-1">
+        <span className="text-sm font-semibold text-text-secondary">
+          {listing.price_minor ? `${formatMoney(listing.price_minor, "NGN")}${listing.unit ? ` ${listing.unit}` : ""}` : "Price on request"}
+        </span>
+        <Button size="sm" onClick={() => onOrder(listing)}>
+          Order
+        </Button>
       </div>
     </Card>
-  );
-}
-
-function MaterialDetail({ material, onClose, onFindSuppliers }: { material: Material; onClose: () => void; onFindSuppliers: (m: Material) => void }) {
-  return (
-    <Modal open onClose={onClose} size="sm">
-      <div className="mb-3.5 flex items-center justify-between">
-        <span className="text-xs font-bold uppercase tracking-wide text-accent-text">Specification profile</span>
-        <button type="button" onClick={onClose} aria-label="Close" className="text-text-tertiary hover:text-text-primary">
-          <X size={18} />
-        </button>
-      </div>
-      <h3 className="m-0 mb-1.5 font-display text-[22px] italic text-text-primary">{material.name}</h3>
-      <p className="mb-4 text-sm leading-relaxed text-text-secondary">{material.explainer}</p>
-      <div className="mb-4 rounded-lg border border-border bg-surface-sunken p-3">
-        <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-accent-text">Why it's rare in Nigeria</div>
-        <div className="text-xs leading-relaxed text-text-secondary">{material.whyRare}</div>
-      </div>
-      <div className="mb-5 flex flex-wrap gap-2.5">
-        <span className="rounded bg-accent-soft px-2 py-1 text-xs font-semibold text-accent-text">{material.tag}</span>
-        <span className="rounded bg-surface-sunken px-2 py-1 text-xs font-semibold text-text-primary">{material.savings}</span>
-        <span className="rounded bg-surface-sunken px-2 py-1 text-xs font-semibold text-text-primary">{material.metrics}</span>
-      </div>
-      <Button fullWidth onClick={() => onFindSuppliers(material)}>
-        Find verified suppliers <ArrowRight size={14} />
-      </Button>
-    </Modal>
   );
 }
 
@@ -125,14 +97,26 @@ function SupplierCard({ supplier, onOrder }: { supplier: SupplierListing; onOrde
 
 interface NewOrderModalProps {
   onClose: () => void;
-  onSubmit: (form: { supplierId: number; title: string; amount: string; deliveryLocation: string; quantity: string; description: string }) => void | Promise<void>;
+  onSubmit: (form: {
+    supplierId: number;
+    supplierListingId?: number | null;
+    title: string;
+    amount: string;
+    deliveryLocation: string;
+    quantity: string;
+    description: string;
+  }) => void | Promise<void>;
   supplier: SupplierListing;
+  /** Set when the buyer got here by ordering a specific listing from
+   * search/browse, rather than starting from the supplier directory —
+   * prefills title/amount and links the order back to that listing. */
+  prefillListing?: SupplierListingRow | null;
   submitting: boolean;
 }
 
-function NewOrderModal({ onClose, onSubmit, supplier, submitting }: NewOrderModalProps) {
-  const [title, setTitle] = useState("");
-  const [amount, setAmount] = useState("");
+function NewOrderModal({ onClose, onSubmit, supplier, prefillListing, submitting }: NewOrderModalProps) {
+  const [title, setTitle] = useState(prefillListing?.name ?? "");
+  const [amount, setAmount] = useState(prefillListing?.price_minor ? (prefillListing.price_minor / 100).toString() : "");
   const [quantity, setQuantity] = useState("");
   const [deliveryLocation, setDeliveryLocation] = useState("");
   const [description, setDescription] = useState("");
@@ -142,7 +126,7 @@ function NewOrderModal({ onClose, onSubmit, supplier, submitting }: NewOrderModa
   const handleFormSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!validAmount) return;
-    onSubmit({ supplierId: supplier.id, title, amount, deliveryLocation, quantity, description });
+    onSubmit({ supplierId: supplier.id, supplierListingId: prefillListing?.id ?? null, title, amount, deliveryLocation, quantity, description });
   };
 
   return (
@@ -189,8 +173,11 @@ export default function BuyerDashboard() {
   const [suppliers, setSuppliers] = useState<SupplierListing[]>([]);
   const [loadingSuppliers, setLoadingSuppliers] = useState(true);
   const [orderingSupplier, setOrderingSupplier] = useState<SupplierListing | null>(null);
+  const [orderingListing, setOrderingListing] = useState<SupplierListingRow | null>(null);
   const [creatingOrder, setCreatingOrder] = useState(false);
-  const [viewingMaterial, setViewingMaterial] = useState<Material | null>(null);
+  const [materials, setMaterials] = useState<SupplierListingRow[]>([]);
+  const [loadingMaterials, setLoadingMaterials] = useState(true);
+  const [materialsQuery, setMaterialsQuery] = useState("");
   const [latestSupplierApplication, setLatestSupplierApplication] = useState<SupplierVerificationApplicationRow | null>(null);
   const [showReapplyForm, setShowReapplyForm] = useState(false);
 
@@ -237,6 +224,27 @@ export default function BuyerDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
+  // Debounced so typing a search term doesn't fire a request per
+  // keystroke — only loaded once the buyer actually visits the section
+  // (or types in it), not eagerly on every dashboard mount.
+  const materialsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!user || section !== "materials") return;
+    if (materialsDebounceRef.current) clearTimeout(materialsDebounceRef.current);
+    materialsDebounceRef.current = setTimeout(() => {
+      setLoadingMaterials(true);
+      fetch(`/api/materials?q=${encodeURIComponent(materialsQuery)}`)
+        .then((res) => res.json())
+        .then((data) => setMaterials(data.materials || []))
+        .catch(() => notify("error", "Failed to load materials."))
+        .finally(() => setLoadingMaterials(false));
+    }, 300);
+    return () => {
+      if (materialsDebounceRef.current) clearTimeout(materialsDebounceRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, section, materialsQuery]);
+
   const activeCount = orders.filter((o) => !TERMINAL_STATUSES.has(o.status)).length;
   const completedCount = orders.filter((o) => o.status === "settled").length;
   const inEscrowMinor = orders
@@ -263,7 +271,31 @@ export default function BuyerDashboard() {
     setOrderingSupplier(supplier);
   };
 
-  const handleCreateOrder = async (form: { supplierId: number; title: string; amount: string; deliveryLocation: string; quantity: string; description: string }) => {
+  const openOrderModalFromListing = (listing: SupplierListingRow) => {
+    if (!isBuyer) {
+      notify("error", "Creating an order needs the buyer role on this account.");
+      return;
+    }
+    setOrderingListing(listing);
+    setOrderingSupplier({
+      id: listing.supplier_id,
+      business_name: listing.supplier_business_name || "Supplier",
+      business_location: listing.supplier_business_location || "",
+      what_they_sell: "",
+      rating_average: null,
+      rating_count: 0,
+    });
+  };
+
+  const handleCreateOrder = async (form: {
+    supplierId: number;
+    supplierListingId?: number | null;
+    title: string;
+    amount: string;
+    deliveryLocation: string;
+    quantity: string;
+    description: string;
+  }) => {
     setCreatingOrder(true);
     try {
       const res = await fetch("/api/orders", {
@@ -276,6 +308,7 @@ export default function BuyerDashboard() {
       setOrders((prev) => [data.order as OrderRow, ...prev]);
       notify("success", "Order created — fund it to get started.");
       setOrderingSupplier(null);
+      setOrderingListing(null);
       setSection("orders");
       setSelectedOrderId(data.order.id);
     } catch (err) {
@@ -307,7 +340,7 @@ export default function BuyerDashboard() {
       onSignOut={handleSignOut}
       signingOut={signingOut}
       pageTitle={
-        section === "overview" ? `Welcome back, ${user.username || "Buyer"}` : section === "suppliers" ? "Verified suppliers" : section === "materials" ? "Material library" : "Orders"
+        section === "overview" ? `Welcome back, ${user.username || "Buyer"}` : section === "suppliers" ? "Verified suppliers" : section === "materials" ? "Materials" : "Orders"
       }
       pageSubtitle={
         section === "overview"
@@ -315,7 +348,7 @@ export default function BuyerDashboard() {
           : section === "suppliers"
           ? "Every supplier here has passed one-time business verification."
           : section === "materials"
-          ? "Hard-to-source architectural materials, verified before they leave the warehouse."
+          ? "Uploaded directly by verified suppliers — search to find who has what you need."
           : undefined
       }
     >
@@ -403,10 +436,35 @@ export default function BuyerDashboard() {
       )}
 
       {section === "materials" && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {materialLibrary.map((m) => (
-            <MaterialCard key={m.id} material={m} onOpen={setViewingMaterial} />
-          ))}
+        <div>
+          <div className="relative mb-5 max-w-md">
+            <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+            <Input
+              value={materialsQuery}
+              onChange={(e) => setMaterialsQuery(e.target.value)}
+              placeholder="Search materials — e.g. cement, GFRP rebar…"
+              className="pl-9"
+            />
+          </div>
+
+          {loadingMaterials ? (
+            <div className="flex justify-center py-10">
+              <Loader2 size={22} className="spin-icon text-accent" />
+            </div>
+          ) : materials.length === 0 ? (
+            <div className="rounded-[10px] border-[1.5px] border-dashed border-border bg-surface px-5 py-10 text-center">
+              <Info size={24} className="mx-auto mb-2 text-text-tertiary" />
+              <p className="mx-auto max-w-[320px] text-sm text-text-secondary">
+                {materialsQuery ? `No materials matching "${materialsQuery}".` : "No materials listed yet — suppliers add these from their own dashboard."}
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              {materials.map((listing) => (
+                <MaterialListingCard key={listing.id} listing={listing} onOrder={openOrderModalFromListing} />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -449,18 +507,17 @@ export default function BuyerDashboard() {
         </div>
       )}
 
-      {viewingMaterial && (
-        <MaterialDetail
-          material={viewingMaterial}
-          onClose={() => setViewingMaterial(null)}
-          onFindSuppliers={() => {
-            setViewingMaterial(null);
-            setSection("suppliers");
-          }}
-        />
-      )}
       {orderingSupplier && (
-        <NewOrderModal onClose={() => setOrderingSupplier(null)} onSubmit={handleCreateOrder} supplier={orderingSupplier} submitting={creatingOrder} />
+        <NewOrderModal
+          onClose={() => {
+            setOrderingSupplier(null);
+            setOrderingListing(null);
+          }}
+          onSubmit={handleCreateOrder}
+          supplier={orderingSupplier}
+          prefillListing={orderingListing}
+          submitting={creatingOrder}
+        />
       )}
       {selectedOrderId && (
         <OrderDetailsModal
