@@ -439,7 +439,17 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
                   Hide
                 </button>
               </div>
-              <JitsiMeetRoom orderCode={order.order_code} onSegmentComplete={reportCallSegment} />
+              {order.verification_call_room_id ? (
+                <JitsiMeetRoom
+                  roomId={order.verification_call_room_id}
+                  displayLabel={order.order_code}
+                  onSegmentComplete={reportCallSegment}
+                />
+              ) : (
+                <div className="mt-3 flex h-[320px] w-full items-center justify-center rounded-xl border border-border bg-black text-sm text-white/70">
+                  Setting up your private call room…
+                </div>
+              )}
             </div>
           )}
         </div>

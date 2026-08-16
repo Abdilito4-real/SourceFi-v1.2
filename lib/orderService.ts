@@ -18,6 +18,7 @@
 // thing that actually prevents a race from writing twice). Neither one
 // is new here — this file is what applies them across a much longer
 // chain of states than lib/requestStateMachine.ts ever had to.
+import { randomUUID } from "crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { assertTransition, InvalidOrderTransitionError } from "./orderStateMachine";
 import { isSupplierCurrentlyVerified } from "./supplierVerification";
@@ -57,8 +58,12 @@ function placeholderUsdcMinorFromNgnMinor(ngnAmountMinor: number): number {
  * cut) in the same proportion as the order's NGN amount/fee split — used
  * by both the release and the settlement step so the two stay
  * consistent with each other without persisting a separate USDC amount
- * on the order row. */
-function computeUsdcSplit(order: Pick<OrderRow, "amount_minor" | "platform_fee_minor">): {
+ * on the order row. Exported so a real PaymentBoundary implementation
+ * (lib/circleEscrowProvider.ts) computes the EXACT same supplier cut
+ * this module will independently book to the ledger once release is
+ * confirmed — the on-chain transfer amount and the ledger entry must
+ * never be allowed to drift apart by using two different formulas. */
+export function computeUsdcSplit(order: Pick<OrderRow, "amount_minor" | "platform_fee_minor">): {
   totalUsdcMinor: number;
   supplierUsdcMinor: number;
   platformFeeUsdcMinor: number;
@@ -181,6 +186,10 @@ export async function createOrder(supabase: SupabaseClient, buyerId: number, inp
       amount_minor: input.amountMinor,
       currency: "NGN",
       platform_fee_minor: platformFeeMinor,
+      // A real random room name for the verification call — deliberately
+      // NOT derived from order_code (a guessable 6-digit string shown to
+      // users). See migration 0008.
+      verification_call_room_id: randomUUID(),
       supplier_verified_at_order_time: new Date().toISOString(),
     })
     .select("*")
@@ -188,6 +197,23 @@ export async function createOrder(supabase: SupabaseClient, buyerId: number, inp
 
   if (error) throw error;
   return data as OrderRow;
+}
+
+/** Every order created after migration 0008 already has a private
+ * verification_call_room_id from createOrder() above. This backfills the
+ * rare row that predates it (or was created between the migration
+ * landing and this column being populated) — called from the
+ * ownership-checked order-detail route, never from anywhere that hasn't
+ * already verified the caller is a party to the order. Room name privacy
+ * is entirely this ID: never fall back to order_code (guessable) if this
+ * is somehow still empty after the update. */
+export async function ensureCallRoomId(supabase: SupabaseClient, order: OrderRow): Promise<string> {
+  if (order.verification_call_room_id) return order.verification_call_room_id;
+
+  const roomId = randomUUID();
+  const { error } = await supabase.from("orders").update({ verification_call_room_id: roomId }).eq("id", order.id);
+  if (error) throw error;
+  return roomId;
 }
 
 // ============================================================================
@@ -525,15 +551,46 @@ export async function approveOrder(
 
   const released = await tryTransition(supabase, orderId, "buyer_approved", "release_submitted");
   if (released) {
-    const result = await paymentProvider.initiateEscrowRelease(orderId);
-    await supabase.from("payment_events").insert({
-      order_id: orderId,
-      leg: "release",
-      provider: "circle",
-      provider_reference: result.releaseReference,
-      event_type: result.status === "failed" ? "release_failed" : "release_initiated",
-      provider_state: result.status,
-    });
+    try {
+      const result = await paymentProvider.initiateEscrowRelease(orderId);
+      await supabase.from("payment_events").insert({
+        order_id: orderId,
+        leg: "release",
+        provider: "circle",
+        provider_reference: result.releaseReference,
+        event_type: result.status === "failed" ? "release_failed" : "release_initiated",
+        provider_state: result.status,
+      });
+    } catch (err) {
+      // A REAL provider (CircleEscrowProvider) can throw synchronously
+      // for reasons the stub never could — no wallet_address on file for
+      // the supplier, no USDC balance in escrow, insufficient balance.
+      // The order is already at release_submitted at this point; there is
+      // no legal transition back to buyer_approved (see
+      // lib/orderStateMachine.ts — release_submitted only goes forward to
+      // release_processing or disputed), so it stays here rather than
+      // being forced into a status that doesn't fit what happened. What
+      // matters is this is never silently lost: logged loudly, and
+      // recorded on the order's own payment_events trail (which the
+      // order-detail route already returns, so it's visible to the buyer,
+      // supplier, and admin, not buried in a server log only admin can
+      // reach). A real production version needs an explicit "retry
+      // release" admin action once the underlying issue (e.g. the
+      // supplier's wallet_address) is fixed — not built here; this is the
+      // honest boundary of what this stage covers, not a silent gap.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`Escrow release failed for order ${orderId}, order stuck at release_submitted:`, err);
+      await supabase.from("payment_events").insert({
+        order_id: orderId,
+        leg: "release",
+        provider: "circle",
+        provider_reference: null,
+        event_type: "release_failed",
+        provider_state: "error",
+        raw_payload: { error: message },
+      });
+      throw err;
+    }
   }
 
   return fetchOrder(supabase, orderId);

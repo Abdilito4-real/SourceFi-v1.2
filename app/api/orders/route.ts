@@ -56,7 +56,15 @@ export async function GET() {
   const { data, error } = await query;
   if (error) return Response.json({ error: error.message }, { status: 500 });
 
-  const orders = await attachJoins(supabase, (data || []) as OrderRow[]);
+  let orders = await attachJoins(supabase, (data || []) as OrderRow[]);
+  // The verification call is a private, two-party conversation — admin's
+  // full-oversight view of every order (no row filter above) should not
+  // include the real room id for orders admin isn't a party to. Buyers
+  // and suppliers are already scoped to their own orders by the query
+  // above, so this only ever redacts something for admin.
+  if (auth.user.role === "admin") {
+    orders = orders.map((o) => ({ ...o, verification_call_room_id: null }));
+  }
   return Response.json({ orders });
 }
 

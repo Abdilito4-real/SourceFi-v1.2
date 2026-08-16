@@ -11,6 +11,7 @@ import { requireRole } from "../../../../../lib/authz";
 import { getPaymentProvider } from "../../../../../lib/paymentProvider";
 import { approveOrder, NotOrderOwnerError, OrderNotFoundError, VerificationCallIncompleteError } from "../../../../../lib/orderService";
 import { InvalidOrderTransitionError } from "../../../../../lib/orderStateMachine";
+import { MissingSupplierWalletError, NoUsdcTokenOnEscrowWalletError, InsufficientEscrowBalanceError } from "../../../../../lib/circleEscrowProvider";
 
 export async function POST(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireRole(["buyer"]);
@@ -30,6 +31,17 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     if (err instanceof NotOrderOwnerError) return Response.json({ error: err.message }, { status: 403 });
     if (err instanceof InvalidOrderTransitionError) return Response.json({ error: err.message }, { status: 409 });
     if (err instanceof VerificationCallIncompleteError) return Response.json({ error: err.message }, { status: 409 });
+    if (
+      err instanceof MissingSupplierWalletError ||
+      err instanceof NoUsdcTokenOnEscrowWalletError ||
+      err instanceof InsufficientEscrowBalanceError
+    ) {
+      // The buyer's intent to release was already recorded (order moved
+      // to release_submitted before this failure) — this is a real,
+      // upstream payment-provider problem, not something retrying the
+      // same click fixes. 502 (not 500) to reflect that distinction.
+      return Response.json({ error: `Release couldn't go through: ${err.message}` }, { status: 502 });
+    }
     return Response.json({ error: err instanceof Error ? err.message : "Failed to approve order." }, { status: 500 });
   }
 }

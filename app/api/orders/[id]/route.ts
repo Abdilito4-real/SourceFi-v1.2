@@ -6,6 +6,7 @@
 // so the detail screen doesn't need N separate requests.
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { requireSession } from "../../../../lib/authz";
+import { ensureCallRoomId } from "../../../../lib/orderService";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireSession();
@@ -32,6 +33,15 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   // admin: no ownership check — full oversight, view-only (see design doc
   // Section G — admin can view but every state-changing route below still
   // checks the specific role it's meant for, never falls back to admin).
+  const isPartyToOrder = auth.user.role === "buyer" || auth.user.role === "supplier";
+
+  // Only the buyer and the assigned supplier ever get the real call room
+  // ID — admin oversight is view-only for order data, but the live
+  // verification call is explicitly a private, two-party conversation,
+  // not something oversight should be able to silently join. Backfilling
+  // it here (rather than in createOrder() only) covers any order created
+  // before migration 0008 added the column.
+  const callRoomId = isPartyToOrder ? await ensureCallRoomId(supabase, order) : null;
 
   const [{ data: buyer }, { data: supplier }, { data: paymentEvents }, { data: proofs }, { data: disputes }, { data: rating }, { data: listing }] =
     await Promise.all([
@@ -52,6 +62,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   return Response.json({
     order: {
       ...order,
+      verification_call_room_id: callRoomId,
       buyer_email: buyer?.email ?? null,
       supplier_business_name: supplier?.business_name ?? null,
       supplier_verification_status: supplier?.verification_status ?? null,

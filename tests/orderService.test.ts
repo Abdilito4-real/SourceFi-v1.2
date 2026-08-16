@@ -18,6 +18,7 @@ import {
   resolveDispute,
   submitRating,
   recordVerificationCallProgress,
+  ensureCallRoomId,
   MIN_VERIFICATION_CALL_SECONDS,
   SupplierNotCurrentlyVerifiedError,
   NotOrderOwnerError,
@@ -102,6 +103,11 @@ describe("createOrder — the live verification gate", () => {
     expect(order.status).toBe("pending_payment");
     expect(order.buyer_id).toBe(1);
     expect(order.supplier_id).toBe(1);
+    // The call room name must never be derivable from anything
+    // user-visible — order_code is a guessable 6-digit string; the room
+    // id is a real random UUID and must differ from it.
+    expect(order.verification_call_room_id).toBeTruthy();
+    expect(order.verification_call_room_id).not.toBe(order.order_code);
     expect(order.platform_fee_minor).toBeGreaterThan(0);
   });
 
@@ -338,6 +344,28 @@ describe("InvalidOrderTransitionError surfaces from orderService, not just order
   });
 });
 
+describe("ensureCallRoomId — backfill for orders that predate migration 0008", () => {
+  it("returns the existing room id untouched when already set", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000 });
+    const roomId = await ensureCallRoomId(supabase, order);
+    expect(roomId).toBe(order.verification_call_room_id);
+  });
+
+  it("generates and persists a fresh room id for a legacy order missing one", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000 });
+    // Simulate a pre-migration-0008 row.
+    await supabase.from("orders").update({ verification_call_room_id: null }).eq("id", order.id);
+
+    const roomId = await ensureCallRoomId(supabase, { ...order, verification_call_room_id: null });
+    expect(roomId).toBeTruthy();
+    expect(fake.getRows("orders").find((o) => o.id === order.id)!.verification_call_room_id).toBe(roomId);
+  });
+});
+
 describe("createOrder — minimum order amount", () => {
   it("rejects an order below MIN_ORDER_AMOUNT_MINOR, since the flat platform fee would leave the supplier a negative payout", async () => {
     const fake = freshFakeSupabase();
@@ -460,5 +488,54 @@ describe("mandatory live verification call before approval", () => {
     // initiateEscrowRelease directly, not through approveOrder.
     const result = await resolveDispute(supabase, provider, dispute.id as number, 3, "supplier", "Proof was valid.");
     expect(result.autoActionTaken).toBe("release_initiated");
+  });
+});
+
+describe("approveOrder — a real payment provider's initiateEscrowRelease can throw (CircleEscrowProvider can, the stub never does)", () => {
+  /** A minimal PaymentBoundary stand-in whose release leg always fails —
+   * the failure mode a real CircleEscrowProvider hits on day one if a
+   * supplier hasn't set wallet_address yet (MissingSupplierWalletError)
+   * or the escrow wallet has no USDC balance. */
+  function alwaysFailingReleaseProvider() {
+    return {
+      initiateOrderFunding: async (orderId: number) => ({ paymentReference: `fund-${orderId}`, status: "processing" as const }),
+      initiateEscrowRelease: async () => {
+        throw new Error("Supplier 1 has no wallet_address on file — cannot send a real USDC release to nowhere.");
+      },
+      initiateRefund: async (orderId: number) => ({ refundReference: `refund-${orderId}`, status: "processing" as const }),
+      submitRatingOnChain: async () => ({ txHash: null, status: "submitted" as const }),
+    };
+  }
+
+  it("re-throws the failure and does NOT silently report success", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider: fundingProvider, waitForConfirmation } = synchronousProvider(supabase);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
+    const confirmed = waitForConfirmation();
+    await fundOrder(supabase, fundingProvider, order.id, 1);
+    await confirmed;
+    await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
+    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+
+    await expect(approveOrder(supabase, alwaysFailingReleaseProvider(), order.id, 1)).rejects.toThrow(/wallet_address/);
+  });
+
+  it("leaves the order at release_submitted (the only state that matches reality) and records a release_failed payment_event instead of losing the failure", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider: fundingProvider, waitForConfirmation } = synchronousProvider(supabase);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
+    const confirmed = waitForConfirmation();
+    await fundOrder(supabase, fundingProvider, order.id, 1);
+    await confirmed;
+    await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
+    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+
+    await expect(approveOrder(supabase, alwaysFailingReleaseProvider(), order.id, 1)).rejects.toThrow();
+
+    expect(fake.getRows("orders").find((o) => o.id === order.id)!.status).toBe("release_submitted");
+    const events = fake.getRows("payment_events").filter((e) => e.order_id === order.id && e.leg === "release");
+    expect(events.some((e) => e.event_type === "release_failed")).toBe(true);
   });
 });

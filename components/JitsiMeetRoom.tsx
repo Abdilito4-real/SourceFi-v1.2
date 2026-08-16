@@ -5,9 +5,15 @@
 // A shared live video room for the buyer and supplier to verify a
 // delivery together in real time, before the buyer decides to release
 // funds — reused from the pre-pivot field-agent verification flow (was
-// orphaned/unused since that flow was retired). Room name is derived
-// from the order code, so both parties land in the same room with
-// nothing to coordinate.
+// orphaned/unused since that flow was retired). Room name is `roomId` —
+// a server-generated crypto.randomUUID() (migration 0008), fetched only
+// from the ownership-checked order-detail route — NOT the order code.
+// order_code is a 6-digit, user-visible, guessable string; anyone who
+// knew or brute-forced SourceFi_<order_code> could join a "private" call
+// directly on meet.jit.si, which has no concept of who our buyer/
+// supplier are and enforces nothing on its own. roomId is what actually
+// makes this private: both parties land in the same room with nothing
+// to coordinate, and nobody else can guess it.
 //
 // Uses Jitsi's real IFrame External API (external_api.js), not a plain
 // <iframe src=...>, specifically so `onSegmentComplete` reports GENUINE
@@ -45,14 +51,20 @@ function formatDuration(totalSeconds: number): string {
 }
 
 export interface JitsiMeetRoomProps {
-  orderCode: string;
+  /** The private room name — a crypto.randomUUID(), never the guessable
+   * order_code. Only ever supplied to the buyer and assigned supplier
+   * (see app/api/orders/[id]/route.ts). */
+  roomId: string;
+  /** Display-only label shown in the panel header (the order code) —
+   * never used to construct the actual Jitsi room name. */
+  displayLabel: string;
   /** Fired once, when a join-to-leave segment ends, with the real
    * elapsed seconds for that segment — the caller is responsible for
    * reporting it to the server (POST /api/orders/[id]/call-progress). */
   onSegmentComplete: (seconds: number) => void;
 }
 
-export default function JitsiMeetRoom({ orderCode, onSegmentComplete }: JitsiMeetRoomProps) {
+export default function JitsiMeetRoom({ roomId, displayLabel, onSegmentComplete }: JitsiMeetRoomProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<JitsiMeetAPI | null>(null);
   const joinedAtRef = useRef<number | null>(null);
@@ -80,7 +92,7 @@ export default function JitsiMeetRoom({ orderCode, onSegmentComplete }: JitsiMee
       // error text sitting inside the call panel instead of a real call.
       try {
         const api = new window.JitsiMeetExternalAPI!(JITSI_DOMAIN, {
-          roomName: `SourceFi_${orderCode}`,
+          roomName: `SourceFi_${roomId}`,
           parentNode: containerRef.current,
           width: "100%",
           height: "100%",
@@ -124,7 +136,7 @@ export default function JitsiMeetRoom({ orderCode, onSegmentComplete }: JitsiMee
       apiRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderCode]);
+  }, [roomId]);
 
   // A visible ticking timer while actually in-call — the live version of
   // what onSegmentComplete reports once the segment ends.
@@ -144,7 +156,7 @@ export default function JitsiMeetRoom({ orderCode, onSegmentComplete }: JitsiMee
       <div className="flex items-center justify-between bg-surface px-3 py-2 font-mono text-[11.5px] text-text-primary">
         <span className="flex items-center gap-1.5">
           <span className={`inline-block h-2 w-2 rounded-full ${inCall ? "pulse-dot bg-success" : "bg-text-tertiary"}`} />
-          {inCall ? `In call — ${formatDuration(liveElapsed)}` : `Verification call — ${orderCode}`}
+          {inCall ? `In call — ${formatDuration(liveElapsed)}` : `Verification call — ${displayLabel}`}
         </span>
       </div>
       {loadError ? (

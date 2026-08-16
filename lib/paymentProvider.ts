@@ -14,15 +14,27 @@
 // a poll job — see design doc Section D.5 (poll recommended for this
 // stage). This file is explicitly a dev/demo stand-in, not a template
 // for how the real integration should be wired.
+//
+// Escrow release specifically upgrades to CircleEscrowProvider — a real
+// on-chain transfer via Circle's API — the moment CIRCLE_API_KEY,
+// CIRCLE_ENTITY_SECRET, and ESCROW_WALLET_ID are ALL actually set. Until
+// then (and that's the state of this project right now — those are
+// documented-but-empty placeholders in .env.local), this resolves to the
+// exact same fully-simulated StubPaymentProvider it always has. No
+// partial/half-real state: either every env var is present, or nothing
+// about this changes. Funding and settlement (the NGN legs) stay
+// simulated either way — that's Yellow Card's job, and no Yellow Card
+// credentials exist anywhere in this project yet.
 import { getSupabaseServerClient } from "./supabaseServer";
 import { handlePaymentStatusEvent } from "./orderService";
 import { StubPaymentProvider, type PaymentBoundary, type PaymentStatusEvent } from "./paymentBoundary";
+import { CircleEscrowProvider } from "./circleEscrowProvider";
 
 let singleton: PaymentBoundary | null = null;
 
 export function getPaymentProvider(): PaymentBoundary {
   if (!singleton) {
-    singleton = new StubPaymentProvider(async (event: PaymentStatusEvent) => {
+    const onStatusUpdate = async (event: PaymentStatusEvent) => {
       try {
         const supabase = getSupabaseServerClient();
         await handlePaymentStatusEvent(supabase, event);
@@ -35,7 +47,16 @@ export function getPaymentProvider(): PaymentBoundary {
         // swallowed so it's visible in dev instead of silently stuck.
         console.error("Payment status event handling failed:", event, err);
       }
-    });
+    };
+
+    const apiKey = process.env.CIRCLE_API_KEY;
+    const entitySecret = process.env.CIRCLE_ENTITY_SECRET;
+    const escrowWalletId = process.env.ESCROW_WALLET_ID;
+
+    singleton =
+      apiKey && entitySecret && escrowWalletId
+        ? new CircleEscrowProvider(getSupabaseServerClient(), onStatusUpdate, { apiKey, entitySecret, escrowWalletId })
+        : new StubPaymentProvider(onStatusUpdate);
   }
   return singleton;
 }

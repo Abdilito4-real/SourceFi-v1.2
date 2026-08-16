@@ -298,6 +298,14 @@ export interface OrderRow {
    * MIN_VERIFICATION_CALL_SECONDS (lib/orderService.ts) — see migration
    * 0007. */
   verification_call_seconds: number;
+  /** The Jitsi room's real, private name — a crypto.randomUUID(), never
+   * derived from order_code (which is a guessable 6-digit, user-visible
+   * string). Nullable because migration 0008 doesn't backfill existing
+   * rows; lib/orderService.ts's ensureCallRoomId() lazily fills it in on
+   * first read. Only ever returned from ownership-checked routes (see
+   * app/api/orders/[id]/route.ts) — this IS the access control for the
+   * call, since meet.jit.si itself enforces none. */
+  verification_call_room_id: string | null;
   created_at: string;
   buyer_email?: string | null;
   supplier_business_name?: string | null;
