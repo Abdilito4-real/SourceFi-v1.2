@@ -187,6 +187,13 @@ export default function OrderDetailsModal({
   const [fundError, setFundError] = useState<FinancialError | null>(null);
   const [approveError, setApproveError] = useState<FinancialError | null>(null);
   const [showCall, setShowCall] = useState(false);
+  // Arriving via a "Join call" push notification (?call=1) shouldn't
+  // silently activate the camera/mic and start the verification timer
+  // the instant this modal mounts, that's answering a call without
+  // anyone actually picking up. This gates the notification path behind
+  // one real "Answer" tap; clicking "Start/Continue" below is already
+  // that explicit action, so it skips straight to showCall instead.
+  const [awaitingAnswer, setAwaitingAnswer] = useState(false);
   const [incomingCallBannerOpen, setIncomingCallBannerOpen] = useState(false);
   const prevCounterpartyInCallRef = useRef(false);
   const online = useNetworkStatus();
@@ -251,13 +258,12 @@ export default function OrderDetailsModal({
     load();
   }, [load]);
 
-  // Answering a call, not just opening the order it's attached to: once
-  // the order has actually loaded and is in a state the call is legal
-  // for, open the call panel immediately rather than requiring an extra
-  // click on top of the one that already brought the user here.
+  // Once the order has loaded and is in a state the call is legal for,
+  // surface the "incoming call" answer prompt, still requires an actual
+  // tap before anything connects.
   useEffect(() => {
     if (!autoJoinCall || !detail) return;
-    if (LIVE_CALL_ELIGIBLE_STATUSES.has(detail.order.status)) setShowCall(true);
+    if (LIVE_CALL_ELIGIBLE_STATUSES.has(detail.order.status)) setAwaitingAnswer(true);
     onAutoJoinCallHandled?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoJoinCall, detail]);
@@ -990,6 +996,28 @@ export default function OrderDetailsModal({
           metered mobile data is a real constraint, loads on request. */}
       {(isBuyer || isSupplier) && LIVE_CALL_ELIGIBLE_STATUSES.has(order.status) && (
         <div className="mt-5">
+          {awaitingAnswer && !showCall && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-accent bg-accent-soft px-4 py-3">
+              <span className="flex items-center gap-2.5 text-sm font-semibold text-accent-text">
+                <Video size={16} className="pulse-dot shrink-0" />
+                Incoming verification call
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setShowCall(true);
+                    setAwaitingAnswer(false);
+                  }}
+                >
+                  Answer
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setAwaitingAnswer(false)}>
+                  Not now
+                </Button>
+              </div>
+            </div>
+          )}
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             {!showCall && (
               <Button variant="secondary" onClick={() => setShowCall(true)}>

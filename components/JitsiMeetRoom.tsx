@@ -151,7 +151,13 @@ export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSeg
             startWithAudioMuted: false,
             startWithVideoMuted: false,
           },
-          interfaceConfigOverwrite: { TOOLBAR_BUTTONS: ["microphone", "camera", "fullscreen", "hangup", "chat"] },
+          interfaceConfigOverwrite: {
+            // toggle-camera is Jitsi's built-in front/back camera swap,
+            // only actually renders as a button on a device that reports
+            // more than one camera (mobile), harmless no-op button-less
+            // on desktop.
+            TOOLBAR_BUTTONS: ["microphone", "camera", "toggle-camera", "fullscreen", "hangup", "chat"],
+          },
         });
         apiRef.current = api;
 
