@@ -13,12 +13,15 @@
 // (https://docs.privy.io/security/implementation-guide/content-security-policy)
 // and this follows it exactly, extended only with what this app itself
 // actually uses beyond Privy's base: Jitsi (components/JitsiMeetRoom.tsx,
-// meet.jit.si), Unsplash (next.config.mjs's own remotePatterns), and the
-// Arc testnet RPC (lib/wagmi-config.ts). style-src keeps 'unsafe-inline'
-// on Privy's own explicit recommendation, Tailwind/Privy's embedded UI
-// needs it; this is a documented vendor requirement, not a fallback taken
-// out of laziness. Re-test this CSP whenever the Privy SDK is upgraded
-// their own guide says exactly that.
+// meet.jit.si, or 8x8.vc once lib/jaasAuth.ts's env vars are set, both
+// domains stay allowlisted regardless of which one a given request
+// actually uses, keeping this list config-independent), Unsplash
+// (next.config.mjs's own remotePatterns), and the Arc testnet RPC
+// (lib/wagmi-config.ts). style-src keeps 'unsafe-inline' on Privy's own
+// explicit recommendation, Tailwind/Privy's embedded UI needs it; this
+// is a documented vendor requirement, not a fallback taken out of
+// laziness. Re-test this CSP whenever the Privy SDK is upgraded, their
+// own guide says exactly that.
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
@@ -66,17 +69,17 @@ export function middleware(request: NextRequest) {
 
   const csp = [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' https://challenges.cloudflare.com https://meet.jit.si`,
+    `script-src 'self' 'nonce-${nonce}' https://challenges.cloudflare.com https://meet.jit.si https://8x8.vc`,
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https://images.unsplash.com",
+    "img-src 'self' data: blob: https://images.unsplash.com https://meet.jit.si https://8x8.vc",
     "font-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
     "frame-ancestors 'none'",
-    "child-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org https://meet.jit.si",
-    "frame-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org https://challenges.cloudflare.com https://meet.jit.si",
-    "connect-src 'self' https://auth.privy.io wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org https://*.rpc.privy.systems https://explorer-api.walletconnect.com https://rpc.testnet.arc.network wss://meet.jit.si https://meet.jit.si",
+    "child-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org https://meet.jit.si https://8x8.vc",
+    "frame-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org https://challenges.cloudflare.com https://meet.jit.si https://8x8.vc",
+    "connect-src 'self' https://auth.privy.io wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org https://*.rpc.privy.systems https://explorer-api.walletconnect.com https://rpc.testnet.arc.network wss://meet.jit.si https://meet.jit.si wss://8x8.vc https://8x8.vc wss://*.8x8.vc https://*.8x8.vc",
     "worker-src 'self'",
     "manifest-src 'self'",
     "upgrade-insecure-requests",
