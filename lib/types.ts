@@ -566,3 +566,15 @@ export interface NotificationPreferences {
   quiet_hours_start_local: number;
   quiet_hours_end_local: number;
 }
+
+/** Returned by GET /api/orders/[id] (see lib/jaasAuth.ts) only once
+ * JAAS_APP_ID/JAAS_API_KEY_ID/JAAS_PRIVATE_KEY are all set; null falls
+ * back to the free meet.jit.si join components/JitsiMeetRoom.tsx
+ * already has. Not a DB row, a fresh signed JWT minted per request,
+ * never persisted or cached client-side beyond this one order-detail
+ * fetch. */
+export interface JaasCallConfig {
+  domain: string;
+  roomName: string;
+  jwt: string;
+}

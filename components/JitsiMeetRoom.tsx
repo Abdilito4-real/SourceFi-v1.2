@@ -25,10 +25,15 @@
 // videoConferenceLeft events do.
 //
 // meet.jit.si is Jitsi's free public server, no API key, no account, no
-// per-minute cost. Right call for a hackathon timeline; a self-hosted
-// instance or a paid provider (Daily, Twilio Video) is the natural
-// upgrade if this needs recording/moderation/guaranteed uptime later.
+// per-minute cost, but it gates a brand-new/empty room behind a "log in
+// to become a moderator, otherwise wait" screen on its shared multi-
+// tenant infrastructure. `callConfig` (see lib/jaasAuth.ts) is the
+// upgrade: a signed JWT from 8x8 JaaS removes that gate entirely by
+// authenticating this app's own tenant as the moderator, no separate
+// login step for either party. Falls back to the plain meet.jit.si
+// join, unchanged, whenever callConfig is null (JaaS not configured).
 import React, { useEffect, useRef, useState } from "react";
+import type { JaasCallConfig } from "../lib/types";
 
 declare global {
   interface Window {
@@ -75,9 +80,12 @@ export interface JitsiMeetRoomProps {
    * the total-duration bookkeeping onSegmentComplete handles. */
   onJoined?: () => void;
   onLeft?: () => void;
+  /** From GET /api/orders/[id], see lib/jaasAuth.ts. Undefined/null uses
+   * the free meet.jit.si join this component always had. */
+  callConfig?: JaasCallConfig | null;
 }
 
-export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSegmentComplete, onJoined, onLeft }: JitsiMeetRoomProps) {
+export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSegmentComplete, onJoined, onLeft, callConfig }: JitsiMeetRoomProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<JitsiMeetAPI | null>(null);
   const joinedAtRef = useRef<number | null>(null);
@@ -97,6 +105,16 @@ export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSeg
       onLeft?.();
     }
 
+    // Captured once per effect run (roomId change), not a dependency:
+    // callConfig carries a freshly-minted JWT on every order-detail
+    // fetch (this modal polls every ~8s for the incoming-call banner),
+    // re-running this effect on every poll would tear down and rebuild
+    // the live call constantly. The JWT's 1h expiry comfortably outlives
+    // one call session either way.
+    const domain = callConfig?.domain ?? JITSI_DOMAIN;
+    const scriptSrc = `https://${domain}/external_api.js`;
+    const roomName = callConfig?.roomName ?? `SourceFi_${roomId}`;
+
     function init() {
       if (cancelled || !containerRef.current || !window.JitsiMeetExternalAPI) return;
       // Defensive: if external_api.js loaded but the constructor itself
@@ -105,12 +123,13 @@ export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSeg
       // script load, the alternative is an unstyled DOM fragment or raw
       // error text sitting inside the call panel instead of a real call.
       try {
-        const api = new window.JitsiMeetExternalAPI!(JITSI_DOMAIN, {
-          roomName: `SourceFi_${roomId}`,
+        const api = new window.JitsiMeetExternalAPI!(domain, {
+          roomName,
           parentNode: containerRef.current,
           width: "100%",
           height: "100%",
           userInfo: { displayName },
+          ...(callConfig ? { jwt: callConfig.jwt } : {}),
           configOverwrite: {
             prejoinPageEnabled: false,
             requireDisplayName: false,
@@ -137,10 +156,10 @@ export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSeg
     if (window.JitsiMeetExternalAPI) {
       init();
     } else {
-      const existing = document.querySelector<HTMLScriptElement>(`script[src="${SCRIPT_SRC}"]`);
+      const existing = document.querySelector<HTMLScriptElement>(`script[src="${scriptSrc}"]`);
       const script = existing ?? document.createElement("script");
       if (!existing) {
-        script.src = SCRIPT_SRC;
+        script.src = scriptSrc;
         script.async = true;
         document.body.appendChild(script);
       }

@@ -94,6 +94,28 @@ Each records its reason in `order_status_history` /
 `order_cancellations` so `getOrderTimeline` can show a full audit
 trail to both parties.
 
+## Live verification call
+
+`components/JitsiMeetRoom.tsx` embeds a private room (a server-generated
+UUID, never the guessable order code) so the buyer and supplier can
+verify a delivery together before funds release, mandatory before
+approval (`MIN_VERIFICATION_CALL_SECONDS`, enforced server-side).
+
+Runs on meet.jit.si (free, zero setup) by default. `lib/jaasAuth.ts`
+upgrades it to 8x8 JaaS the moment `JAAS_APP_ID` / `JAAS_API_KEY_ID` /
+`JAAS_PRIVATE_KEY` are all set: a JWT signed server-side per request
+(`GET /api/orders/[id]`) authenticates this app's own tenant as
+moderator, removing meet.jit.si's "log in to become a moderator,
+otherwise wait" gate on brand-new rooms. Without those three set, the
+call still fully works, that gate just occasionally shows and
+self-resolves once both parties are in.
+
+Presence (who's currently in the call) is tracked separately from the
+verification-time requirement, `buyer_call_active_since` /
+`supplier_call_active_since` (migration 0012) back an incoming-call
+prompt for the other party, see `lib/orderService.ts`'s
+`setCallPresence`.
+
 ## Notifications
 
 `lib/notifications/dispatch.ts` is the one place that decides whether

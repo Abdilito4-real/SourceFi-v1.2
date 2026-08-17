@@ -34,6 +34,7 @@ import type {
   DeliveryProofRow,
   DisputeCategory,
   DisputeRow,
+  JaasCallConfig,
   OrderRow,
   OrderStatus,
   PaymentEventRow,
@@ -107,6 +108,9 @@ interface OrderDetail {
   deliveryProofs: DeliveryProofRow[];
   disputes: DisputeRow[];
   rating: RatingRow | null;
+  /** Present only once JaaS is configured server-side, see
+   * lib/jaasAuth.ts. Null falls back to the free meet.jit.si join. */
+  callConfig: JaasCallConfig | null;
 }
 
 /** submitted/processing progress for whichever leg (payment or release) is
@@ -986,6 +990,7 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
                   onSegmentComplete={reportCallSegment}
                   onJoined={() => reportCallPresence(true)}
                   onLeft={() => reportCallPresence(false)}
+                  callConfig={detail.callConfig}
                 />
               ) : (
                 <div className="mt-3 flex h-[320px] w-full items-center justify-center rounded-xl border border-border bg-black text-sm text-white/70">

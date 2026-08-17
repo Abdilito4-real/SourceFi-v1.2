@@ -8,6 +8,7 @@ import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { requireSession } from "../../../../lib/authz";
 import { ensureCallRoomId } from "../../../../lib/orderService";
 import { dbErrorResponse } from "../../../../lib/dbErrorResponse";
+import { buildJaasCallConfig } from "../../../../lib/jaasAuth";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireSession();
@@ -43,6 +44,13 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   // it here (rather than in createOrder() only) covers any order created
   // before migration 0008 added the column.
   const callRoomId = isPartyToOrder ? await ensureCallRoomId(supabase, order) : null;
+  // Same isPartyToOrder gate as the room id itself: a signed JWT is as
+  // sensitive as the room id it grants moderator access to, admin
+  // oversight doesn't get one either.
+  const callConfig =
+    isPartyToOrder && callRoomId
+      ? await buildJaasCallConfig(callRoomId, String(auth.user.id), auth.user.role === "buyer" ? "SourceFi Buyer" : "SourceFi Supplier")
+      : null;
 
   const [{ data: buyer }, { data: supplier }, { data: paymentEvents }, { data: proofs }, { data: disputes }, { data: rating }, { data: listing }] =
     await Promise.all([
@@ -74,5 +82,6 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     deliveryProofs: proofs || [],
     disputes: disputes || [],
     rating: rating || null,
+    callConfig,
   });
 }
