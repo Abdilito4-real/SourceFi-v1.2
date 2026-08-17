@@ -136,6 +136,15 @@ export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSeg
             disableDeepLinking: true,
             enableWelcomePage: false,
             disableInviteFunctions: true,
+            // prejoinPageEnabled: false skips the screen that would
+            // normally let someone choose their mic/camera state before
+            // joining, without these, that choice silently falls back to
+            // whatever Jitsi/JaaS's own default is, in practice showing
+            // up as "granted camera/mic access in the browser, but the
+            // call still starts muted and blank" since permission and
+            // mute state are two different things. Force both on.
+            startWithAudioMuted: false,
+            startWithVideoMuted: false,
           },
           interfaceConfigOverwrite: { TOOLBAR_BUTTONS: ["microphone", "camera", "fullscreen", "hangup", "chat"] },
         });

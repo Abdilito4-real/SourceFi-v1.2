@@ -16,6 +16,7 @@ import { Menu, X, LogOut, ArrowLeftRight } from "lucide-react";
 import { cn } from "./ui/cn";
 import ThemeToggle from "./ui/ThemeToggle";
 import PushSoftPrompt from "./PushSoftPrompt";
+import IncomingCallBanner from "./IncomingCallBanner";
 import type { AppUser } from "../lib/types";
 
 export interface NavItem {
@@ -247,6 +248,7 @@ export default function DashboardShell({
         onClose={() => setPushPromptOpen(false)}
         reason="You're signed in."
       />
+      <IncomingCallBanner role={user.role} />
     </div>
   );
 }
