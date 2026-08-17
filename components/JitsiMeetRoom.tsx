@@ -132,6 +132,11 @@ export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSeg
           ...(callConfig ? { jwt: callConfig.jwt } : {}),
           configOverwrite: {
             prejoinPageEnabled: false,
+            // Newer Jitsi/JaaS builds moved this under a nested config
+            // object, prejoinPageEnabled alone left a "Join meeting"
+            // device-check screen showing up in practice. Setting both
+            // covers whichever schema this deployment is actually on.
+            prejoinConfig: { enabled: false },
             requireDisplayName: false,
             disableDeepLinking: true,
             enableWelcomePage: false,
