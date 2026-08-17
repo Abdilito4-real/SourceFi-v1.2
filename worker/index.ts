@@ -30,6 +30,7 @@ interface SafePushPayload {
   body: string;
   tag: string;
   deepLink: string;
+  eventType: string | null;
 }
 
 function parsePushPayload(raw: unknown): SafePushPayload | null {
@@ -44,8 +45,12 @@ function parsePushPayload(raw: unknown): SafePushPayload | null {
   // Only ever a same-origin path, never follow a payload-supplied
   // absolute/external URL out of the service worker.
   const deepLink = typeof data.deepLink === "string" && data.deepLink.startsWith("/") ? data.deepLink : "/";
+  // Display-branching only (which OS notification options to use below),
+  // never trusted for anything security-relevant, that's already fully
+  // decided server-side before this payload was ever sent.
+  const eventType = typeof data.eventType === "string" ? data.eventType.slice(0, 100) : null;
 
-  return { title, body, tag, deepLink };
+  return { title, body, tag, deepLink, eventType };
 }
 
 self.addEventListener("push", (event: PushEvent) => {
@@ -57,6 +62,14 @@ self.addEventListener("push", (event: PushEvent) => {
   }
   if (!parsed) return;
 
+  // An incoming live call gets the "ring, don't just toast" treatment:
+  // stays on screen until dismissed (a normal notification can auto-hide
+  // itself after a few seconds, exactly wrong for something time-boxed
+  // to the length of a call), a one-tap Join action, and a vibration
+  // pattern on devices that support it. Everything else keeps the plain
+  // notification it already had.
+  const isIncomingCall = parsed.eventType === "verification_call_started";
+
   event.waitUntil(
     self.registration.showNotification(parsed.title, {
       body: parsed.body,
@@ -64,6 +77,13 @@ self.addEventListener("push", (event: PushEvent) => {
       icon: "/icon-192.png",
       badge: "/icon-192.png",
       data: { deepLink: parsed.deepLink },
+      ...(isIncomingCall
+        ? {
+            requireInteraction: true,
+            vibrate: [200, 100, 200, 100, 200],
+            actions: [{ action: "join", title: "Join call" }],
+          }
+        : {}),
     })
   );
 });

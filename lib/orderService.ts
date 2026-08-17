@@ -806,6 +806,15 @@ export async function setCallPresence(supabase: SupabaseClient, orderId: number,
   if (error) throw error;
 
   if (active && !wasAlreadyActive) {
+    // critical: true here isn't "financially critical" like a release or
+    // refund, it's "time-sensitive the way an actual phone call is": a
+    // notification that arrives after quiet hours end is arriving after
+    // the call is long over, worthless by then. The deep link's `call=1`
+    // is what makes this feel like answering a call rather than reading
+    // about one, see BuyerDashboard.tsx/SupplierDashboard.tsx/
+    // OrderDetailsModal.tsx's autoJoinCall handling, and the service
+    // worker (worker/index.ts) renders this one with a "Join call"
+    // action button instead of the plain default notification.
     if (isBuyer) {
       getSupplierUserId(supabase, order.supplier_id).then((supplierUserId) => {
         if (supplierUserId == null) return;
@@ -815,10 +824,11 @@ export async function setCallPresence(supabase: SupabaseClient, orderId: number,
           eventType: "verification_call_started",
           resourceType: "order",
           resourceId: order.id,
-          title: "Live verification call started",
-          body: "Your buyer is on a live verification call for this order now. Tap to join.",
-          deepLink: `/supplier?order=${order.id}`,
+          title: "Incoming verification call",
+          body: "Your buyer is on a live verification call for this order now.",
+          deepLink: `/supplier?order=${order.id}&call=1`,
           tag: `call:${order.id}`,
+          critical: true,
         });
       });
     } else {
@@ -828,10 +838,11 @@ export async function setCallPresence(supabase: SupabaseClient, orderId: number,
         eventType: "verification_call_started",
         resourceType: "order",
         resourceId: order.id,
-        title: "Live verification call started",
-        body: "Your supplier is on a live verification call for this order now. Tap to join.",
-        deepLink: `/buyer?order=${order.id}`,
+        title: "Incoming verification call",
+        body: "Your supplier is on a live verification call for this order now.",
+        deepLink: `/buyer?order=${order.id}&call=1`,
         tag: `call:${order.id}`,
+        critical: true,
       });
     }
   }

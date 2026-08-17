@@ -118,6 +118,10 @@ export default function SupplierDashboard() {
   const [section, setSection] = useState<Section>("overview");
   const [ordersTab, setOrdersTab] = useState<"active" | "history">("active");
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  // Set from a "Join call" push notification's deep link (?call=1), so
+  // tapping it drops the supplier straight into the call instead of just
+  // opening the order and making them find the call section themselves.
+  const [autoJoinCall, setAutoJoinCall] = useState(false);
   const [pushPromptOpen, setPushPromptOpen] = useState(false);
   const [profile, setProfile] = useState<SupplierProfileRow | null>(null);
   const [currentlyVerified, setCurrentlyVerified] = useState(false);
@@ -136,6 +140,7 @@ export default function SupplierDashboard() {
   useEffect(() => {
     const orderParam = searchParams.get("order");
     if (orderParam && Number.isInteger(Number(orderParam))) setSelectedOrderId(Number(orderParam));
+    if (searchParams.get("call") === "1") setAutoJoinCall(true);
     const sectionParam = searchParams.get("section");
     if (sectionParam === "overview" || sectionParam === "orders" || sectionParam === "listings" || sectionParam === "verification") {
       setSection(sectionParam);
@@ -599,6 +604,8 @@ export default function SupplierDashboard() {
           onClose={() => setSelectedOrderId(null)}
           onOrderChange={(order) => setOrders((prev) => prev.map((o) => (o.id === order.id ? order : o)))}
           showNotification={notify}
+          autoJoinCall={autoJoinCall}
+          onAutoJoinCallHandled={() => setAutoJoinCall(false)}
         />
       )}
 

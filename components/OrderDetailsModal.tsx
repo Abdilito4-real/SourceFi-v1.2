@@ -157,9 +157,28 @@ export interface OrderDetailsModalProps {
    * hooks in here, not on page load. Buyer-side only; nothing calls this
    * for a supplier/admin viewer. */
   onFunded?: () => void;
+  /** Set when this modal was opened from a "Join call" push notification
+   * (deep link's ?call=1, see lib/orderService.ts's setCallPresence and
+   * worker/index.ts), auto-opens the call panel once the order loads
+   * instead of making the user find and click into it themselves. */
+  autoJoinCall?: boolean;
+  /** Fired once the auto-join above has actually happened, so the caller
+   * can clear its own flag, a later order opened in the same session
+   * (without a fresh ?call=1) shouldn't inherit it. */
+  onAutoJoinCallHandled?: () => void;
 }
 
-export default function OrderDetailsModal({ orderId, role, canTransact, onClose, onOrderChange, showNotification, onFunded }: OrderDetailsModalProps) {
+export default function OrderDetailsModal({
+  orderId,
+  role,
+  canTransact,
+  onClose,
+  onOrderChange,
+  showNotification,
+  onFunded,
+  autoJoinCall,
+  onAutoJoinCallHandled,
+}: OrderDetailsModalProps) {
   const [detail, setDetail] = useState<OrderDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
@@ -231,6 +250,17 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   useEffect(() => {
     load();
   }, [load]);
+
+  // Answering a call, not just opening the order it's attached to: once
+  // the order has actually loaded and is in a state the call is legal
+  // for, open the call panel immediately rather than requiring an extra
+  // click on top of the one that already brought the user here.
+  useEffect(() => {
+    if (!autoJoinCall || !detail) return;
+    if (LIVE_CALL_ELIGIBLE_STATUSES.has(detail.order.status)) setShowCall(true);
+    onAutoJoinCallHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoJoinCall, detail]);
 
   // Poll while an async payment step is in flight, the stub provider
   // resolves in milliseconds, but a real Yellow Card/Circle integration

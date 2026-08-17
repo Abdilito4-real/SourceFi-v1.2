@@ -225,6 +225,10 @@ export default function BuyerDashboard() {
   const [section, setSection] = useState<Section>("overview");
   const [tab, setTab] = useState<"active" | "history">("active");
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  // Set from a "Join call" push notification's deep link (?call=1), so
+  // tapping it drops the buyer straight into the call instead of just
+  // opening the order and making them find the call section themselves.
+  const [autoJoinCall, setAutoJoinCall] = useState(false);
   const [pushPromptOpen, setPushPromptOpen] = useState(false);
   const [suppliers, setSuppliers] = useState<SupplierListing[]>([]);
   const [loadingSuppliers, setLoadingSuppliers] = useState(true);
@@ -245,6 +249,7 @@ export default function BuyerDashboard() {
   useEffect(() => {
     const orderParam = searchParams.get("order");
     if (orderParam && Number.isInteger(Number(orderParam))) setSelectedOrderId(Number(orderParam));
+    if (searchParams.get("call") === "1") setAutoJoinCall(true);
     const sectionParam = searchParams.get("section");
     if (sectionParam === "overview" || sectionParam === "suppliers" || sectionParam === "orders" || sectionParam === "materials") {
       setSection(sectionParam);
@@ -605,6 +610,8 @@ export default function BuyerDashboard() {
           onOrderChange={(order) => setOrders((prev) => prev.map((o) => (o.id === order.id ? order : o)))}
           showNotification={notify}
           onFunded={() => setPushPromptOpen(true)}
+          autoJoinCall={autoJoinCall}
+          onAutoJoinCallHandled={() => setAutoJoinCall(false)}
         />
       )}
       <PushSoftPrompt open={pushPromptOpen} onClose={() => setPushPromptOpen(false)} reason="You just funded escrow." />
