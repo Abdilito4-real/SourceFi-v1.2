@@ -104,9 +104,19 @@ export function middleware(request: NextRequest) {
   response.headers.set("X-Frame-Options", "DENY");
   response.headers.set("X-Content-Type-Options", "nosniff");
   response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
-  response.headers.set("Permissions-Policy", "camera=(self), microphone=(self), geolocation=(), interest-cohort=()");
-  // camera/microphone allowed for self only, Jitsi verification calls
-  // (components/JitsiMeetRoom.tsx) are the one legitimate use in this app.
+  // camera/microphone must explicitly allowlist the Jitsi origins, not
+  // just (self): the call renders inside a CROSS-ORIGIN iframe
+  // (meet.jit.si, or 8x8.vc once JaaS is configured), and (self) alone
+  // does not delegate camera/mic to any iframe regardless of what the
+  // user allows in their own browser's permission prompt. Without this,
+  // getUserMedia() fails inside the iframe with a permissions-policy
+  // violation before it ever reaches the OS permission check, the call
+  // still "connects" (signaling isn't gated by this) but stays blank
+  // and silent.
+  response.headers.set(
+    "Permissions-Policy",
+    'camera=(self "https://meet.jit.si" "https://8x8.vc"), microphone=(self "https://meet.jit.si" "https://8x8.vc"), geolocation=(), interest-cohort=()'
+  );
   if (process.env.NODE_ENV === "production") {
     response.headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
   }
