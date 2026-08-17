@@ -18,6 +18,7 @@ import {
   resolveDispute,
   submitRating,
   recordVerificationCallProgress,
+  setCallPresence,
   ensureCallRoomId,
   MIN_VERIFICATION_CALL_SECONDS,
   SupplierNotCurrentlyVerifiedError,
@@ -488,6 +489,34 @@ describe("mandatory live verification call before approval", () => {
     // initiateEscrowRelease directly, not through approveOrder.
     const result = await resolveDispute(supabase, provider, dispute.id as number, 3, "supplier", "Proof was valid.");
     expect(result.autoActionTaken).toBe("release_initiated");
+  });
+
+  it("setCallPresence stamps the correct party's column and clears it again on leave", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+
+    await setCallPresence(supabase, order.id, 1, true); // buyer (id 1) joins
+    let current = await recordVerificationCallProgress(supabase, order.id, 1, 1);
+    expect(current.buyer_call_active_since).not.toBeNull();
+    expect(current.supplier_call_active_since).toBeFalsy(); // never touched yet, null in real Postgres
+
+    await setCallPresence(supabase, order.id, 2, true); // supplier (id 2) joins
+    current = await recordVerificationCallProgress(supabase, order.id, 1, 1);
+    expect(current.supplier_call_active_since).not.toBeNull();
+
+    await setCallPresence(supabase, order.id, 1, false); // buyer leaves
+    current = await recordVerificationCallProgress(supabase, order.id, 1, 1);
+    expect(current.buyer_call_active_since).toBeNull();
+    expect(current.supplier_call_active_since).not.toBeNull(); // untouched by the buyer's own leave
+  });
+
+  it("setCallPresence rejects a user who is neither the buyer nor the assigned supplier", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+
+    await expect(setCallPresence(supabase, order.id, 3, true)).rejects.toThrow(NotOrderOwnerError);
   });
 });
 

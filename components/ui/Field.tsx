@@ -44,19 +44,31 @@ const fieldBase =
 
 export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   invalid?: boolean;
+  /** A short, fixed, non-editable prefix rendered inside the field, e.g.
+   * "₦" on an amount input, so the currency is shown, never typed. */
+  prefix?: string;
 }
 
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(function Input(
-  { className = "", invalid, ...props },
+  { className = "", invalid, prefix, ...props },
   ref
 ) {
-  return (
+  const input = (
     <input
       ref={ref}
       aria-invalid={invalid || undefined}
-      className={cn(fieldBase, invalid && "border-danger", className)}
+      className={cn(fieldBase, prefix && "pl-7", invalid && "border-danger", className)}
       {...props}
     />
+  );
+  if (!prefix) return input;
+  return (
+    <div className="relative">
+      <span aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary">
+        {prefix}
+      </span>
+      {input}
+    </div>
   );
 });
 

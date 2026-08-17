@@ -328,6 +328,13 @@ export interface OrderRow {
    * app/api/orders/[id]/route.ts), this IS the access control for the
    * call, since meet.jit.si itself enforces none. */
   verification_call_room_id: string | null;
+  /** Set the moment that party joins the call, cleared on a clean leave,
+   * refreshed by a heartbeat while in-call, see migration 0012. Treat as
+   * stale (not actually in the call) once older than ~45s, a crashed
+   * tab never reports "left". Used to prompt the other party with an
+   * incoming-call notice instead of requiring them to already be here. */
+  buyer_call_active_since: string | null;
+  supplier_call_active_since: string | null;
   created_at: string;
   buyer_email?: string | null;
   supplier_business_name?: string | null;

@@ -50,6 +50,8 @@ function formatDuration(totalSeconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+const HEARTBEAT_MS = 20_000;
+
 export interface JitsiMeetRoomProps {
   /** The private room name, a crypto.randomUUID(), never the guessable
    * order_code. Only ever supplied to the buyer and assigned supplier
@@ -58,13 +60,24 @@ export interface JitsiMeetRoomProps {
   /** Display-only label shown in the panel header (the order code)
    * never used to construct the actual Jitsi room name. */
   displayLabel: string;
+  /** Shown to the OTHER participant inside the call, e.g. "SourceFi
+   * Buyer". Passed explicitly so Jitsi never falls back to a cached
+   * name from a prior meet.jit.si visit on this browser, or its own
+   * "enter your name" prompt, that's the actual "have to log in"
+   * friction this removes, prejoinPageEnabled alone doesn't. */
+  displayName: string;
   /** Fired once, when a join-to-leave segment ends, with the real
    * elapsed seconds for that segment, the caller is responsible for
    * reporting it to the server (POST /api/orders/[id]/call-progress). */
   onSegmentComplete: (seconds: number) => void;
+  /** Fired the instant this party joins/leaves, for the OTHER party's
+   * incoming-call prompt (POST /api/orders/[id]/call-presence), not
+   * the total-duration bookkeeping onSegmentComplete handles. */
+  onJoined?: () => void;
+  onLeft?: () => void;
 }
 
-export default function JitsiMeetRoom({ roomId, displayLabel, onSegmentComplete }: JitsiMeetRoomProps) {
+export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSegmentComplete, onJoined, onLeft }: JitsiMeetRoomProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<JitsiMeetAPI | null>(null);
   const joinedAtRef = useRef<number | null>(null);
@@ -81,6 +94,7 @@ export default function JitsiMeetRoom({ roomId, displayLabel, onSegmentComplete 
       joinedAtRef.current = null;
       setInCall(false);
       if (seconds > 0) onSegmentComplete(seconds);
+      onLeft?.();
     }
 
     function init() {
@@ -96,7 +110,14 @@ export default function JitsiMeetRoom({ roomId, displayLabel, onSegmentComplete 
           parentNode: containerRef.current,
           width: "100%",
           height: "100%",
-          configOverwrite: { prejoinPageEnabled: false },
+          userInfo: { displayName },
+          configOverwrite: {
+            prejoinPageEnabled: false,
+            requireDisplayName: false,
+            disableDeepLinking: true,
+            enableWelcomePage: false,
+            disableInviteFunctions: true,
+          },
           interfaceConfigOverwrite: { TOOLBAR_BUTTONS: ["microphone", "camera", "fullscreen", "hangup", "chat"] },
         });
         apiRef.current = api;
@@ -104,6 +125,7 @@ export default function JitsiMeetRoom({ roomId, displayLabel, onSegmentComplete 
         api.addEventListener("videoConferenceJoined", () => {
           joinedAtRef.current = Date.now();
           setInCall(true);
+          onJoined?.();
         });
         api.addEventListener("videoConferenceLeft", reportSegmentIfJoined);
         api.addEventListener("readyToClose", reportSegmentIfJoined);
@@ -149,6 +171,17 @@ export default function JitsiMeetRoom({ roomId, displayLabel, onSegmentComplete 
       if (joinedAtRef.current !== null) setLiveElapsed(Math.round((Date.now() - joinedAtRef.current) / 1000));
     }, 1000);
     return () => clearInterval(interval);
+  }, [inCall]);
+
+  // Re-stamps presence while actually in-call, so a crashed/killed tab
+  // (which never fires videoConferenceLeft) still goes stale server-side
+  // within HEARTBEAT_MS + the reader's own staleness window, instead of
+  // showing the other party as "in the call" forever.
+  useEffect(() => {
+    if (!inCall) return;
+    const heartbeat = setInterval(() => onJoined?.(), HEARTBEAT_MS);
+    return () => clearInterval(heartbeat);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inCall]);
 
   return (

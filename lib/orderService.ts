@@ -778,6 +778,65 @@ export async function recordVerificationCallProgress(
   return fetchOrder(supabase, orderId);
 }
 
+/** Reports "I just joined" / "I just left" the live call, immediately,
+ * separate from recordVerificationCallProgress above (which only fires
+ * once a segment ENDS, for the total-duration requirement). This is
+ * what lets the other party get an incoming-call prompt instead of
+ * needing to already be looking at the order, see migration 0012 and
+ * OrderDetailsModal.tsx. A fresh join (was null, now active) also
+ * notifies the other party; a heartbeat re-join (was already set)
+ * doesn't page them again. */
+export async function setCallPresence(supabase: SupabaseClient, orderId: number, userId: number, active: boolean): Promise<void> {
+  const order = await fetchOrder(supabase, orderId);
+
+  const isBuyer = order.buyer_id === userId;
+  let isSupplier = false;
+  if (!isBuyer) {
+    const { data: profile } = await supabase.from("supplier_profiles").select("id").eq("user_id", userId).maybeSingle();
+    isSupplier = Boolean(profile && profile.id === order.supplier_id);
+  }
+  if (!isBuyer && !isSupplier) throw new NotOrderOwnerError();
+
+  const column = isBuyer ? "buyer_call_active_since" : "supplier_call_active_since";
+  const wasAlreadyActive = Boolean(isBuyer ? order.buyer_call_active_since : order.supplier_call_active_since);
+  const { error } = await supabase
+    .from("orders")
+    .update({ [column]: active ? new Date().toISOString() : null })
+    .eq("id", orderId);
+  if (error) throw error;
+
+  if (active && !wasAlreadyActive) {
+    if (isBuyer) {
+      getSupplierUserId(supabase, order.supplier_id).then((supplierUserId) => {
+        if (supplierUserId == null) return;
+        void notifyUser(supabase, {
+          userId: supplierUserId,
+          category: "audit_status",
+          eventType: "verification_call_started",
+          resourceType: "order",
+          resourceId: order.id,
+          title: "Live verification call started",
+          body: "Your buyer is on a live verification call for this order now. Tap to join.",
+          deepLink: `/supplier?order=${order.id}`,
+          tag: `call:${order.id}`,
+        });
+      });
+    } else {
+      void notifyUser(supabase, {
+        userId: order.buyer_id,
+        category: "audit_status",
+        eventType: "verification_call_started",
+        resourceType: "order",
+        resourceId: order.id,
+        title: "Live verification call started",
+        body: "Your supplier is on a live verification call for this order now. Tap to join.",
+        deepLink: `/buyer?order=${order.id}`,
+        tag: `call:${order.id}`,
+      });
+    }
+  }
+}
+
 // ============================================================================
 // Buyer approval -> release
 // ============================================================================

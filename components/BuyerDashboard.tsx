@@ -187,8 +187,8 @@ function NewOrderModal({ onClose, onSubmit, supplier, prefillListing, submitting
         ) : (
           <div className="flex gap-3">
             <div className="flex-1">
-              <Label htmlFor="new-order-amount">Order amount (₦)</Label>
-              <Input id="new-order-amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 500000" required />
+              <Label htmlFor="new-order-amount">Order amount</Label>
+              <Input id="new-order-amount" prefix="₦" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="500,000" required />
               {amount.trim() !== "" && !validAmount && (
                 <div className="mt-1 text-xs text-danger">Must be at least {formatMoney(MIN_ORDER_AMOUNT_MINOR, "NGN")}.</div>
               )}

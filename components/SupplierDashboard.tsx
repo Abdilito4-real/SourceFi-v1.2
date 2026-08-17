@@ -83,13 +83,14 @@ function ListingFormModal({
           </div>
         </div>
         <div>
-          <Label htmlFor="listing-price">Indicative price (₦, optional)</Label>
+          <Label htmlFor="listing-price">Indicative price (optional)</Label>
           <Input
             id="listing-price"
+            prefix="₦"
             inputMode="decimal"
             value={values.priceAmount}
             onChange={(e) => setValues({ ...values, priceAmount: e.target.value })}
-            placeholder="e.g. 8500"
+            placeholder="8,500"
           />
         </div>
         <div>

@@ -28,6 +28,7 @@ import TransactionProgress, { type TransactionStep } from "./ui/TransactionProgr
 import JitsiMeetRoom from "./JitsiMeetRoom";
 import { formatMoney, CANCELLATION_FEE_MINOR, TYPED_CONFIRMATION_THRESHOLD_MINOR } from "../lib/money";
 import { useNetworkStatus } from "../lib/useNetworkStatus";
+import { playIncomingCallChime } from "../lib/callSound";
 import type {
   BuyerCancellationCategory,
   DeliveryProofRow,
@@ -163,6 +164,8 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
   const [fundError, setFundError] = useState<FinancialError | null>(null);
   const [approveError, setApproveError] = useState<FinancialError | null>(null);
   const [showCall, setShowCall] = useState(false);
+  const [incomingCallBannerOpen, setIncomingCallBannerOpen] = useState(false);
+  const prevCounterpartyInCallRef = useRef(false);
   const online = useNetworkStatus();
   const [proofPhotoUrl, setProofPhotoUrl] = useState("");
   const [proofReceiptUrl, setProofReceiptUrl] = useState("");
@@ -280,6 +283,50 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
       showNotification("error", err instanceof Error ? err.message : "Failed to record call progress.");
     }
   };
+
+  // Immediate join/leave presence, best-effort, silent: a failure here
+  // just means the other party doesn't get an incoming-call prompt this
+  // time, not worth interrupting the call itself over.
+  const reportCallPresence = useCallback(
+    (active: boolean) => {
+      fetch(`/api/orders/${orderId}/call-presence`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active }),
+      }).catch(() => {});
+    },
+    [orderId]
+  );
+
+  // Polls while a live call is actually possible, so a fresh
+  // buyer_call_active_since/supplier_call_active_since from the OTHER
+  // party shows up here without requiring this order to already be
+  // mid-payment (the existing in-flight poll below doesn't cover this
+  // window at all).
+  useEffect(() => {
+    const status = detail?.order.status;
+    const eligible = status && LIVE_CALL_ELIGIBLE_STATUSES.has(status) && (role === "buyer" || role === "supplier") && canTransact;
+    if (!eligible) return;
+    const interval = setInterval(load, 8000);
+    return () => clearInterval(interval);
+  }, [detail?.order.status, role, canTransact, load]);
+
+  // Chime + banner on the RISING edge only (not on every poll tick while
+  // it stays true), and never while this party already has the call
+  // panel open, they don't need an "incoming call" prompt for a call
+  // they're already in.
+  const counterpartyCallActiveSince =
+    role === "buyer" ? detail?.order.supplier_call_active_since : role === "supplier" ? detail?.order.buyer_call_active_since : null;
+  const counterpartyInCall = Boolean(counterpartyCallActiveSince && Date.now() - new Date(counterpartyCallActiveSince).getTime() < 45_000);
+
+  useEffect(() => {
+    if (counterpartyInCall && !prevCounterpartyInCallRef.current && !showCall) {
+      setIncomingCallBannerOpen(true);
+      playIncomingCallChime();
+    }
+    if (!counterpartyInCall) setIncomingCallBannerOpen(false);
+    prevCounterpartyInCallRef.current = counterpartyInCall;
+  }, [counterpartyInCall, showCall]);
 
   const runAction = async (path: string, body?: unknown, successMessage?: string) => {
     setActing(true);
@@ -461,6 +508,29 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
         </div>
         <StatusBadge status={order.status} />
       </div>
+
+      {incomingCallBannerOpen && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-accent bg-accent-soft px-4 py-3">
+          <span className="flex items-center gap-2.5 text-sm font-semibold text-accent-text">
+            <Video size={16} className="pulse-dot shrink-0" />
+            Your {isBuyer ? "supplier" : "buyer"} is on a live verification call right now.
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => {
+                setShowCall(true);
+                setIncomingCallBannerOpen(false);
+              }}
+            >
+              Join now
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setIncomingCallBannerOpen(false)}>
+              Dismiss
+            </Button>
+          </div>
+        </div>
+      )}
 
       <div className="mt-4 grid grid-cols-2 gap-4 rounded-lg border border-border bg-surface-sunken p-4 text-sm sm:grid-cols-4">
         <div>
@@ -912,7 +982,10 @@ export default function OrderDetailsModal({ orderId, role, canTransact, onClose,
                 <JitsiMeetRoom
                   roomId={order.verification_call_room_id}
                   displayLabel={order.order_code}
+                  displayName={isBuyer ? "SourceFi Buyer" : "SourceFi Supplier"}
                   onSegmentComplete={reportCallSegment}
+                  onJoined={() => reportCallPresence(true)}
+                  onLeft={() => reportCallPresence(false)}
                 />
               ) : (
                 <div className="mt-3 flex h-[320px] w-full items-center justify-center rounded-xl border border-border bg-black text-sm text-white/70">
