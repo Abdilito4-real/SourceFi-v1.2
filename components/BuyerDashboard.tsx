@@ -10,7 +10,7 @@
 // (design doc Section 3).
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2, Coins, Package, LayoutGrid, FileText, History, Store, ShieldCheck, XCircle, Search } from "lucide-react";
+import { Loader2, Coins, Package, LayoutGrid, FileText, History, Store, XCircle, Search } from "lucide-react";
 
 import { formatMoney, MIN_ORDER_AMOUNT_MINOR } from "../lib/money";
 import { useSession } from "./SessionProvider";
@@ -20,10 +20,12 @@ import PushSoftPrompt from "./PushSoftPrompt";
 import OrderCard from "./OrderCard";
 import OrderDetailsModal from "./OrderDetailsModal";
 import SupplierVerificationForm from "./SupplierVerificationForm";
+import SupplierTrustProfile from "./SupplierTrustProfile";
 import Button from "./ui/Button";
 import { Card } from "./ui/Card";
 import Modal from "./ui/Modal";
 import StatCard from "./ui/StatCard";
+import SupplierTierBadge, { type SupplierTier } from "./ui/SupplierTierBadge";
 import { Label, Input, Textarea } from "./ui/Field";
 import SharedEmptyState from "./ui/EmptyState";
 import { useToast } from "./ui/Toast";
@@ -38,6 +40,8 @@ interface SupplierListing {
   what_they_sell: string;
   rating_average: number | null;
   rating_count: number;
+  completed_order_count: number;
+  tier: SupplierTier | null;
 }
 
 const TERMINAL_STATUSES = new Set(["settled", "refunded", "cancelled", "expired"]);
@@ -70,25 +74,38 @@ function MaterialListingCard({ listing, onOrder }: { listing: SupplierListingRow
   );
 }
 
-function SupplierCard({ supplier, onOrder }: { supplier: SupplierListing; onOrder: (s: SupplierListing) => void }) {
+function SupplierCard({
+  supplier,
+  onOrder,
+  onViewProfile,
+}: {
+  supplier: SupplierListing;
+  onOrder: (s: SupplierListing) => void;
+  onViewProfile: (s: SupplierListing) => void;
+}) {
   return (
     <Card className="flex flex-col gap-3 p-5">
       <div className="flex items-start justify-between gap-2">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-text">
           <Store size={18} />
         </div>
-        <span className="flex items-center gap-1 rounded-pill bg-success-soft px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-success-text">
-          <ShieldCheck size={11} /> Verified
-        </span>
+        <SupplierTierBadge tier={supplier.tier} className="!text-[10px]" />
       </div>
       <div>
-        <h3 className="font-display text-lg italic leading-tight text-text-primary">{supplier.business_name}</h3>
+        <button
+          type="button"
+          onClick={() => onViewProfile(supplier)}
+          className="text-left font-display text-lg italic leading-tight text-text-primary underline-offset-2 hover:underline"
+        >
+          {supplier.business_name}
+        </button>
         <div className="mt-0.5 text-xs text-text-tertiary">{supplier.business_location}</div>
       </div>
       <p className="line-clamp-2 text-sm leading-relaxed text-text-secondary">{supplier.what_they_sell}</p>
       <div className="mt-auto flex items-center justify-between pt-1">
         <span className="text-xs font-semibold text-text-secondary">
           {supplier.rating_count > 0 ? `★ ${supplier.rating_average?.toFixed(1)} (${supplier.rating_count})` : "No ratings yet"}
+          {supplier.completed_order_count > 0 && ` · ${supplier.completed_order_count} completed`}
         </span>
         <Button size="sm" onClick={() => onOrder(supplier)}>
           Create order
@@ -233,6 +250,7 @@ export default function BuyerDashboard() {
   const [suppliers, setSuppliers] = useState<SupplierListing[]>([]);
   const [loadingSuppliers, setLoadingSuppliers] = useState(true);
   const [orderingSupplier, setOrderingSupplier] = useState<SupplierListing | null>(null);
+  const [profileSupplierId, setProfileSupplierId] = useState<number | null>(null);
   const [orderingListing, setOrderingListing] = useState<SupplierListingRow | null>(null);
   const [creatingOrder, setCreatingOrder] = useState(false);
   const [materials, setMaterials] = useState<SupplierListingRow[]>([]);
@@ -370,6 +388,8 @@ export default function BuyerDashboard() {
       what_they_sell: "",
       rating_average: null,
       rating_count: 0,
+      completed_order_count: 0,
+      tier: null,
     });
   };
 
@@ -512,11 +532,23 @@ export default function BuyerDashboard() {
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {suppliers.map((s) => (
-                <SupplierCard key={s.id} supplier={s} onOrder={openOrderModal} />
+                <SupplierCard key={s.id} supplier={s} onOrder={openOrderModal} onViewProfile={(sup) => setProfileSupplierId(sup.id)} />
               ))}
             </div>
           )}
         </div>
+      )}
+
+      {profileSupplierId !== null && (
+        <SupplierTrustProfile
+          supplierId={profileSupplierId}
+          onClose={() => setProfileSupplierId(null)}
+          onOrder={() => {
+            const supplier = suppliers.find((s) => s.id === profileSupplierId);
+            if (supplier) openOrderModal(supplier);
+            setProfileSupplierId(null);
+          }}
+        />
       )}
 
       {section === "materials" && (

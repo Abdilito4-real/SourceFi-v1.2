@@ -24,6 +24,7 @@ import { Card } from "./ui/Card";
 import Modal from "./ui/Modal";
 import StatCard from "./ui/StatCard";
 import Badge from "./ui/Badge";
+import SupplierTierBadge, { type SupplierTier } from "./ui/SupplierTierBadge";
 import { Label, Input, Textarea } from "./ui/Field";
 import SharedEmptyState from "./ui/EmptyState";
 import { useToast } from "./ui/Toast";
@@ -32,6 +33,13 @@ import type { SupplierListingRow, SupplierProfileRow, SupplierVerificationApplic
 type Section = "overview" | "orders" | "listings" | "verification";
 
 const TERMINAL_STATUSES = new Set(["settled", "refunded", "cancelled", "expired"]);
+
+interface SupplierTrust {
+  ratingAverage: number | null;
+  ratingCount: number;
+  completedOrderCount: number;
+  tier: SupplierTier | null;
+}
 
 interface ListingFormValues {
   name: string;
@@ -126,6 +134,7 @@ export default function SupplierDashboard() {
   const [profile, setProfile] = useState<SupplierProfileRow | null>(null);
   const [currentlyVerified, setCurrentlyVerified] = useState(false);
   const [latestApplication, setLatestApplication] = useState<SupplierVerificationApplicationRow | null>(null);
+  const [trust, setTrust] = useState<SupplierTrust | null>(null);
   const [loadingVerification, setLoadingVerification] = useState(true);
   const [listings, setListings] = useState<SupplierListingRow[]>([]);
   const [loadingListings, setLoadingListings] = useState(true);
@@ -167,6 +176,7 @@ export default function SupplierDashboard() {
         setProfile(data.profile);
         setCurrentlyVerified(data.currentlyVerified);
         setLatestApplication(data.latestApplication);
+        setTrust(data.trust);
       })
       .catch(() => notify("error", "Failed to load verification status."))
       .finally(() => setLoadingVerification(false));
@@ -404,8 +414,15 @@ export default function SupplierDashboard() {
             <StatCard label="Earnings (settled)" value={formatMoney(earningsMinor, "NGN")} icon={<Coins size={16} />} tone="accent" />
             <StatCard label="Incoming orders" value={incomingCount} icon={<FileText size={16} />} />
             <StatCard
-              label="Verification"
-              value={currentlyVerified ? "Verified" : "Not verified"}
+              label="Trust tier"
+              value={currentlyVerified ? (trust?.tier ? <SupplierTierBadge tier={trust.tier} className="!text-sm !px-3 !py-1.5" /> : "Verified") : "Not verified"}
+              hint={
+                currentlyVerified && trust
+                  ? `${trust.completedOrderCount} completed order${trust.completedOrderCount === 1 ? "" : "s"}${
+                      trust.ratingCount > 0 ? ` · ★ ${trust.ratingAverage?.toFixed(1)} (${trust.ratingCount})` : ""
+                    }`
+                  : undefined
+              }
               icon={currentlyVerified ? <ShieldCheck size={16} /> : <ShieldAlert size={16} />}
             />
           </div>
@@ -573,6 +590,43 @@ export default function SupplierDashboard() {
                   per-order visit. Once it expires you can't receive new orders until you're re-verified.
                 </p>
               </Card>
+
+              {currentlyVerified && trust && (
+                <Card className="p-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">Trust tier</div>
+                      <div className="mt-1.5">
+                        <SupplierTierBadge tier={trust.tier} />
+                      </div>
+                    </div>
+                    <div className="text-right text-xs text-text-secondary">
+                      {trust.completedOrderCount} completed order{trust.completedOrderCount === 1 ? "" : "s"}
+                      {trust.ratingCount > 0 && (
+                        <>
+                          {" "}
+                          · ★ {trust.ratingAverage?.toFixed(1)} ({trust.ratingCount})
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  {/* Thresholds mirror lib/supplierTrust.ts, kept in sync by
+                      hand, same tradeoff app/api/suppliers/route.ts already
+                      makes for its own duplicated verification check. */}
+                  {trust.tier === "verified" && (
+                    <p className="mt-3 text-xs leading-relaxed text-text-secondary">
+                      Reach <strong className="text-text-primary">Verified Pro</strong> with 10+ completed orders and a 4.0+
+                      rating from at least 5 buyers.
+                    </p>
+                  )}
+                  {trust.tier === "verified_pro" && (
+                    <p className="mt-3 text-xs leading-relaxed text-text-secondary">
+                      Reach <strong className="text-text-primary">Elite</strong> with 30+ completed orders and a 4.7+ rating
+                      from at least 15 buyers.
+                    </p>
+                  )}
+                </Card>
+              )}
 
               {!currentlyVerified && (
                 <div>

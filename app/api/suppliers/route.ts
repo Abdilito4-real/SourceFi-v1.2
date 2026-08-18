@@ -13,6 +13,7 @@
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
 import { requireSession } from "../../../lib/authz";
 import { dbErrorResponse } from "../../../lib/dbErrorResponse";
+import { computeSupplierTier, getCompletedOrderCounts, getSupplierRatingAggregates } from "../../../lib/supplierTrust";
 
 export async function GET(request: Request) {
   const auth = await requireSession();
@@ -54,28 +55,30 @@ export async function GET(request: Request) {
   const { data, error } = await query;
   if (error) return dbErrorResponse("GET suppliers", error);
 
-  // Aggregate rating, from CONFIRMED-on-chain ratings only (design doc
-  // Section C.8), a rating submitted but not yet independently
-  // verifiable can't inflate a supplier's public number.
+  // Aggregate rating (CONFIRMED-on-chain only, design doc Section C.8)
+  // and completed-order count, both bulk queries, not N+1.
   const supplierIds = (data || []).map((s) => s.id);
-  const { data: ratingRows } =
-    supplierIds.length > 0
-      ? await supabase.from("ratings").select("supplier_id, score").in("supplier_id", supplierIds).not("on_chain_confirmed_at", "is", null)
-      : { data: [] as { supplier_id: number; score: number }[] };
-
-  const ratingsBySupplier = new Map<number, number[]>();
-  for (const r of ratingRows || []) {
-    const list = ratingsBySupplier.get(r.supplier_id) ?? [];
-    list.push(r.score);
-    ratingsBySupplier.set(r.supplier_id, list);
-  }
+  const [ratingAggregates, completedOrderCounts] = await Promise.all([
+    getSupplierRatingAggregates(supabase, supplierIds),
+    getCompletedOrderCounts(supabase, supplierIds),
+  ]);
 
   const suppliers = (data || []).map((s) => {
-    const scores = ratingsBySupplier.get(s.id) ?? [];
+    const rating = ratingAggregates.get(s.id) ?? { average: null, count: 0 };
+    const completedOrderCount = completedOrderCounts.get(s.id) ?? 0;
     return {
       ...s,
-      rating_average: scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : null,
-      rating_count: scores.length,
+      rating_average: rating.average,
+      rating_count: rating.count,
+      completed_order_count: completedOrderCount,
+      // Every row here already matched the same three verified-and-
+      // current conditions the WHERE clause above enforces.
+      tier: computeSupplierTier({
+        currentlyVerified: true,
+        completedOrderCount,
+        ratingAverage: rating.average,
+        ratingCount: rating.count,
+      }),
     };
   });
 

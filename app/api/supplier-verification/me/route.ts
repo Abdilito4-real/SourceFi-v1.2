@@ -8,6 +8,7 @@
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { requireSession } from "../../../../lib/authz";
 import { isSupplierCurrentlyVerified } from "../../../../lib/supplierVerification";
+import { computeSupplierTier, getCompletedOrderCounts, getSupplierRatingAggregates } from "../../../../lib/supplierTrust";
 
 export async function GET() {
   const auth = await requireSession();
@@ -27,5 +28,24 @@ export async function GET() {
     .limit(1)
     .maybeSingle();
 
-  return Response.json({ profile: profile ?? null, currentlyVerified, latestApplication: latestApplication ?? null });
+  // The same tier a buyer sees on this supplier in the directory, shown
+  // back to the supplier themselves so they can see what buyers see
+  // and what it'd take to reach the next tier.
+  let trust = null;
+  if (profile) {
+    const [ratingAggregates, completedOrderCounts] = await Promise.all([
+      getSupplierRatingAggregates(supabase, [profile.id]),
+      getCompletedOrderCounts(supabase, [profile.id]),
+    ]);
+    const rating = ratingAggregates.get(profile.id) ?? { average: null, count: 0 };
+    const completedOrderCount = completedOrderCounts.get(profile.id) ?? 0;
+    trust = {
+      ratingAverage: rating.average,
+      ratingCount: rating.count,
+      completedOrderCount,
+      tier: computeSupplierTier({ currentlyVerified, completedOrderCount, ratingAverage: rating.average, ratingCount: rating.count }),
+    };
+  }
+
+  return Response.json({ profile: profile ?? null, currentlyVerified, latestApplication: latestApplication ?? null, trust });
 }
