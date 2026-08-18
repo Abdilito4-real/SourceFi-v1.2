@@ -88,8 +88,32 @@ Highlights:
   conditions, replay attacks, XSS/SQLi payloads, all attacking the
   real service functions, not mocks of them.
 
+## Live call hardening
+
+The verification call moved from a free meet.jit.si room to a real,
+authenticated call, and got a second fraud gate independent of call
+length.
+
+- **8x8 JaaS upgrade**: `lib/jaasAuth.ts` signs a per-request JWT once
+  `JAAS_APP_ID`/`JAAS_API_KEY_ID`/`JAAS_PRIVATE_KEY` are set, removing
+  meet.jit.si's "log in to become a moderator" gate on new rooms.
+  Falls back to plain meet.jit.si, unchanged, if those aren't set.
+- **Feels like a real call**: push notifications for an incoming
+  verification call use `requireInteraction`, vibration, and a "Join
+  call" action button, not a plain silent notification. Answering from
+  a notification still requires one explicit in-app "Answer" tap, the
+  camera/mic and the verification timer never start just because the
+  notification was tapped.
+- **Front/back camera swap** on the in-call toolbar (mobile).
+- **Order-code liveness confirmation**: `MIN_VERIFICATION_CALL_SECONDS`
+  of connected time only proves a call of some length happened, not
+  that it was genuinely about this order rather than a loop or
+  pre-recorded video. The buyer now separately confirms the supplier
+  showed the order's own code on camera before `approveOrder` will
+  release funds, see [architecture.md](architecture.md#live-verification-call).
+
 ## Current test coverage
 
-122 tests across 8 files (`npm test`): authorization boundaries, the
+130 tests across 9 files (`npm test`): authorization boundaries, the
 order state machine, the ledger, the full order service lifecycle,
 every termination flow, and the adversarial suite above.

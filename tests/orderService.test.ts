@@ -18,6 +18,8 @@ import {
   resolveDispute,
   submitRating,
   recordVerificationCallProgress,
+  confirmCallCode,
+  CallCodeNotConfirmedError,
   setCallPresence,
   ensureCallRoomId,
   MIN_VERIFICATION_CALL_SECONDS,
@@ -172,8 +174,10 @@ describe("the full happy-path lifecycle: create -> fund -> proof -> approve -> s
 
     // Mandatory live verification call, approveOrder rejects below the
     // threshold (a separate test covers that directly); satisfy it here
-    // so the rest of the happy path can proceed.
+    // so the rest of the happy path can proceed. Also the order-code
+    // liveness confirmation, a second, independent gate.
     await recordVerificationCallProgress(supabase, created.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await confirmCallCode(supabase, created.id, 1);
 
     confirmed = waitForConfirmation();
     const approved = await approveOrder(supabase, provider, created.id, 1);
@@ -426,14 +430,32 @@ describe("mandatory live verification call before approval", () => {
     await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(VerificationCallIncompleteError);
   });
 
-  it("allows approval once the threshold is met", async () => {
+  it("allows approval once the threshold is met and the order code is confirmed", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
     const { provider } = synchronousProvider(supabase);
     const order = await orderAtProofSubmitted(fake);
     await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await confirmCallCode(supabase, order.id, 1);
     const approved = await approveOrder(supabase, provider, order.id, 1);
     expect(approved.status).toBe("release_submitted");
+  });
+
+  it("rejects approval with enough call time but no order-code confirmation, a long call isn't the same claim as a proven one", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider } = synchronousProvider(supabase);
+    const order = await orderAtProofSubmitted(fake);
+    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(CallCodeNotConfirmedError);
+  });
+
+  it("confirmCallCode: only the buyer can confirm, not the supplier or an unrelated user", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+    await expect(confirmCallCode(supabase, order.id, 2)).rejects.toThrow(NotOrderOwnerError);
+    await expect(confirmCallCode(supabase, order.id, 99)).rejects.toThrow(NotOrderOwnerError);
   });
 
   it("accumulates across multiple reported segments (call dropped and rejoined)", async () => {
@@ -449,6 +471,7 @@ describe("mandatory live verification call before approval", () => {
 
     current = await recordVerificationCallProgress(supabase, order.id, 1, 1);
     expect(current.verification_call_seconds).toBe(300);
+    await confirmCallCode(supabase, order.id, 1);
     const approved = await approveOrder(supabase, provider, order.id, 1);
     expect(approved.status).toBe("release_submitted");
   });
@@ -544,6 +567,7 @@ describe("approveOrder: a real payment provider's initiateEscrowRelease can thro
     await confirmed;
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
     await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await confirmCallCode(supabase, order.id, 1);
 
     await expect(approveOrder(supabase, alwaysFailingReleaseProvider(), order.id, 1)).rejects.toThrow(/wallet_address/);
   });
@@ -558,6 +582,7 @@ describe("approveOrder: a real payment provider's initiateEscrowRelease can thro
     await confirmed;
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
     await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await confirmCallCode(supabase, order.id, 1);
 
     await expect(approveOrder(supabase, alwaysFailingReleaseProvider(), order.id, 1)).rejects.toThrow();
 

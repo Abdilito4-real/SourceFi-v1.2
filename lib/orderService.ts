@@ -743,6 +743,42 @@ export class VerificationCallIncompleteError extends Error {
   }
 }
 
+/** Second, independent gate alongside VerificationCallIncompleteError: a
+ * long-enough call and a call that actually proved something are not
+ * the same claim, see confirmCallCode below. */
+export class CallCodeNotConfirmedError extends Error {
+  constructor() {
+    super(
+      "Confirm that your supplier showed the order code on camera during the call before approving this order."
+    );
+    this.name = "CallCodeNotConfirmedError";
+  }
+}
+
+/** Buyer-only attestation that the supplier showed THIS order's own
+ * code on camera during the live call and it matched. Closes the loop-
+ * hole a bare time requirement leaves open, verification_call_seconds
+ * only proves a call of a certain length connected, not that it was
+ * genuinely this order's live call rather than a pre-recorded loop or
+ * a call about different goods. Order-level and one-way, like
+ * verification_call_seconds: once set it stays set across a
+ * withdraw/resubmit cycle, the underlying call already happened. */
+export async function confirmCallCode(supabase: SupabaseClient, orderId: number, buyerUserId: number): Promise<OrderRow> {
+  const order = await fetchOrder(supabase, orderId);
+  if (order.buyer_id !== buyerUserId) throw new NotOrderOwnerError();
+  if (!["funded", "fulfilling", "proof_submitted"].includes(order.status)) {
+    throw new InvalidOrderTransitionError(order.status, "proof_submitted");
+  }
+
+  const { error } = await supabase
+    .from("orders")
+    .update({ call_code_confirmed_at: new Date().toISOString() })
+    .eq("id", orderId);
+  if (error) throw error;
+
+  return fetchOrder(supabase, orderId);
+}
+
 /** Adds one real call segment (join-to-leave, reported by the client
  * from Jitsi's own lifecycle events, never just "the panel was open")
  * to the order's running total. Either party to the order can report a
@@ -879,6 +915,9 @@ export async function approveOrder(
   if (order.status !== "proof_submitted") throw new InvalidOrderTransitionError(order.status, "buyer_approved");
   if ((order.verification_call_seconds ?? 0) < MIN_VERIFICATION_CALL_SECONDS) {
     throw new VerificationCallIncompleteError(order.verification_call_seconds ?? 0);
+  }
+  if (!order.call_code_confirmed_at) {
+    throw new CallCodeNotConfirmedError();
   }
 
   const approved = await tryTransition(supabase, orderId, "proof_submitted", "buyer_approved");
@@ -1853,9 +1892,10 @@ export async function runOrderTimeouts(supabase: SupabaseClient, paymentProvider
   }
 
   // 8c (Decision 8): proof submitted, buyer never responded. Auto-approve
-  // ONLY once the mandatory verification call requirement is already
-  // satisfied, silence is not a reason to also waive a safety-critical
-  // gate. If it isn't satisfied, this falls back to the same
+  // ONLY once BOTH mandatory call gates are already satisfied (enough
+  // call time, AND the buyer confirmed the order code matched on
+  // camera), silence is not a reason to also waive a safety-critical
+  // gate. If either isn't satisfied, this falls back to the same
   // auto-dispute-for-review path as 8b rather than either silently
   // approving past the requirement or leaving the order stuck forever.
   const noResponseCutoff = new Date(Date.now() - PROOF_NO_RESPONSE_TIMEOUT_MS).toISOString();
@@ -1864,7 +1904,7 @@ export async function runOrderTimeouts(supabase: SupabaseClient, paymentProvider
     const order = await fetchOrder(supabase, proof.order_id as number).catch(() => null);
     if (!order || order.status !== "proof_submitted") continue; // already approved/rejected/disputed since
 
-    if ((order.verification_call_seconds ?? 0) >= MIN_VERIFICATION_CALL_SECONDS) {
+    if ((order.verification_call_seconds ?? 0) >= MIN_VERIFICATION_CALL_SECONDS && order.call_code_confirmed_at) {
       const approved = await systemAutoApprove(supabase, paymentProvider, order);
       if (approved) result.autoApproved += 1;
     } else {

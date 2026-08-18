@@ -98,8 +98,22 @@ trail to both parties.
 
 `components/JitsiMeetRoom.tsx` embeds a private room (a server-generated
 UUID, never the guessable order code) so the buyer and supplier can
-verify a delivery together before funds release, mandatory before
-approval (`MIN_VERIFICATION_CALL_SECONDS`, enforced server-side).
+verify a delivery together before funds release. Two independent gates
+must both be satisfied before `approveOrder` will release funds, one
+alone isn't enough:
+
+- **Call length**: `MIN_VERIFICATION_CALL_SECONDS` of real join-to-leave
+  time (Jitsi's own lifecycle events, not just "the panel was open").
+- **Order-code confirmation**: the buyer explicitly confirms the
+  supplier showed the order's own code on camera and it matched
+  (`call_code_confirmed_at`, migration 0013). Call length alone doesn't
+  prove the call was genuinely about this order rather than a looped or
+  pre-recorded video, this closes that gap. See `confirmCallCode` in
+  `lib/orderService.ts`.
+
+Arriving at a call via a push notification's deep link requires an
+explicit in-app "Answer" tap before the camera/mic ever activate, an
+open notification alone never auto-joins.
 
 Runs on meet.jit.si (free, zero setup) by default. `lib/jaasAuth.ts`
 upgrades it to 8x8 JaaS the moment `JAAS_APP_ID` / `JAAS_API_KEY_ID` /

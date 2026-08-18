@@ -9,7 +9,13 @@
 import { getSupabaseServerClient } from "../../../../../lib/supabaseServer";
 import { requireRole } from "../../../../../lib/authz";
 import { getPaymentProvider } from "../../../../../lib/paymentProvider";
-import { approveOrder, NotOrderOwnerError, OrderNotFoundError, VerificationCallIncompleteError } from "../../../../../lib/orderService";
+import {
+  approveOrder,
+  NotOrderOwnerError,
+  OrderNotFoundError,
+  VerificationCallIncompleteError,
+  CallCodeNotConfirmedError,
+} from "../../../../../lib/orderService";
 import { InvalidOrderTransitionError, POST_APPROVAL_STATUSES } from "../../../../../lib/orderStateMachine";
 import { MissingSupplierWalletError, NoUsdcTokenOnEscrowWalletError, InsufficientEscrowBalanceError } from "../../../../../lib/circleEscrowProvider";
 import { logInternalError } from "../../../../../lib/errorReference";
@@ -41,6 +47,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
       return Response.json({ error: err.message }, { status: 409 });
     }
     if (err instanceof VerificationCallIncompleteError) return Response.json({ error: err.message }, { status: 409 });
+    if (err instanceof CallCodeNotConfirmedError) return Response.json({ error: err.message }, { status: 409 });
     if (
       err instanceof MissingSupplierWalletError ||
       err instanceof NoUsdcTokenOnEscrowWalletError ||

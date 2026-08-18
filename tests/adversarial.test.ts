@@ -22,6 +22,7 @@ import {
   reportPostSettlementIssue,
   submitRating,
   recordVerificationCallProgress,
+  confirmCallCode,
   resolveDispute,
   cancelBeforeFunding,
   handlePaymentStatusEvent,
@@ -105,6 +106,7 @@ async function fundedOrderAwaitingApproval(supabase: ReturnType<typeof asSupabas
   await confirmed;
   await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
   await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+  await confirmCallCode(supabase, order.id, 1);
   return { order, provider };
 }
 

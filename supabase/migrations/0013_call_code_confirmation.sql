@@ -1,0 +1,11 @@
+-- 0013_call_code_confirmation.sql
+--
+-- Liveness confirmation for the mandatory verification call.
+-- verification_call_seconds (migration 0007) only proves a call of a
+-- certain length was connected, a looped or pre-recorded video passes
+-- that just as easily as a real one. This adds a second, independent
+-- gate: the buyer must explicitly confirm, during the call, that the
+-- supplier showed the order's own code on camera and it matched. Order-
+-- level, not tied to one proof submission, same as verification_call_
+-- seconds (see lib/orderService.ts's confirmCallCode/approveOrder).
+alter table orders add column if not exists call_code_confirmed_at timestamptz;

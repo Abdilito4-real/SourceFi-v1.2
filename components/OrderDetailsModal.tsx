@@ -324,6 +324,24 @@ export default function OrderDetailsModal({
     }
   };
 
+  // Buyer-only attestation, a real click, so its own local pending flag
+  // rather than the shared `acting` state (same reasoning as
+  // reportCallSegment just above it).
+  const [confirmingCode, setConfirmingCode] = useState(false);
+  const confirmCallCodeMatch = async () => {
+    setConfirmingCode(true);
+    try {
+      const res = await fetch(`/api/orders/${orderId}/call-code-confirm`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to confirm the order code match.");
+      await load();
+    } catch (err) {
+      showNotification("error", err instanceof Error ? err.message : "Failed to confirm the order code match.");
+    } finally {
+      setConfirmingCode(false);
+    }
+  };
+
   // Immediate join/leave presence, best-effort, silent: a failure here
   // just means the other party doesn't get an incoming-call prompt this
   // time, not worth interrupting the call itself over.
@@ -535,6 +553,10 @@ export default function OrderDetailsModal({
   const listingUnit = order.listing_unit ?? null;
   const verificationCallSeconds = order.verification_call_seconds ?? 0;
   const callRequirementMet = verificationCallSeconds >= MIN_VERIFICATION_CALL_SECONDS;
+  // Second, independent gate: a long-enough call isn't the same claim
+  // as a call that actually proved anything, see lib/orderService.ts's
+  // confirmCallCode.
+  const codeConfirmed = Boolean(order.call_code_confirmed_at);
   const inFlightProgress = getInFlightProgress(order.status);
   const needsTypedConfirm = order.amount_minor >= TYPED_CONFIRMATION_THRESHOLD_MINOR;
   const formattedAmount = formatMoney(order.amount_minor, "NGN");
@@ -1055,6 +1077,27 @@ export default function OrderDetailsModal({
                   Setting up your private call room…
                 </div>
               )}
+              {/* Buyer-only liveness check: a long-enough call and a
+                  call that actually proved something aren't the same
+                  claim, see lib/orderService.ts's confirmCallCode. */}
+              {isBuyer && (
+                <div
+                  className={`mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs ${
+                    codeConfirmed ? "border-success bg-success-soft text-success-text" : "border-warning bg-warning-soft text-warning-text"
+                  }`}
+                >
+                  <span>
+                    {codeConfirmed
+                      ? "✓ Order code confirmed on camera."
+                      : `Ask your supplier to show order code ${order.order_code} on camera, then confirm it matched.`}
+                  </span>
+                  {!codeConfirmed && (
+                    <Button size="sm" onClick={confirmCallCodeMatch} disabled={confirmingCode}>
+                      {confirmingCode ? "Confirming…" : "Confirm code match"}
+                    </Button>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1076,6 +1119,15 @@ export default function OrderDetailsModal({
                   {Math.floor(verificationCallSeconds / 60)}:{(verificationCallSeconds % 60).toString().padStart(2, "0")} / 5:00
                 </strong>{" "}
                 so far.
+              </span>
+            </div>
+          )}
+          {callRequirementMet && !codeConfirmed && (
+            <div className="mb-3 flex items-start gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2.5 text-xs text-warning-text">
+              <Video size={14} className="mt-0.5 shrink-0" />
+              <span>
+                Accepting delivery is suspended until you confirm your supplier showed the order code on camera during the call
+                (see the call panel above).
               </span>
             </div>
           )}
@@ -1103,8 +1155,16 @@ export default function OrderDetailsModal({
               <AlertTriangle size={14} /> You&rsquo;re offline. Releasing funds needs a connection. Reconnect and try again.
             </div>
           )}
-          <span title={callRequirementMet ? undefined : "Complete the 5-minute verification call above first."}>
-            <Button fullWidth disabled={!callRequirementMet || !online} onClick={() => setShowApproveConfirm(true)}>
+          <span
+            title={
+              !callRequirementMet
+                ? "Complete the 5-minute verification call above first."
+                : !codeConfirmed
+                  ? "Confirm the order code match in the call panel above first."
+                  : undefined
+            }
+          >
+            <Button fullWidth disabled={!callRequirementMet || !codeConfirmed || !online} onClick={() => setShowApproveConfirm(true)}>
               <CheckCircle2 size={15} /> Accept delivery
             </Button>
           </span>

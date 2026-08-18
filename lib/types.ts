@@ -320,6 +320,13 @@ export interface OrderRow {
    * MIN_VERIFICATION_CALL_SECONDS (lib/orderService.ts), see migration
    * 0007. */
   verification_call_seconds: number;
+  /** Set once the buyer confirms the supplier showed the order's own
+   * code on camera during the call and it matched, migration 0013.
+   * Independent of verification_call_seconds: that proves a call of a
+   * certain length connected, this proves it was actually THIS order's
+   * live call, not a loop/pre-recorded video. Approval is blocked,
+   * server-side, until both are set (lib/orderService.ts). */
+  call_code_confirmed_at: string | null;
   /** The Jitsi room's real, private name, a crypto.randomUUID(), never
    * derived from order_code (which is a guessable 6-digit, user-visible
    * string). Nullable because migration 0008 doesn't backfill existing
