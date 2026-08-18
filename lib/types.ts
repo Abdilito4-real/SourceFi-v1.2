@@ -342,6 +342,14 @@ export interface OrderRow {
    * incoming-call notice instead of requiring them to already be here. */
   buyer_call_active_since: string | null;
   supplier_call_active_since: string | null;
+  /** The USDC split actually used for a real Circle release, persisted
+   * at release-initiation time so a later ledger entry always matches
+   * what was actually sent on-chain, migration 0014. Null unless a real
+   * (non-stub) release happened. See lib/orderService.ts's
+   * resolveUsdcSplitForLedger. */
+  release_usdc_total_minor: number | null;
+  release_usdc_platform_fee_minor: number | null;
+  release_ngn_per_usd: number | null;
   created_at: string;
   buyer_email?: string | null;
   supplier_business_name?: string | null;

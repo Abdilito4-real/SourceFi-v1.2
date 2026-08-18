@@ -20,6 +20,7 @@ import {
   recordVerificationCallProgress,
   confirmCallCode,
   CallCodeNotConfirmedError,
+  computeUsdcSplit,
   setCallPresence,
   ensureCallRoomId,
   MIN_VERIFICATION_CALL_SECONDS,
@@ -589,5 +590,64 @@ describe("approveOrder: a real payment provider's initiateEscrowRelease can thro
     expect(fake.getRows("orders").find((o) => o.id === order.id)!.status).toBe("release_submitted");
     const events = fake.getRows("payment_events").filter((e) => e.order_id === order.id && e.leg === "release");
     expect(events.some((e) => e.event_type === "release_failed")).toBe(true);
+  });
+});
+
+describe("computeUsdcSplit: live NGN/USD rate (lib/fxRate.ts), not a hardcoded constant", () => {
+  it("computes the USDC total from whatever rate fetch() currently returns", async () => {
+    // tests/testUtils/setupFetchStub.ts's default stub returns 1600.
+    const split = await computeUsdcSplit({ amount_minor: 1_600_000, platform_fee_minor: 160_000 });
+    expect(split.ngnPerUsd).toBe(1600);
+    expect(split.totalUsdcMinor).toBe(1_000); // 1,600,000 minor NGN / 1600 = 1,000 minor USDC
+    expect(split.platformFeeUsdcMinor).toBe(100); // same 10% proportion as the NGN fee
+    expect(split.supplierUsdcMinor).toBe(900);
+  });
+
+  it("moves with the rate: a different fetch() response changes the computed split", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ rates: { NGN: 2000 } }), { status: 200 })));
+    const split = await computeUsdcSplit({ amount_minor: 2_000_000, platform_fee_minor: 0 });
+    expect(split.ngnPerUsd).toBe(2000);
+    expect(split.totalUsdcMinor).toBe(1_000);
+  });
+});
+
+describe("a release's USDC split, once persisted, is what gets booked to the ledger, never silently recomputed against a rate that's since moved", () => {
+  it("handleReleaseConfirmed uses the split already on the order row, ignoring a since-changed live rate", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider, waitForConfirmation } = synchronousProvider(supabase);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
+    let confirmed = waitForConfirmation();
+    await fundOrder(supabase, provider, order.id, 1);
+    await confirmed;
+    await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
+    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await confirmCallCode(supabase, order.id, 1);
+
+    // Simulates what lib/circleEscrowProvider.ts persists immediately
+    // after a REAL Circle transaction is accepted, at whatever the rate
+    // was at that exact moment, this is deliberately NOT the rate the
+    // fetch stub will return moments later below. getRows() returns
+    // copies (a test-seeding convenience), a real update through the
+    // fake client is what actually mutates stored state.
+    await supabase
+      .from("orders")
+      .update({ release_usdc_total_minor: 555, release_usdc_platform_fee_minor: 55 })
+      .eq("id", order.id);
+
+    // The rate has since moved. If handleReleaseConfirmed recomputed
+    // instead of reading the persisted split back, the ledger entry
+    // below would reflect THIS rate, not the one actually used on-chain.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ rates: { NGN: 99999 } }), { status: 200 })));
+
+    confirmed = waitForConfirmation();
+    await approveOrder(supabase, provider, order.id, 1);
+    await confirmed;
+
+    const releaseLegs = fake
+      .getRows("ledger_entries")
+      .filter((e) => e.order_id === order.id && (e.account === "SUPPLIER_PAYABLE" || e.account === "PLATFORM_REVENUE"));
+    expect(releaseLegs.find((e) => e.account === "SUPPLIER_PAYABLE")!.amount_minor).toBe(500); // 555 - 55
+    expect(releaseLegs.find((e) => e.account === "PLATFORM_REVENUE")!.amount_minor).toBe(55);
   });
 });

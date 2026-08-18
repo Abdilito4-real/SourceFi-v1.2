@@ -25,6 +25,7 @@ import { assertTransition, InvalidOrderTransitionError } from "./orderStateMachi
 import { isSupplierCurrentlyVerified } from "./supplierVerification";
 import { recordFundingConfirmed, recordEscrowRelease, recordSettlement, recordRefundFromEscrow, recordPartialRefundWithFee } from "./ledger";
 import { ORDER_PLATFORM_FEE_MINOR, MIN_ORDER_AMOUNT_MINOR, CANCELLATION_FEE_MINOR } from "./money";
+import { getNgnPerUsd } from "./fxRate";
 import type { PaymentBoundary, PaymentStatusEvent } from "./paymentBoundary";
 import type { CancellationCategory, DisputeCategory, DisputeRuling, DisputeType, OrderRow, OrderStatus, UserRow } from "./types";
 import { notifyUser, notifyAdmins } from "./notifications/dispatch";
@@ -136,42 +137,63 @@ export function generateOrderCode(): string {
   return `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
 }
 
-/** PLACEHOLDER exchange rate, 1 USDC ~= this many NGN. Does NOT come
- * from Yellow Card or any real rate source (nothing in this codebase has
- * one yet, that's explicitly the payment layer's job, design doc
- * Section 9). Exists only so the ledger has SOME deterministic
- * USDC-equivalent amount to record when a PaymentStatusEvent doesn't
- * supply its own, which the real Yellow Card integration will, once it
- * exists. Every USDC amount derived from this is illustrative, not
- * authoritative. Design doc Open Question 3 (who absorbs FX spread) is
- * unresolved and this constant plays no role in resolving it, it's a
- * stand-in for "a real rate would go here," not a decision about rates. */
-const PLACEHOLDER_NGN_PER_USDC = 1600;
-
-function placeholderUsdcMinorFromNgnMinor(ngnAmountMinor: number): number {
-  // Both amount_minor fields are cents-scale (x100, lib/money.ts's
-  // convention) so the ratio of major units is the same as the ratio of
-  // minor units, a straight division by the placeholder rate.
-  return Math.max(1, Math.round(ngnAmountMinor / PLACEHOLDER_NGN_PER_USDC));
+/** NGN minor amount -> its live USDC-equivalent minor amount (see
+ * computeUsdcSplit below for the split version; this is the plain
+ * conversion, used where only a total is needed, e.g. the funding
+ * leg's illustrative FX_CLEARING bookkeeping). amount_minor fields are
+ * cents-scale (x100, lib/money.ts's convention), so the ratio of major
+ * units is the same as the ratio of minor units, a straight division
+ * by the live rate. */
+export async function usdcMinorFromNgnMinor(ngnAmountMinor: number): Promise<number> {
+  const ngnPerUsd = await getNgnPerUsd();
+  return Math.max(1, Math.round(ngnAmountMinor / ngnPerUsd));
 }
 
 /** Splits a total escrowed USDC amount into (supplier's cut, platform's
- * cut) in the same proportion as the order's NGN amount/fee split, used
- * by both the release and the settlement step so the two stay
- * consistent with each other without persisting a separate USDC amount
- * on the order row. Exported so a real PaymentBoundary implementation
- * (lib/circleEscrowProvider.ts) computes the EXACT same supplier cut
- * this module will independently book to the ledger once release is
- * confirmed, the on-chain transfer amount and the ledger entry must
- * never be allowed to drift apart by using two different formulas. */
-export function computeUsdcSplit(order: Pick<OrderRow, "amount_minor" | "platform_fee_minor">): {
+ * cut) in the same proportion as the order's NGN amount/fee split, from
+ * a LIVE NGN/USD rate (lib/fxRate.ts), not a fixed constant, an on-
+ * chain release moves real money against whatever the rate genuinely is
+ * right now.
+ *
+ * Because the rate can move between calls, this must be called at most
+ * ONCE per order per real release, at release-initiation time
+ * (lib/circleEscrowProvider.ts), with the result persisted onto the
+ * order row (release_usdc_total_minor/release_usdc_platform_fee_minor,
+ * migration 0014) immediately after. Every later step that needs the
+ * SAME split (handleReleaseConfirmed booking the ledger entry for what
+ * was actually sent, handleSettlementConfirmed referencing that same
+ * release) must read the persisted value back, never recompute, or the
+ * ledger entry could silently stop matching the real on-chain transfer
+ * amount. Only a fresh order with no persisted split yet (the stub
+ * provider's simulated path, or a refund with no release to match)
+ * computes live at call time. */
+export async function computeUsdcSplit(order: Pick<OrderRow, "amount_minor" | "platform_fee_minor">): Promise<{
   totalUsdcMinor: number;
   supplierUsdcMinor: number;
   platformFeeUsdcMinor: number;
-} {
-  const totalUsdcMinor = placeholderUsdcMinorFromNgnMinor(order.amount_minor);
+  ngnPerUsd: number;
+}> {
+  const ngnPerUsd = await getNgnPerUsd();
+  const totalUsdcMinor = Math.max(1, Math.round(order.amount_minor / ngnPerUsd));
   const platformFeeUsdcMinor = Math.round((totalUsdcMinor * order.platform_fee_minor) / order.amount_minor);
-  return { totalUsdcMinor, supplierUsdcMinor: totalUsdcMinor - platformFeeUsdcMinor, platformFeeUsdcMinor };
+  return { totalUsdcMinor, supplierUsdcMinor: totalUsdcMinor - platformFeeUsdcMinor, platformFeeUsdcMinor, ngnPerUsd };
+}
+
+/** Prefers the split PERSISTED at release-initiation time (see
+ * computeUsdcSplit's doc comment) so a ledger entry booked after the
+ * fact always matches the amount actually sent on-chain, only falling
+ * back to a fresh live computation when no persisted split exists
+ * (the stub provider's simulated releases, which have no real on-chain
+ * amount to stay consistent with). */
+async function resolveUsdcSplitForLedger(
+  order: Pick<OrderRow, "amount_minor" | "platform_fee_minor" | "release_usdc_total_minor" | "release_usdc_platform_fee_minor">
+): Promise<{ totalUsdcMinor: number; supplierUsdcMinor: number; platformFeeUsdcMinor: number }> {
+  if (order.release_usdc_total_minor != null && order.release_usdc_platform_fee_minor != null) {
+    const totalUsdcMinor = order.release_usdc_total_minor;
+    const platformFeeUsdcMinor = order.release_usdc_platform_fee_minor;
+    return { totalUsdcMinor, supplierUsdcMinor: totalUsdcMinor - platformFeeUsdcMinor, platformFeeUsdcMinor };
+  }
+  return computeUsdcSplit(order);
 }
 
 export class OrderNotFoundError extends Error {
@@ -463,7 +485,7 @@ async function handleFundingConfirmed(supabase: SupabaseClient, event: PaymentSt
   }
 
   const ngnAmountMinor = order.amount_minor;
-  const usdcAmountMinor = event.amountMinor ?? placeholderUsdcMinorFromNgnMinor(ngnAmountMinor);
+  const usdcAmountMinor = event.amountMinor ?? (await usdcMinorFromNgnMinor(ngnAmountMinor));
   await recordFundingConfirmed(supabase, event.orderId, ngnAmountMinor, usdcAmountMinor);
 
   // Design doc Section D.2: orders_since_verification increments on
@@ -539,7 +561,7 @@ async function handleReleaseConfirmed(supabase: SupabaseClient, event: PaymentSt
     if (!moved) return;
   }
 
-  const { supplierUsdcMinor, platformFeeUsdcMinor } = computeUsdcSplit(order);
+  const { supplierUsdcMinor, platformFeeUsdcMinor } = await resolveUsdcSplitForLedger(order);
   await recordEscrowRelease(supabase, event.orderId, order.supplier_id, supplierUsdcMinor, platformFeeUsdcMinor);
 
   // escrow_released -> settlement_processing is a system transition with
@@ -584,7 +606,7 @@ async function handleSettlementConfirmed(supabase: SupabaseClient, event: Paymen
   const moved = await tryTransition(supabase, event.orderId, "settlement_processing", "settled");
   if (!moved) return;
 
-  const { supplierUsdcMinor } = computeUsdcSplit(order);
+  const { supplierUsdcMinor } = await resolveUsdcSplitForLedger(order);
   const supplierNgnPayoutMinor = event.amountMinor ?? order.amount_minor - order.platform_fee_minor;
   await recordSettlement(supabase, event.orderId, order.supplier_id, supplierUsdcMinor, supplierNgnPayoutMinor);
 
@@ -620,7 +642,11 @@ async function handleRefundConfirmed(supabase: SupabaseClient, event: PaymentSta
   const moved = await tryTransition(supabase, event.orderId, "refund_processing", "refunded");
   if (!moved) return;
 
-  const { totalUsdcMinor } = computeUsdcSplit(order);
+  // A refund never has a prior on-chain release to stay consistent
+  // with (refund_processing only reaches here from funded/fulfilling/
+  // rejected/disputed, all pre-release states), a fresh live rate is
+  // correct here, not resolveUsdcSplitForLedger's persisted-value path.
+  const { totalUsdcMinor } = await computeUsdcSplit(order);
 
   // Prompt 3: a refund can now arrive via three different paths, a
   // dispute ruled for the buyer (full refund, no order_cancellations

@@ -58,6 +58,36 @@ are and the stub handles all of them. Check `getPaymentProvider()` in
 7. Verify: fund a test order through to `proof_submitted`, approve it,
    and check the server logs for `Circle release ... ended in state
    ...` or a confirmed txHash rather than the stub's fabricated one.
+   Also sanity-check the amount actually sent against the order's NGN
+   total and today's real NGN/USD rate, see "NGN → USDC exchange
+   rate" below, this is no longer a fixed, easy-to-eyeball constant.
+
+### NGN → USDC exchange rate
+
+The amount actually sent on-chain is computed from a **live** NGN/USD
+rate (`lib/fxRate.ts`), fetched from `open.er-api.com` (free, no API
+key, updates daily). It used to be a hardcoded constant
+(`PLACEHOLDER_NGN_PER_USDC = 1600`); that's gone, every release now
+converts against whatever the real rate is at that moment.
+
+Two things worth understanding before you rely on this:
+
+- **Fails loudly, never guesses.** If the live source is unreachable
+  and there's no cached rate less than 6 hours old, `getNgnPerUsd()`
+  throws `FxRateUnavailableError` rather than falling back to a stale
+  or fabricated number. A release attempt during an outage fails
+  cleanly instead of sending a wrong amount.
+- **The split is locked in at release time, not recomputed later.**
+  The rate can move between when a release is sent and when its
+  confirmation arrives (`handleReleaseConfirmed` /
+  `handleSettlementConfirmed`, which book the ledger entry). The exact
+  split used is persisted onto the order row
+  (`release_usdc_total_minor` / `release_usdc_platform_fee_minor`,
+  migration 0014) the moment Circle accepts the transaction, and every
+  later step reads that back instead of recomputing, so the ledger
+  entry always matches what was actually sent on-chain. See
+  `computeUsdcSplit`'s doc comment in `lib/orderService.ts` if you're
+  touching this logic.
 
 ### Known gaps, even with real credentials wired in
 
@@ -70,6 +100,15 @@ Before this goes anywhere near production money:
   logs an error and stops, it does **not** retry or alert anyone
   automatically. That's a manual reconciliation gap, not solved by
   this codebase today.
+- **No retry action exists for a release that fails after the order
+  already reached `release_submitted`** (see `approveOrder`'s own
+  comment). If you build one, it MUST pass a stable `idempotencyKey`
+  to Circle's `createTransaction` derived from the order, not rely on
+  `tryTransition`'s compare-and-swap alone, that only guards against
+  two *concurrent* calls, not a *later* manual retry. Circle
+  auto-generates a fresh idempotency key per call today, so a naive
+  retry after an ambiguous failure (the transaction may have already
+  gone through on Circle's side) risks paying the supplier twice.
 - The platform fee is never moved on-chain per order, it stays in the
   escrow wallet by design (see `lib/ledger.ts`'s
   `recordEscrowRelease`). Don't "fix" this without updating the ledger

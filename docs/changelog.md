@@ -112,8 +112,23 @@ length.
   showed the order's own code on camera before `approveOrder` will
   release funds, see [architecture.md](architecture.md#live-verification-call).
 
+## Trust and payments hardening
+
+- **Tiered supplier badges**: Verified → Verified Pro → Elite, computed
+  from live verification plus completed-order count and on-chain-
+  confirmed ratings (`lib/supplierTrust.ts`), not just a binary
+  verified/unverified flag. A click-through trust profile
+  (`GET /api/suppliers/[id]`) shows a supplier's tier, rating, and
+  completed-order count before a buyer orders from them.
+- **Live NGN → USDC exchange rate**: `lib/fxRate.ts` replaces the old
+  hardcoded `PLACEHOLDER_NGN_PER_USDC = 1600` constant with a real,
+  live rate, fetched at release time and persisted onto the order row
+  so a later ledger entry always matches what was actually sent
+  on-chain, even if the rate moves in between. See
+  [payment-integration.md](payment-integration.md#ngn--usdc-exchange-rate).
+
 ## Current test coverage
 
-130 tests across 9 files (`npm test`): authorization boundaries, the
+147 tests across 11 files (`npm test`): authorization boundaries, the
 order state machine, the ledger, the full order service lifecycle,
 every termination flow, and the adversarial suite above.

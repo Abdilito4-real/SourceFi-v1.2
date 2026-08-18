@@ -18,5 +18,8 @@ export default defineConfig({
   test: {
     environment: "node", // server-side route/authz logic only, no DOM needed
     include: ["tests/**/*.test.ts"],
+    // lib/fxRate.ts calls the real live-rate API via fetch, tests must
+    // never depend on a real network call, see the stub's own comment.
+    setupFiles: ["tests/testUtils/setupFetchStub.ts"],
   },
 });

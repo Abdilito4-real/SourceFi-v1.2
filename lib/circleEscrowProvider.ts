@@ -134,7 +134,13 @@ export class CircleEscrowProvider implements PaymentBoundary {
     if (supplierError) throw supplierError;
     if (!supplier?.wallet_address) throw new MissingSupplierWalletError(order.supplier_id);
 
-    const { supplierUsdcMinor } = computeUsdcSplit(order);
+    // Live NGN/USD rate (lib/fxRate.ts), resolved ONCE here and
+    // persisted below immediately after Circle actually accepts the
+    // transaction, every later step that books this release to the
+    // ledger reads that persisted value back rather than recomputing
+    // against a rate that's since moved, see computeUsdcSplit's doc
+    // comment in lib/orderService.ts.
+    const { totalUsdcMinor, supplierUsdcMinor, platformFeeUsdcMinor, ngnPerUsd } = await computeUsdcSplit(order);
     // Minor units here are cents-scale (see lib/money.ts), not native
     // 6-decimal micro-USDC. Circle wants a major-unit decimal string.
     const amountMajor = (supplierUsdcMinor / 100).toFixed(2);
@@ -146,8 +152,19 @@ export class CircleEscrowProvider implements PaymentBoundary {
       throw new InsufficientEscrowBalanceError(amountMajor, usdcBalance.amount);
     }
 
-    // idempotencyKey omitted, Circle auto-generates one. The real guard
-    // against a double call is tryTransition()'s compare-and-swap.
+    // idempotencyKey omitted, Circle auto-generates a fresh one PER
+    // CALL, it does NOT deduplicate repeated calls the way a stable key
+    // would. tryTransition()'s compare-and-swap is the real guard
+    // against a double call TODAY, but only because nothing in this
+    // codebase currently retries a failed release (see approveOrder's
+    // own comment: a release that fails after the order reaches
+    // release_submitted has no automated retry, it needs a future
+    // admin action). Whoever builds that retry action MUST pass a
+    // stable idempotencyKey derived from the order (Circle's dashboard
+    // documents the format), or a retry that runs after Circle already
+    // silently accepted the original request risks sending the
+    // supplier's cut TWICE. Flagged here on purpose, not solved, same
+    // posture as the poll-vs-webhook gap in this class's own header.
     const response = await this.client.createTransaction({
       walletId: this.config.escrowWalletId,
       destinationAddress: supplier.wallet_address,
@@ -159,6 +176,28 @@ export class CircleEscrowProvider implements PaymentBoundary {
 
     const releaseReference = response.data?.id;
     if (!releaseReference) throw new Error(`Circle createTransaction for order ${orderId} returned no transaction id.`);
+
+    // Persisted immediately after Circle accepted the transaction, i.e.
+    // this IS what was actually sent, not what was merely computed.
+    // handleReleaseConfirmed/handleSettlementConfirmed (lib/orderService.ts)
+    // read this back rather than recomputing against a rate that may
+    // have since moved, see computeUsdcSplit's doc comment there.
+    const { error: persistError } = await this.supabase
+      .from("orders")
+      .update({
+        release_usdc_total_minor: totalUsdcMinor,
+        release_usdc_platform_fee_minor: platformFeeUsdcMinor,
+        release_ngn_per_usd: ngnPerUsd,
+      })
+      .eq("id", orderId);
+    if (persistError) {
+      // The on-chain transfer already happened, that's real regardless.
+      // Losing this write only means the LATER ledger entry falls back
+      // to recomputing at a possibly-different rate (resolveUsdcSplitForLedger's
+      // fallback), a reconciliation nuisance, not a lost transfer, so
+      // this is logged loudly rather than thrown.
+      console.error(`Failed to persist the USDC split for order ${orderId} after a successful release:`, persistError);
+    }
 
     void this.pollUntilConfirmed(orderId, releaseReference);
     return { releaseReference, status: "processing" };
