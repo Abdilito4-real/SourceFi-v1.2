@@ -84,7 +84,7 @@ export default function OnboardingCarousel({ onComplete }: { onComplete: () => v
       <button
         type="button"
         onClick={onComplete}
-        className="absolute right-4 top-4 z-10 flex items-center gap-1.5 rounded-full bg-surface/80 px-3 py-1.5 text-xs font-semibold text-text-secondary backdrop-blur hover:text-text-primary sm:right-6 sm:top-6"
+        className="absolute right-4 top-4 z-20 flex items-center gap-1.5 rounded-full bg-surface/80 px-3 py-1.5 text-xs font-semibold text-text-secondary backdrop-blur hover:text-text-primary sm:right-6 sm:top-6"
       >
         Skip <X size={13} />
       </button>

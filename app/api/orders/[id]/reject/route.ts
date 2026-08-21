@@ -29,7 +29,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   // Prompt 4, M1, dispute filing rate-limited per IP AND per account (8
   // per 10 minutes each): every call here can be individually "valid," so
   // this caps volume rather than failures.
-  const quota = checkDualQuota("dispute-file", getClientIp(request), auth.user.email, 8, 10 * 60 * 1000);
+  const quota = await checkDualQuota("dispute-file", getClientIp(request), auth.user.email, 8, 10 * 60 * 1000);
   if (!quota.allowed) {
     return Response.json({ error: "Too many reports filed recently. Try again shortly." }, { status: 429, headers: { "Retry-After": String(quota.retryAfterSeconds ?? 60) } });
   }

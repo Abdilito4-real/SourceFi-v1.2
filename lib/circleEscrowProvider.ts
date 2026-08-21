@@ -20,18 +20,16 @@
 // purpose, better a clear thrown error than an ambiguous on-chain
 // failure.
 //
-// IMPORTANT, confirmation is polled in-process (setInterval), same
-// documented limitation lib/paymentBoundary.ts's StubPaymentProvider and
-// lib/paymentProvider.ts already carry: this only works because this is
-// a long-running `next start` Node process holding state in memory. If
-// the process restarts mid-poll, that specific release's confirmation
-// event is lost (the on-chain transfer itself is NOT lost, Circle still
-// completes it, only this app's follow-up ledger write is delayed until
-// someone/something calls handlePaymentStatusEvent for it another way).
-// A production version needs a Circle webhook subscription
-// (client.createSubscription) or a durable poll job, not this. Flagged,
-// not solved, same posture the rest of this codebase's payment layer
-// takes toward what's genuinely out of scope for this stage.
+// UPDATED, webhook + reconciliation now exist: the in-process poll
+// below (pollUntilConfirmed) is a fast best-effort first path only, not
+// the sole source of truth anymore. app/api/webhooks/circle/route.ts
+// (Circle's real notification, signature-verified) and
+// app/api/cron/reconcile-releases/route.ts (a durable, DB-driven sweep
+// for anything stuck at release_submitted/release_processing) both call
+// checkAndReportReleaseStatus below independently, so a process restart
+// mid-poll now costs a delay until the next webhook/sweep, not a
+// silently lost confirmation. See docs/payment-integration.md for the
+// full picture, including the Vercel cron-frequency caveat.
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { initiateDeveloperControlledWalletsClient } from "@circle-fin/developer-controlled-wallets";
@@ -45,6 +43,9 @@ import {
   type RatingSubmissionResult,
 } from "./paymentBoundary";
 import { computeUsdcSplit } from "./orderService";
+import { uuidv5, SOURCEFI_UUID_NAMESPACE } from "./uuidv5";
+import { resolveCircleTransactionOutcome, type CircleTransactionOutcome } from "./circleTransactionOutcome";
+import { verifyCircleNotificationSignature } from "./circleWebhook";
 
 export interface CircleEscrowConfig {
   apiKey: string;
@@ -75,6 +76,17 @@ export class InsufficientEscrowBalanceError extends Error {
 
 const POLL_INTERVAL_MS = 5000;
 const MAX_POLL_ATTEMPTS = 60; // ~5 minutes
+// How long a fetched webhook-signing public key is trusted before
+// re-fetching. Public keys are not secret and rotate rarely; this is an
+// efficiency cache (fewer Circle API calls per webhook), not a
+// correctness boundary, worst case is one extra fetch after a restart.
+const NOTIFICATION_KEY_TTL_MS = 60 * 60 * 1000;
+
+interface CachedNotificationKey {
+  publicKey: string;
+  algorithm: string;
+  fetchedAt: number;
+}
 
 export class CircleEscrowProvider implements PaymentBoundary {
   private readonly client: ReturnType<typeof initiateDeveloperControlledWalletsClient>;
@@ -84,6 +96,7 @@ export class CircleEscrowProvider implements PaymentBoundary {
   // Funding/refund are Yellow Card's job, not Circle's. Delegate those
   // (and on-chain rating, still stubbed) to the same simulated provider.
   private readonly delegate: StubPaymentProvider;
+  private readonly notificationKeyCache = new Map<string, CachedNotificationKey>();
 
   constructor(
     supabase: SupabaseClient,
@@ -152,19 +165,17 @@ export class CircleEscrowProvider implements PaymentBoundary {
       throw new InsufficientEscrowBalanceError(amountMajor, usdcBalance.amount);
     }
 
-    // idempotencyKey omitted, Circle auto-generates a fresh one PER
-    // CALL, it does NOT deduplicate repeated calls the way a stable key
-    // would. tryTransition()'s compare-and-swap is the real guard
-    // against a double call TODAY, but only because nothing in this
-    // codebase currently retries a failed release (see approveOrder's
-    // own comment: a release that fails after the order reaches
-    // release_submitted has no automated retry, it needs a future
-    // admin action). Whoever builds that retry action MUST pass a
-    // stable idempotencyKey derived from the order (Circle's dashboard
-    // documents the format), or a retry that runs after Circle already
-    // silently accepted the original request risks sending the
-    // supplier's cut TWICE. Flagged here on purpose, not solved, same
-    // posture as the poll-vs-webhook gap in this class's own header.
+    // idempotencyKey: deterministic (lib/uuidv5.ts), derived from the
+    // order id alone, so the ORIGINAL attempt and any later retry
+    // (app/api/admin/orders/[id]/retry-release) send the exact same key.
+    // Circle's own docs describe idempotencyKey as making "multiple
+    // identical requests have the same effect as a single request" — a
+    // resend with this key returns the original transaction rather than
+    // creating a second on-chain transfer. This is the fix for the gap
+    // this comment used to describe: a naive retry risking paying the
+    // supplier twice. tryTransition()'s compare-and-swap remains a
+    // second, independent guard at the state-machine level; this is the
+    // provider-level one docs/payment-integration.md said was missing.
     const response = await this.client.createTransaction({
       walletId: this.config.escrowWalletId,
       destinationAddress: supplier.wallet_address,
@@ -172,6 +183,7 @@ export class CircleEscrowProvider implements PaymentBoundary {
       amount: [amountMajor],
       fee: { type: "level", config: { feeLevel: "MEDIUM" } },
       refId: `order-${orderId}-release`,
+      idempotencyKey: uuidv5(`release:${orderId}`, SOURCEFI_UUID_NAMESPACE),
     });
 
     const releaseReference = response.data?.id;
@@ -203,37 +215,133 @@ export class CircleEscrowProvider implements PaymentBoundary {
     return { releaseReference, status: "processing" };
   }
 
-  /** No webhook endpoint yet, so poll instead. Stops and logs loudly on
-   * a terminal failure state or once MAX_POLL_ATTEMPTS is exceeded. */
+  /** A fast, best-effort first path, NOT the only path anymore: the
+   * webhook (app/api/webhooks/circle/route.ts) and the reconciliation
+   * cron (app/api/cron/reconcile-releases/route.ts, via
+   * checkAndReportReleaseStatus below) both independently re-check the
+   * same transaction and feed it through the same
+   * resolveCircleTransactionOutcome + onStatusUpdate path, so a process
+   * restart mid-poll now costs a delay until the next webhook/sweep, not
+   * a silently lost confirmation. */
   private async pollUntilConfirmed(orderId: number, transactionId: string): Promise<void> {
     for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
       try {
-        const { data } = await this.client.getTransaction({ id: transactionId });
-        const txn = data?.transaction;
-        if (!txn) continue;
-
-        if (txn.state === "COMPLETE" || txn.state === "CONFIRMED") {
-          await this.onStatusUpdate({
-            orderId,
-            leg: "release",
-            provider: "circle",
-            providerReference: transactionId,
-            providerState: txn.state,
-            txHash: txn.txHash ?? undefined,
-          });
-          return;
-        }
-        if (txn.state === "FAILED" || txn.state === "CANCELLED" || txn.state === "DENIED") {
-          console.error(`Circle release ${transactionId} for order ${orderId} ended in state ${txn.state}. Needs manual reconciliation.`);
-          return;
-        }
-        // Any other state (QUEUED, SENT, PENDING_RISK_SCREENING...)
-        // keep polling.
+        const reported = await this.checkAndReportReleaseStatus(orderId, transactionId);
+        if (reported) return;
       } catch (err) {
         console.error(`Polling Circle transaction ${transactionId} for order ${orderId} failed:`, err);
       }
     }
-    console.error(`Circle release ${transactionId} for order ${orderId} never settled after ${MAX_POLL_ATTEMPTS} polls. Needs manual reconciliation.`);
+    console.error(`Circle release ${transactionId} for order ${orderId} never settled after ${MAX_POLL_ATTEMPTS} polls in-process. The reconciliation cron will keep checking.`);
+  }
+
+  /** Fetches the CURRENT, authoritative state of one release transaction
+   * from Circle (a real API call) and reports it if terminal. Used by
+   * pollUntilConfirmed, the reconciliation cron, and by the webhook
+   * handler ONLY as a fallback when a notification body doesn't carry
+   * a usable state (see reportWebhookNotification below, the normal
+   * webhook path, which doesn't need this extra round trip). Returns
+   * true once reported (confirmed or failed), false if still pending. */
+  async checkAndReportReleaseStatus(orderId: number, transactionId: string): Promise<boolean> {
+    const { data } = await this.client.getTransaction({ id: transactionId });
+    const txn = data?.transaction;
+    if (!txn) return false;
+    return this.reportOutcome(orderId, transactionId, resolveCircleTransactionOutcome(txn));
+  }
+
+  /** The webhook's normal path (app/api/webhooks/circle/route.ts):
+   * reports directly from the notification body Circle already sent,
+   * no extra client.getTransaction() call. Safe to trust the body's
+   * state/txHash/errorReason here, now that the payload shape is
+   * confirmed against Circle's own docs (matches the REST Transaction
+   * object exactly) — the signature already proves it's genuinely from
+   * Circle, and downstream processing (handleReleaseConfirmed's
+   * order.status guard) is already idempotent against a stale/
+   * out-of-order delivery regardless of whether the state came from
+   * the body or from a fresh re-fetch, so re-fetching bought no extra
+   * safety, just an extra round trip. Falls back to
+   * checkAndReportReleaseStatus (a real re-fetch) only if the body is
+   * missing a usable `state`, e.g. an unrecognized notification shape. */
+  async reportWebhookNotification(orderId: number, transactionId: string, notification: unknown): Promise<boolean> {
+    const state = typeof notification === "object" && notification !== null ? (notification as Record<string, unknown>).state : undefined;
+    if (typeof state !== "string") {
+      return this.checkAndReportReleaseStatus(orderId, transactionId);
+    }
+    const obj = notification as Record<string, unknown>;
+    const outcome = resolveCircleTransactionOutcome({
+      state,
+      txHash: typeof obj.txHash === "string" ? obj.txHash : undefined,
+      errorReason: typeof obj.errorReason === "string" ? obj.errorReason : undefined,
+    });
+    return this.reportOutcome(orderId, transactionId, outcome);
+  }
+
+  private async reportOutcome(orderId: number, transactionId: string, outcome: CircleTransactionOutcome): Promise<boolean> {
+    if (outcome.kind === "confirmed") {
+      await this.onStatusUpdate({
+        orderId,
+        leg: "release",
+        provider: "circle",
+        providerReference: transactionId,
+        providerState: outcome.state,
+        txHash: outcome.txHash,
+      });
+      return true;
+    }
+    if (outcome.kind === "failed") {
+      console.error(
+        `Circle release ${transactionId} for order ${orderId} ended in state ${outcome.state}` +
+          (outcome.errorReason ? ` (${outcome.errorReason})` : "") +
+          `. Needs manual reconciliation (see app/api/admin/orders/[id]/retry-release).`
+      );
+      return true;
+    }
+    return false; // still pending (QUEUED, SENT, ...), check again later
+  }
+
+  /** Verifies a real Circle webhook notification. `keyId` is the
+   * `X-Circle-Key-Id` header value, `signatureBase64` the
+   * `X-Circle-Signature` header value, `rawBody` the exact request body
+   * text (not re-serialized JSON). See lib/circleWebhook.ts for the
+   * actual crypto; this method only owns fetching/caching the signing
+   * public key via client.getNotificationSignature(), which needs
+   * this.client (constructed with real Circle credentials). */
+  async verifyWebhookSignature(rawBody: string, keyId: string, signatureBase64: string): Promise<boolean> {
+    const cached = this.notificationKeyCache.get(keyId);
+    const keyInfo = cached && Date.now() - cached.fetchedAt < NOTIFICATION_KEY_TTL_MS ? cached : await this.fetchNotificationKey(keyId);
+    return verifyCircleNotificationSignature(rawBody, signatureBase64, keyInfo.publicKey, keyInfo.algorithm);
+  }
+
+  private async fetchNotificationKey(keyId: string): Promise<CachedNotificationKey> {
+    // The SDK's parameter is misleadingly named `subscriptionId`, Circle's
+    // own JSDoc for this method (verified against the installed package)
+    // says to pass the `X-Circle-Key-Id` header value here, not this
+    // app's subscription id.
+    const response = await this.client.getNotificationSignature(keyId);
+    const publicKey = response.data?.publicKey;
+    const algorithm = response.data?.algorithm;
+    if (!publicKey || !algorithm) throw new Error(`Circle returned no signing key for notification key id ${keyId}.`);
+    const keyInfo: CachedNotificationKey = { publicKey, algorithm, fetchedAt: Date.now() };
+    this.notificationKeyCache.set(keyId, keyInfo);
+    return keyInfo;
+  }
+
+  /** Idempotent webhook registration: an admin action
+   * (app/api/admin/circle-webhook/register/route.ts), not something run
+   * automatically on server boot, a real deployed HTTPS URL has to exist
+   * first. Safe to call more than once: checks listSubscriptions() for
+   * an existing subscription pointed at the same endpoint before
+   * creating a new one, so re-running this after a redeploy doesn't
+   * accumulate duplicate subscriptions. */
+  async registerWebhook(endpointUrl: string): Promise<{ created: boolean; subscriptionId: string; endpoint: string }> {
+    const existing = await this.client.listSubscriptions();
+    const match = existing.data?.find((sub) => sub.endpoint === endpointUrl);
+    if (match) return { created: false, subscriptionId: match.id, endpoint: match.endpoint };
+
+    const response = await this.client.createSubscription({ endpoint: endpointUrl });
+    const created = response.data;
+    if (!created) throw new Error("Circle createSubscription returned no subscription data.");
+    return { created: true, subscriptionId: created.id, endpoint: created.endpoint };
   }
 }

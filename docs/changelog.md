@@ -127,8 +127,162 @@ length.
   on-chain, even if the rate moves in between. See
   [payment-integration.md](payment-integration.md#ngn--usdc-exchange-rate).
 
+## Production hardening: idempotency, webhook, rate limiting, Yellow Card scaffold
+
+Closed the three gaps flagged in payment-integration.md's "Known gaps"
+section, then scaffolded (not faked) the funding/refund leg.
+
+- **Idempotency-safe retry**: `lib/uuidv5.ts` gives every escrow release
+  a deterministic Circle `idempotencyKey`, same key on the original
+  attempt and any retry, so a resend can't become a second on-chain
+  transfer. New admin action, `POST /api/admin/orders/[id]/retry-release`
+  (rate-limited, audit-logged, a "Retry" button in the admin Orders
+  view for anything stuck at `release_submitted`). `lib/ledger.ts`'s
+  `recordEscrowRelease` now refuses to book a second `SUPPLIER_PAYABLE`
+  debit for the same order, defense in depth alongside the existing
+  state-machine CAS. Found and fixed a real bug in the process: migration
+  0014's "idempotency backstop" index guarded an `event_type` no code
+  path ever wrote, it had never once fired (migration 0015).
+- **Real webhook + durable reconciliation**: `app/api/webhooks/circle/route.ts`
+  verifies Circle's actual signed notifications
+  (`X-Circle-Signature`/`X-Circle-Key-Id`, verified against the SDK's
+  own documented mechanism), registered via the idempotent
+  `POST /api/admin/circle-webhook/register`. `middleware.ts`'s CSRF
+  check now exempts this one server-to-server path, gated by its own
+  signature instead. The actual fix for "a process restart loses an
+  in-flight confirmation": `app/api/cron/reconcile-releases/route.ts`
+  (`lib/releaseReconciliation.ts`), a DB-driven sweep for anything stuck
+  at `release_submitted`/`release_processing`, independent of any one
+  process's memory. `pollUntilConfirmed` stays as a fast first path, no
+  longer the only one.
+- **Rate limiting, Supabase-backed**: migration 0016 replaces the
+  in-memory `Map` (reset on every serverless cold start) with atomic
+  Postgres functions (`rl_check_rate_limit`/`rl_record_failure`/
+  `rl_record_success`/`rl_check_quota`), same exported function names in
+  `lib/rateLimit.ts` so no call site's logic changed, just `await`
+  added at all 9 of them. Old buckets swept daily via the existing
+  `order-timeouts` cron.
+- **Yellow Card, honestly scaffolded**: `lib/yellowCardProvider.ts` is a
+  real class, really wired into `lib/paymentProvider.ts` (now a
+  composite that resolves each of the 4 payment legs independently,
+  needed the moment two real providers can coexist), but
+  `initiateOrderFunding`/`initiateRefund` throw
+  `YellowCardNotConfiguredError` rather than fabricate a real API call
+  — no Yellow Card docs or credentials exist in this project, and
+  guessing at a real payment API's request shapes is exactly what
+  CLAUDE.md's escrow/payouts rule says to stop and flag instead of
+  doing.
+
+162 tests pass (13 files), `tsc --noEmit` clean, full production build
+clean.
+
+## Real RLS pilot: orders + supplier_profiles
+
+Closed the gap `docs/security.md` used to flag as fully open: "there is
+no database-level backstop behind [the API route layer]." Turned out
+that gap was bigger than "add some policies" — this app has never
+authenticated to Supabase as anything but `service_role`, which always
+bypasses RLS regardless of what policies exist, and no identity bridge
+(Supabase's `auth.uid()`, `auth.users`) existed anywhere in the schema.
+
+- **`lib/supabaseUserClient.ts`**: mints a short-lived, Supabase-
+  compatible JWT per request (same `jose`/HS256 technique as
+  `lib/session.ts`'s own session signing, different secret) carrying a
+  custom `user_row_id` claim — deliberately not `auth.uid()`/`sub`,
+  which casts to `uuid` and would error on this app's `bigint`
+  identity. Returns a request-scoped client running as the
+  `authenticated` Postgres role, not `service_role`, so RLS policies
+  actually apply. Falls back to the existing service-role client (with
+  a console warning) if `SUPABASE_JWT_SECRET`/`SUPABASE_ANON_KEY` aren't
+  set, so this degrades gracefully rather than taking order reads down.
+- **Migration `0017_orders_rls_pilot.sql`**: the first real RLS
+  policies in the project. `orders_select_own` mirrors the existing
+  app-layer buyer/supplier filter exactly (admin stays on service-role,
+  unchanged — its "no filter, full oversight" was already intentional).
+  A required companion `supplier_profiles_select_own` (self-only) —
+  the orders policy's own subquery resolving a supplier's
+  `supplier_profiles.id` would otherwise run under the same
+  `authenticated` role and hit that table's own until-now-unreachable
+  RLS-enabled-zero-policies, silently returning nothing. Also enabled
+  RLS on `rate_limit_buckets`/`quota_buckets` (migration 0016 shipped
+  them without it, unlike every other table).
+- Piloted on 4 GET routes under `app/api/orders/**` — only the specific
+  ownership-determining `orders` query switches clients; every other
+  query in those same routes (users, payment_events, disputes, ...)
+  deliberately keeps using service-role, since only `orders` and
+  `supplier_profiles` have policies so far. Existing app-layer ownership
+  checks stay, deliberately redundant, same "two independent layers"
+  posture as the ledger's `assertBalanced` + its DB trigger.
+- One real, intentional behavior change: a cross-tenant order id used
+  to return an explicit 403 ("You are not the buyer for this order");
+  once RLS filters the row at the query level, it's a plain 404 instead
+  — the row is genuinely invisible, not just rejected.
+- **Honest scope**: piloted on the highest-stakes table only, not all
+  ~30. The other tables' RLS-enabled-zero-policies remains a default-
+  deny backstop against key misuse, not an active layer, until the same
+  pattern is extended to them — now a bounded, proven-pattern follow-up,
+  not an open architecture question.
+- Can't be verified by the automated suite (`FakeSupabase` doesn't run
+  real Postgres); added `tests/supabaseUserClient.test.ts` covering the
+  one part that IS unit-testable and security-critical — the JWT claim
+  shape itself (`role`, `user_row_id`, a deterministic `sub`, short
+  TTL) — but proving the second layer is genuinely load-bearing needs a
+  manual test against the real database.
+
+## Real Yellow Card integration: buyer KYC, funding, refund
+
+Closed the last simulated leg. `lib/yellowCardProvider.ts` now calls
+Yellow Card's actual Business API (`docs.yellowcard.engineering`,
+fetched and confirmed directly, not guessed — same rigor as Circle's
+webhook payload confirmation), restricted to bank-transfer funding only
+(a deliberate decision: refunds are only documented to work for
+Nigeria bank-transfer receives, and every order must stay refundable).
+
+- **Buyer KYC, the new prerequisite**: migration `0018_buyer_kyc.sql`
+  (`buyer_kyc_profiles`, self-only RLS policy extending the pilot from
+  before), `POST/GET /api/buyer-kyc[/me]`, and `components/BuyerKycModal.tsx`
+  — shown reactively the first time `fundOrder` fails with the new
+  `BuyerKycRequiredError`, not on load. Yellow Card's `recipient` object
+  needs full name/phone/DOB/government ID/address, none of which
+  `users` stored before this.
+- **Real request signing**: `lib/yellowCardAuth.ts`, HMAC-SHA256 per
+  their documented scheme (`X-YC-Timestamp` + `Authorization: YcHmacV1
+  {apiKey}:{signature}`, message = datetime+path+METHOD+body-hash) —
+  confirmed against their docs' own worked example, no new dependency
+  (Node's `crypto`).
+- **Funding** (`POST /business/receive`) returns a `bankInfo` object
+  the buyer has to actually pay into — `FundingResult` gained an
+  optional `paymentInstructions` field for this, surfaced in
+  `OrderDetailsModal.tsx`'s in-flight panel.
+- **Refund is full-amount only**, no partial-refund parameter is
+  documented on Yellow Card's side. `initiateRefund` refuses
+  (`YellowCardPartialRefundUnsupportedError`) rather than guess when a
+  fee-retention cancellation asks for a partial amount — flagged for
+  follow-up with Yellow Card support, not silently worked around.
+- **Webhook**: `app/api/webhooks/yellowcard/route.ts`, same shape as
+  Circle's — verifies `X-YC-Signature`, re-fetches the authoritative
+  state (`Lookup Receive`) rather than trusting the lightweight status
+  ping the body carries. `POST /api/admin/yellowcard-webhook/register`
+  mirrors Circle's idempotent registration route.
+- **Idempotency**: same `lib/uuidv5.ts` deterministic-key pattern as
+  Circle, via Yellow Card's own `sequenceId` field.
+- Same production-readiness caveats stated plainly as everywhere else
+  in this project: static-IP whitelisting is a real infra requirement
+  for production Yellow Card credentials (not sandbox), and several
+  nested field names (`recipient`'s exact shape, `bankInfo`, the
+  refund webhook's exact event name) are inferred from documented
+  prose rather than a fully expanded schema — flagged in
+  `docs/payment-integration.md` for confirmation against a real sandbox
+  call before the first live funding attempt.
+
+16 new tests (`lib/yellowCardAuth.ts`'s signing scheme, the KYC/partial-
+refund/idempotency guards), 194 total, `tsc --noEmit` clean, full
+production build clean.
+
 ## Current test coverage
 
-147 tests across 11 files (`npm test`): authorization boundaries, the
+194 tests across 16 files (`npm test`): authorization boundaries, the
 order state machine, the ledger, the full order service lifecycle,
-every termination flow, and the adversarial suite above.
+every termination flow, the adversarial suite, Supabase-backed rate
+limiting, the real Circle and Yellow Card integrations (webhook/
+idempotency logic for both), and the RLS pilot's JWT minting.

@@ -52,24 +52,44 @@ function isTrustedOrigin(request: NextRequest): boolean {
   return false;
 }
 
+// Server-to-server webhook POSTs (Part 2 of the production-hardening
+// pass, app/api/webhooks/circle/route.ts) have no browser Origin/Referer
+// by nature, they're not a browser request at all, and the CSRF check
+// below would wrongly block every real Circle notification. Excluded
+// here, exactly as this file's own prior note anticipated, gated
+// instead by that route's own signature verification
+// (verifyWebhookSignature, X-Circle-Signature/X-Circle-Key-Id), a
+// stronger authentication than Origin-checking could ever provide for a
+// non-browser caller. The cron route (app/api/cron/*) needs no such
+// exclusion, it's GET-only, outside UNSAFE_METHODS entirely.
+const CSRF_EXEMPT_PATHS = new Set(["/api/webhooks/circle", "/api/webhooks/yellowcard"]);
+
 export function middleware(request: NextRequest) {
-  // The cron route (app/api/cron/order-timeouts) is GET-only and its own
-  // CRON_SECRET Bearer check is the real gate, so it's unaffected here
-  // regardless. NOTE for whoever adds a real payment-provider webhook
-  // route later (Yellow Card/Circle, none exists yet, see
-  // lib/paymentProvider.ts): a genuine server-to-server webhook POST has
-  // no browser Origin/Referer and would be wrongly blocked by this check
-  // exclude that specific path here, gated by its own signature
-  // verification instead, the way a webhook should be authenticated.
-  if (request.nextUrl.pathname.startsWith("/api/") && UNSAFE_METHODS.has(request.method) && !isTrustedOrigin(request)) {
+  if (
+    request.nextUrl.pathname.startsWith("/api/") &&
+    !CSRF_EXEMPT_PATHS.has(request.nextUrl.pathname) &&
+    UNSAFE_METHODS.has(request.method) &&
+    !isTrustedOrigin(request)
+  ) {
     return NextResponse.json({ error: "Cross-site request blocked." }, { status: 403 });
   }
 
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
 
+  // Next.js dev-mode Fast Refresh (react-refresh-utils/runtime.js) applies
+  // hot-reloaded modules via eval(), which a strict script-src blocks,
+  // breaking HMR (page loads, edits silently stop showing up until a hard
+  // refresh). 'unsafe-eval' is added ONLY outside production so this never
+  // weakens the CSP real users get; the production build doesn't use
+  // eval-based HMR at all, so nothing here needs it.
+  const scriptSrc =
+    process.env.NODE_ENV === "production"
+      ? `script-src 'self' 'nonce-${nonce}' https://challenges.cloudflare.com https://meet.jit.si https://8x8.vc`
+      : `script-src 'self' 'unsafe-eval' 'nonce-${nonce}' https://challenges.cloudflare.com https://meet.jit.si https://8x8.vc`;
+
   const csp = [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' https://challenges.cloudflare.com https://meet.jit.si https://8x8.vc`,
+    scriptSrc,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https://images.unsplash.com https://meet.jit.si https://8x8.vc",
     "font-src 'self'",

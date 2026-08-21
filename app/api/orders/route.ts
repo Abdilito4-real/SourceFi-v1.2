@@ -9,6 +9,7 @@
 // the real gate, since this app always talks to Supabase as
 // service_role).
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
+import { getUserScopedOrFallbackClient } from "../../../lib/supabaseUserClient";
 import { requireSession, requireRole } from "../../../lib/authz";
 import { toMinorUnits, MIN_ORDER_AMOUNT_MINOR, formatMoney } from "../../../lib/money";
 import { createOrder, SupplierNotCurrentlyVerifiedError, InvalidOrderAmountError } from "../../../lib/orderService";
@@ -44,7 +45,18 @@ export async function GET() {
   if (!auth) return Response.json({ error: "Not authenticated." }, { status: 401 });
 
   const supabase = getSupabaseServerClient();
-  let query = supabase.from("orders").select("*").order("created_at", { ascending: false });
+  // Real RLS pilot (migration 0017_orders_rls_pilot.sql): buyer/supplier
+  // reads run through a genuine `authenticated`-role client so the DB's
+  // own orders_select_own policy is a second, independent layer behind
+  // the .eq() filter below, not just a schema decoration — see
+  // lib/supabaseUserClient.ts. The .eq() filters STAY, deliberately
+  // redundant, same "two independent layers" posture as
+  // lib/ledger.ts's assertBalanced + its DB trigger. Admin keeps using
+  // the plain service-role client, unchanged: admin's "no filter, full
+  // oversight" is an intentional design choice, not something RLS
+  // should also gate.
+  const readClient = auth.user.role === "admin" ? supabase : await getUserScopedOrFallbackClient(auth.user.id);
+  let query = readClient.from("orders").select("*").order("created_at", { ascending: false });
 
   if (auth.user.role === "buyer") {
     query = query.eq("buyer_id", auth.user.id);
@@ -57,6 +69,13 @@ export async function GET() {
   const { data, error } = await query;
   if (error) return dbErrorResponse("GET orders", error);
 
+  // attachJoins always uses the service-role client, not readClient:
+  // it reads `users`/`supplier_profiles` for display fields only, and
+  // this pilot's new supplier_profiles_select_own policy is self-only,
+  // it would not return another party's business_name/email under the
+  // authenticated client. Those joins were never the security boundary
+  // here, `orders` itself is, so keeping them on service-role is
+  // correct, not a gap.
   let orders = await attachJoins(supabase, (data || []) as OrderRow[]);
   // The verification call is a private, two-party conversation, admin's
   // full-oversight view of every order (no row filter above) should not

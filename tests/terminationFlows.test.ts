@@ -52,6 +52,12 @@ function freshFakeSupabase() {
       orders_since_verification: 0,
     },
   ]);
+  // Real Yellow Card integration: fundOrder now gates on this (migration
+  // 0018_buyer_kyc.sql), seeded here so every existing fundOrder call in
+  // this file keeps passing without individually knowing about it.
+  fake.seed("buyer_kyc_profiles", [
+    { user_id: 1, first_name: "Test", last_name: "Buyer", phone: "+2348000000000", date_of_birth: "1990-01-01", id_type: "nin", id_number: "00000000000", address: "1 Test Street, Lagos", country: "NG" },
+  ]);
   fake.setRpc("is_supplier_currently_verified", (args) => {
     const supplier = fake.getRows("supplier_profiles").find((s) => s.id === args.p_supplier_id);
     if (!supplier) return false;

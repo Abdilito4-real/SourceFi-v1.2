@@ -50,6 +50,13 @@ export class UnbalancedLedgerTransactionError extends Error {
   }
 }
 
+export class DuplicateReleaseBookingError extends Error {
+  constructor(orderId: number) {
+    super(`Order ${orderId} already has a SUPPLIER_PAYABLE release booked. Refusing to book it a second time.`);
+    this.name = "DuplicateReleaseBookingError";
+  }
+}
+
 /** The invariant itself, checked per currency, before any DB call.
  * Exported so tests can assert directly against it without needing a
  * mocked Supabase client for the pure-logic half of this module. */
@@ -161,6 +168,26 @@ export async function recordEscrowRelease(
   supplierAmountUsdcMinor: number,
   platformFeeUsdcMinor: number
 ): Promise<string> {
+  // Defense in depth (Part 1 of the idempotency hardening pass): the
+  // state-machine CAS in handleReleaseConfirmed already ensures only ONE
+  // caller ever reaches this function per order in the normal flow (a
+  // concurrent duplicate confirmation event loses the
+  // release_processing -> escrow_released race and returns early before
+  // ever calling this). This guard protects the case that check doesn't
+  // cover: any FUTURE caller (a reconciliation job, an admin script) that
+  // calls recordEscrowRelease directly without going through that CAS.
+  // Cheap existence check, not itself a substitute for the CAS.
+  const { data: existing, error: existingError } = await supabase
+    .from("ledger_entries")
+    .select("id")
+    .eq("order_id", orderId)
+    .eq("account", "SUPPLIER_PAYABLE")
+    .eq("direction", "debit")
+    .limit(1)
+    .maybeSingle();
+  if (existingError) throw existingError;
+  if (existing) throw new DuplicateReleaseBookingError(orderId);
+
   return writeLedgerTransaction(supabase, orderId, [
     { account: "ESCROW_WALLET_USDC", direction: "credit", amountMinor: supplierAmountUsdcMinor, currency: "USDC" },
     { account: "SUPPLIER_PAYABLE", accountRef: supplierId, direction: "debit", amountMinor: supplierAmountUsdcMinor, currency: "USDC" },

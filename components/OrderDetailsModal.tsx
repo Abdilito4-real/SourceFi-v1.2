@@ -26,6 +26,7 @@ import ConfirmDialog from "./ui/ConfirmDialog";
 import ErrorPanel from "./ui/ErrorPanel";
 import TransactionProgress, { type TransactionStep } from "./ui/TransactionProgress";
 import JitsiMeetRoom from "./JitsiMeetRoom";
+import BuyerKycModal from "./BuyerKycModal";
 import { formatMoney, CANCELLATION_FEE_MINOR, TYPED_CONFIRMATION_THRESHOLD_MINOR } from "../lib/money";
 import { useNetworkStatus } from "../lib/useNetworkStatus";
 import { playIncomingCallChime } from "../lib/callSound";
@@ -185,6 +186,14 @@ export default function OrderDetailsModal({
   const [showFundConfirm, setShowFundConfirm] = useState(false);
   const [showApproveConfirm, setShowApproveConfirm] = useState(false);
   const [fundError, setFundError] = useState<FinancialError | null>(null);
+  // Real Yellow Card integration: fundOrder can fail with "complete
+  // your KYC first" (BuyerKycRequiredError), shown as a form instead of
+  // a plain error toast, see components/BuyerKycModal.tsx. Bank-transfer
+  // funding returns account details the buyer needs to actually pay
+  // into, shown once and kept visible while the order sits at
+  // payment_processing.
+  const [showKycModal, setShowKycModal] = useState(false);
+  const [fundPaymentInstructions, setFundPaymentInstructions] = useState<{ bankName: string; accountNumber: string; accountName: string } | null>(null);
   const [approveError, setApproveError] = useState<FinancialError | null>(null);
   const [showCall, setShowCall] = useState(false);
   // Arriving via a "Join call" push notification (?call=1) shouldn't
@@ -417,7 +426,7 @@ export default function OrderDetailsModal({
   const runFinancialAction = async (
     path: string,
     body: unknown | undefined,
-    opts: { successMessage: string; fundPosition: string; setError: (e: FinancialError | null) => void }
+    opts: { successMessage: string; fundPosition: string; setError: (e: FinancialError | null) => void; onKycRequired?: () => void }
   ) => {
     opts.setError(null);
     setActing(true);
@@ -429,6 +438,10 @@ export default function OrderDetailsModal({
       });
       const data = await res.json();
       if (!res.ok) {
+        if (data.kycRequired && opts.onKycRequired) {
+          opts.onKycRequired();
+          return false;
+        }
         opts.setError({
           title: data.error || "That didn't go through.",
           fundPosition: opts.fundPosition,
@@ -443,6 +456,9 @@ export default function OrderDetailsModal({
         await load();
         return true;
       }
+      // Harmless for every action except /fund, which is the only one
+      // that ever sets this on the response.
+      setFundPaymentInstructions(data.paymentInstructions ?? null);
       showNotification("success", opts.successMessage);
       await load();
       return true;
@@ -647,6 +663,19 @@ export default function OrderDetailsModal({
               </Button>
             </div>
           )}
+          {/* Real Yellow Card bank-transfer funding: the buyer has to
+              actually pay into this account for the order to fund, this
+              isn't optional context, it's the instructions. */}
+          {fundPaymentInstructions && order.status === "payment_processing" && (
+            <div className="rounded-md border border-accent-strong bg-surface px-3 py-2.5 text-text-primary">
+              <div className="font-semibold">Pay {formattedAmount} into this account to complete funding:</div>
+              <div className="mt-1.5 font-mono">
+                {fundPaymentInstructions.bankName} · {fundPaymentInstructions.accountNumber}
+                <br />
+                {fundPaymentInstructions.accountName}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -673,6 +702,7 @@ export default function OrderDetailsModal({
                     successMessage: "Payment started.",
                     fundPosition: "No money has left your account.",
                     setError: setFundError,
+                    onKycRequired: () => setShowKycModal(true),
                   })
                 }
                 onDismiss={() => setFundError(null)}
@@ -714,11 +744,29 @@ export default function OrderDetailsModal({
                 successMessage: "Payment started.",
                 fundPosition: "No money has left your account.",
                 setError: setFundError,
+                onKycRequired: () => setShowKycModal(true),
               });
               setShowFundConfirm(false);
               if (ok) onFunded?.();
             }}
             onCancel={() => setShowFundConfirm(false)}
+          />
+
+          <BuyerKycModal
+            open={showKycModal}
+            onClose={() => setShowKycModal(false)}
+            onSubmitted={async () => {
+              setShowKycModal(false);
+              // Re-run the same fund attempt now that KYC is on file,
+              // same "Retry lands after the thing that blocked it is
+              // fixed" posture as every other retry path in this app.
+              const ok = await runFinancialAction("/fund", undefined, {
+                successMessage: "Payment started.",
+                fundPosition: "No money has left your account.",
+                setError: setFundError,
+              });
+              if (ok) onFunded?.();
+            }}
           />
 
           {/* Flow 1: cancel before funding, free, no dispute. */}

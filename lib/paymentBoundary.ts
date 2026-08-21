@@ -17,6 +17,17 @@ import type { DisputeType, PaymentLeg, PaymentProvider } from "./types";
 export interface FundingResult {
   paymentReference: string;
   status: "processing" | "failed";
+  /** Set only by a real bank-transfer funding provider (Yellow Card):
+   * the account the buyer needs to actually pay into to complete
+   * funding. undefined for the stub and for anything that doesn't need
+   * this (a provider that debits a wallet directly, e.g.). Never
+   * fabricated — only ever the real account details a provider's API
+   * returned. */
+  paymentInstructions?: {
+    bankName: string;
+    accountNumber: string;
+    accountName: string;
+  };
 }
 
 export interface ReleaseResult {

@@ -31,7 +31,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   // Prompt 3's own explicit ask: "repeated cancellation... needs a
   // cooldown or a flag", this is that cooldown, shared with
   // abandon/withdraw under the same "order-terminate" bucket.
-  const quota = checkDualQuota("order-terminate", getClientIp(request), auth.user.email, 8, 10 * 60 * 1000);
+  const quota = await checkDualQuota("order-terminate", getClientIp(request), auth.user.email, 8, 10 * 60 * 1000);
   if (!quota.allowed) {
     return Response.json({ error: "Too many cancellations recently. Try again shortly." }, { status: 429, headers: { "Retry-After": String(quota.retryAfterSeconds ?? 60) } });
   }

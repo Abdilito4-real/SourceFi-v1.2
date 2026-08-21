@@ -7,7 +7,7 @@
 import { getSupabaseServerClient } from "../../../../../lib/supabaseServer";
 import { requireRole } from "../../../../../lib/authz";
 import { getPaymentProvider } from "../../../../../lib/paymentProvider";
-import { fundOrder, NotOrderOwnerError, OrderNotFoundError, SupplierNotCurrentlyVerifiedError } from "../../../../../lib/orderService";
+import { fundOrder, NotOrderOwnerError, OrderNotFoundError, SupplierNotCurrentlyVerifiedError, BuyerKycRequiredError } from "../../../../../lib/orderService";
 import { InvalidOrderTransitionError } from "../../../../../lib/orderStateMachine";
 
 export async function POST(_request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -22,10 +22,20 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
 
   try {
     const result = await fundOrder(supabase, getPaymentProvider(), orderId, auth.user.id);
-    return Response.json({ success: true, order: result.order, paymentReference: result.paymentReference });
+    return Response.json({
+      success: true,
+      order: result.order,
+      paymentReference: result.paymentReference,
+      paymentInstructions: result.paymentInstructions,
+    });
   } catch (err) {
     if (err instanceof OrderNotFoundError) return Response.json({ error: err.message }, { status: 404 });
     if (err instanceof NotOrderOwnerError) return Response.json({ error: err.message }, { status: 403 });
+    if (err instanceof BuyerKycRequiredError) {
+      // The UI's cue to show BuyerKycModal rather than a plain error
+      // toast, see components/BuyerKycModal.tsx.
+      return Response.json({ error: err.message, kycRequired: true }, { status: 409 });
+    }
     if (err instanceof SupplierNotCurrentlyVerifiedError) {
       return Response.json({ error: "This order's supplier is no longer currently verified. Contact support." }, { status: 409 });
     }

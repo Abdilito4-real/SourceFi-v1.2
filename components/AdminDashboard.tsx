@@ -74,6 +74,12 @@ export default function AdminDashboard() {
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [loadingOrders, setLoadingOrders] = useState(true);
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  // Production-hardening pass: an order stuck at release_submitted after
+  // a real Circle release attempt failed (missing supplier wallet, no
+  // USDC balance, ...) needs this explicit admin retry, see
+  // app/api/admin/orders/[id]/retry-release/route.ts.
+  const [retryReleaseOrder, setRetryReleaseOrder] = useState<OrderRow | null>(null);
+  const [retryReleaseBusy, setRetryReleaseBusy] = useState(false);
 
   const [disputes, setDisputes] = useState<(DisputeRow & { order: Pick<OrderRow, "id" | "order_code" | "status" | "amount_minor"> | null; raised_by_email: string | null })[]>([]);
   const [disputesStatus, setDisputesStatus] = useState<DisputeStatus>("open");
@@ -303,6 +309,23 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleConfirmRetryRelease = async () => {
+    if (!retryReleaseOrder) return;
+    setRetryReleaseBusy(true);
+    try {
+      const res = await fetch(`/api/admin/orders/${retryReleaseOrder.id}/retry-release`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to retry the release.");
+      setOrders((rows) => rows.map((o) => (o.id === retryReleaseOrder.id ? data.order : o)));
+      notify("success", `Retry sent for order ${retryReleaseOrder.order_code}.`);
+      setRetryReleaseOrder(null);
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to retry the release.");
+    } finally {
+      setRetryReleaseBusy(false);
+    }
+  };
+
   const handleResolveDispute = async (disputeId: number, ruling: DisputeRuling, notes: string) => {
     setResolvingId(disputeId);
     try {
@@ -482,6 +505,27 @@ export default function AdminDashboard() {
 
       {section === "orders" && (
         <div>
+          {!loadingOrders && orders.some((o) => o.status === "release_submitted") && (
+            <div className="mb-4 flex flex-col gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2.5 text-sm text-warning-text">
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                <span>
+                  {orders.filter((o) => o.status === "release_submitted").length} order(s) stuck at &ldquo;release
+                  submitted&rdquo; — a prior escrow release attempt failed. Funds are still safely held in escrow.
+                  Fix the underlying issue (e.g. the supplier&rsquo;s wallet address) if needed, then retry.
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2 pl-6">
+                {orders
+                  .filter((o) => o.status === "release_submitted")
+                  .map((o) => (
+                    <Button key={o.id} size="sm" variant="secondary" onClick={() => setRetryReleaseOrder(o)}>
+                      Retry {o.order_code}
+                    </Button>
+                  ))}
+              </div>
+            </div>
+          )}
           {loadingOrders ? (
             <div className="flex justify-center py-10">
               <Loader2 size={22} className="spin-icon text-accent" />
@@ -495,6 +539,22 @@ export default function AdminDashboard() {
               ))}
             </div>
           )}
+
+          <ConfirmDialog
+            open={retryReleaseOrder !== null}
+            title="Retry escrow release"
+            body={
+              <p>
+                Retry sending order <strong>{retryReleaseOrder?.order_code}</strong>&rsquo;s escrow release to Circle. Safe
+                to click even if a prior attempt partially went through, this uses the same idempotency key every
+                time, it cannot pay the supplier twice.
+              </p>
+            }
+            confirmLabel="Retry release"
+            loading={retryReleaseBusy}
+            onConfirm={handleConfirmRetryRelease}
+            onCancel={() => setRetryReleaseOrder(null)}
+          />
         </div>
       )}
 
@@ -548,8 +608,9 @@ export default function AdminDashboard() {
                 <div className="flex items-start gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2.5 text-xs text-warning-text">
                   <AlertTriangle size={14} className="mt-0.5 shrink-0" />
                   <span>
-                    No real money has moved in any entry below. NGN funding and settlement (Yellow Card) are
-                    always simulated, no integration exists yet.{" "}
+                    {ledgerPaymentMode.ngnLive
+                      ? "NGN funding/refund is live via Yellow Card (bank transfer only). Settlement is still simulated, no integration exists for that leg yet."
+                      : "NGN funding/refund (Yellow Card) is simulated until its credentials are configured."}{" "}
                     {ledgerPaymentMode.usdcLive
                       ? "USDC escrow release is live via Circle."
                       : "USDC escrow release is simulated too, until Circle credentials are configured."}

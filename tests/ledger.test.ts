@@ -18,17 +18,34 @@ import {
   recordRefundFromEscrow,
   recordPartialRefundWithFee,
   UnbalancedLedgerTransactionError,
+  DuplicateReleaseBookingError,
   type LedgerLeg,
 } from "../lib/ledger";
 
 /** Mimics supabase-js's .from().insert() chain closely enough for this
  * module's exact call shape, same pattern as tests/authz.test.ts's
  * mockSupabaseReturning(). Records every row actually sent so tests can
- * assert on them. */
-function mockSupabaseInsert() {
+ * assert on them.
+ *
+ * Also supports the .select().eq().eq().eq().limit().maybeSingle() chain
+ * recordEscrowRelease's duplicate-booking guard uses, backed by
+ * `existingSupplierPayable`: pass true to simulate an order that already
+ * has a SUPPLIER_PAYABLE debit booked (the guard's job is to reject a
+ * second call in that case). Defaults to false (no existing row), the
+ * shape every other test in this file needs. */
+function mockSupabaseInsert(existingSupplierPayable = false) {
   const insertedRows: unknown[][] = [];
+  const selectChain = {
+    eq: vi.fn(() => selectChain),
+    limit: vi.fn(() => selectChain),
+    maybeSingle: vi.fn(async () => ({
+      data: existingSupplierPayable ? { id: 1 } : null,
+      error: null,
+    })),
+  };
   const builder = {
     from: vi.fn(() => builder),
+    select: vi.fn(() => selectChain),
     insert: vi.fn(async (rows: unknown[]) => {
       insertedRows.push(rows);
       return { error: null };
@@ -134,6 +151,18 @@ describe("the four order-lifecycle ledger events: each balances on its own", () 
     expect(rows.every((r) => r.currency === "USDC")).toBe(true);
     expect(sum(rows, "debit")).toBe(sum(rows, "credit"));
     expect(sum(rows, "debit")).toBe(32000);
+  });
+
+  it("recordEscrowRelease refuses to double-book: an order that already has a SUPPLIER_PAYABLE debit rejects a second call", async () => {
+    // Defense-in-depth guard added alongside the idempotency-safe retry
+    // path (lib/circleEscrowProvider.ts's deterministic idempotencyKey,
+    // app/api/admin/orders/[id]/retry-release): the state-machine CAS in
+    // handleReleaseConfirmed is what prevents this in the normal flow,
+    // this guard protects any future caller that reaches
+    // recordEscrowRelease directly without going through that CAS.
+    const { client, insertedRows } = mockSupabaseInsert(/* existingSupplierPayable */ true);
+    await expect(recordEscrowRelease(client, 1, 5, 30000, 2000)).rejects.toThrow(DuplicateReleaseBookingError);
+    expect(insertedRows).toHaveLength(0); // nothing written on rejection
   });
 
   it("recordSettlement balances the payable clearing against the NGN payout", async () => {

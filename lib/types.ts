@@ -243,6 +243,25 @@ export type SupplierVerificationStatus = "unverified" | "pending" | "verified" |
  * is_supplier_currently_verified() Postgres function (see
  * lib/supplierVerification.ts), same principle as lib/authz.ts never
  * trusting a client-supplied role. */
+/** One row per buyer, self-service, no admin review step (this isn't a
+ * role grant, just the KYC data Yellow Card's real "Submit Receive
+ * Request" requires in its `recipient` object). See migration
+ * 0018_buyer_kyc.sql and lib/orderService.ts's fundOrder gate. */
+export interface BuyerKycProfileRow {
+  id: number;
+  user_id: number;
+  first_name: string;
+  last_name: string;
+  phone: string;
+  date_of_birth: string;
+  id_type: string;
+  id_number: string;
+  address: string;
+  country: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface SupplierProfileRow {
   id: number;
   user_id: number;
