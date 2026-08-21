@@ -17,6 +17,7 @@ import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { getPaymentProvider } from "../../../../lib/paymentProvider";
 import { runOrderTimeouts } from "../../../../lib/orderService";
 import { safeCompare } from "../../../../lib/safeCompare";
+import { cleanupOldRateLimitBuckets } from "../../../../lib/rateLimit";
 
 export async function GET(request: Request) {
   const secret = process.env.CRON_SECRET;
@@ -34,6 +35,11 @@ export async function GET(request: Request) {
   const supabase = getSupabaseServerClient();
   try {
     const result = await runOrderTimeouts(supabase, getPaymentProvider());
+    // Part 3 of the production-hardening pass: piggybacked here rather
+    // than standing up new cron infra just for bucket cleanup. Never
+    // allowed to fail this run, see cleanupOldRateLimitBuckets's own
+    // best-effort posture.
+    await cleanupOldRateLimitBuckets();
     return Response.json({ success: true, ...result });
   } catch (err) {
     console.error("order-timeouts cron run failed:", err);

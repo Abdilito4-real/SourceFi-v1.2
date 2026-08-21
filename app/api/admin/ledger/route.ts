@@ -49,16 +49,18 @@ export async function GET(request: Request) {
     balances.set(key, bucket);
   }
 
-  // NGN legs (Yellow Card) have no real integration at all yet, always
-  // simulated. USDC escrow release only goes live once all three Circle
-  // env vars are set, same check getPaymentProvider() uses, duplicated
-  // here rather than imported since that module also constructs a
-  // singleton client this read-only route has no reason to touch.
+  // NGN legs (Yellow Card, bank-transfer only) go real once both its env
+  // vars are set. USDC escrow release only goes live once all three
+  // Circle env vars are set. Same checks getPaymentProvider() uses,
+  // duplicated here rather than imported since that module also
+  // constructs a singleton client this read-only route has no reason to
+  // touch.
   const circleConfigured = Boolean(process.env.CIRCLE_API_KEY && process.env.CIRCLE_ENTITY_SECRET && process.env.ESCROW_WALLET_ID);
+  const yellowCardConfigured = Boolean(process.env.YELLOW_CARD_API_KEY && process.env.YELLOW_CARD_SECRET_KEY);
 
   return Response.json({
     entries: entriesWithOrder,
     balances: Array.from(balances.values()).sort((a, b) => a.account.localeCompare(b.account) || a.currency.localeCompare(b.currency)),
-    paymentMode: { ngnLive: false, usdcLive: circleConfigured },
+    paymentMode: { ngnLive: yellowCardConfigured, usdcLive: circleConfigured },
   });
 }

@@ -5,6 +5,7 @@
 // order's payment_events trail and any delivery_proofs/disputes/rating
 // so the detail screen doesn't need N separate requests.
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
+import { getUserScopedOrFallbackClient } from "../../../../lib/supabaseUserClient";
 import { requireSession } from "../../../../lib/authz";
 import { ensureCallRoomId } from "../../../../lib/orderService";
 import { dbErrorResponse } from "../../../../lib/dbErrorResponse";
@@ -19,10 +20,34 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   if (!Number.isInteger(orderId)) return Response.json({ error: "Invalid order id." }, { status: 400 });
 
   const supabase = getSupabaseServerClient();
-  const { data: order, error } = await supabase.from("orders").select("*").eq("id", orderId).maybeSingle();
+  // Real RLS pilot (migration 0017_orders_rls_pilot.sql): buyer/supplier
+  // fetch this ONE row through a genuine `authenticated`-role client,
+  // see lib/supabaseUserClient.ts and app/api/orders/route.ts's own
+  // comment for the full reasoning. Every OTHER query below this one
+  // (users/supplier_profiles/payment_events/etc.) deliberately keeps
+  // using the plain service-role `supabase` client — this pilot only
+  // covers `orders` + a self-only `supplier_profiles` policy, those
+  // other tables have no `authenticated`-role policies yet and would
+  // return nothing if queried through readClient.
+  const readClient = auth.user.role === "admin" ? supabase : await getUserScopedOrFallbackClient(auth.user.id);
+  const { data: order, error } = await readClient.from("orders").select("*").eq("id", orderId).maybeSingle();
   if (error) return dbErrorResponse(`GET orders/${orderId}`, error);
+  // Real behavior change from this pilot, worth naming explicitly: once
+  // the RLS policy above is active, a cross-tenant order id is
+  // genuinely invisible to a buyer/supplier who isn't a party to it —
+  // this 404 now covers BOTH "no such order" and "not yours" for them,
+  // where it used to be a distinct 403 below. Arguably a security
+  // improvement (doesn't confirm an order id exists to someone who
+  // doesn't own it), but a real, intentional response-shape change.
   if (!order) return Response.json({ error: "Order not found." }, { status: 404 });
 
+  // Kept as a deliberate second, redundant check even though RLS above
+  // should already make a mismatched row unreachable for buyer/supplier
+  // — same "two independent layers" posture as everywhere else in this
+  // hardening pass. If SUPABASE_JWT_SECRET/SUPABASE_ANON_KEY aren't set,
+  // getUserScopedOrFallbackClient silently falls back to service-role
+  // (RLS inactive), and THIS check becomes the only thing enforcing
+  // ownership, exactly as it always has been.
   if (auth.user.role === "buyer" && order.buyer_id !== auth.user.id) {
     return Response.json({ error: "You are not the buyer for this order." }, { status: 403 });
   }

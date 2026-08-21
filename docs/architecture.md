@@ -168,11 +168,15 @@ lib/
   orderStateMachine.ts    Legal status transitions
   ledger.ts               Double-entry bookkeeping
   paymentBoundary.ts      The provider-agnostic payment interface
-  paymentProvider.ts      Picks Stub vs. CircleEscrowProvider at runtime
-  circleEscrowProvider.ts  Real Circle USDC release
+  paymentProvider.ts      Composes Stub/CircleEscrowProvider/YellowCardProvider per leg
+  circleEscrowProvider.ts  Real Circle USDC release, webhook + reconciliation
+  yellowCardProvider.ts    Real Yellow Card NGN funding/refund, bank-transfer only
+  yellowCardAuth.ts         HMAC request signing + webhook verification
+  releaseReconciliation.ts Durable cron sweep for stuck releases
   authz.ts                requireSession/requireRole, the auth choke point
   session.ts               This app's own signed session cookie
-  rateLimit.ts              In-memory backoff + dual quota limiters
+  supabaseUserClient.ts     Mints a per-request JWT for real RLS (orders pilot)
+  rateLimit.ts              Supabase-backed backoff + dual quota limiters
   notifications/            dispatch, webPush, emailProvider
 supabase/migrations/     Numbered, additive. Read the header of each
                           before applying; some are marked for a specific
@@ -183,10 +187,14 @@ tests/                   Vitest: authz, state machine, ledger, order
 
 ## What's stubbed today
 
-### Yellow Card
+### Yellow Card settlement
 
-NGN funding/settlement: entirely simulated. No credentials exist
-anywhere in this project.
+The second half of `escrow_released -> settled` (the actual NGN payout
+to a supplier) is still entirely simulated — there's no
+`initiateSettlement` boundary call at all by design. Funding and refund
+(bank-transfer only) are real once `YELLOW_CARD_API_KEY`/
+`YELLOW_CARD_SECRET_KEY` are set, see
+[payment-integration.md](payment-integration.md#yellow-card-ngn-funding-and-refund).
 
 ### On-chain rating submission
 

@@ -20,7 +20,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (auth instanceof Response) return auth;
 
   const limitKey = rateLimitKey("supplier-verification-review", auth.user.email);
-  const limit = checkRateLimit(limitKey);
+  const limit = await checkRateLimit(limitKey);
   if (!limit.allowed) {
     return Response.json(
       { error: "Too many review actions. Try again shortly." },
@@ -31,7 +31,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const { id } = await params;
   const applicationId = Number(id);
   if (!Number.isInteger(applicationId)) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "Invalid application id." }, { status: 400 });
   }
 
@@ -39,7 +39,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const action = body?.action;
   const notes = typeof body?.notes === "string" ? body.notes.trim().slice(0, 1000) : null;
   if (action !== "approve" && action !== "reject") {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "action must be 'approve' or 'reject'." }, { status: 400 });
   }
 
@@ -50,7 +50,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     .eq("id", applicationId)
     .maybeSingle();
   if (fetchErr || !application) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "Application not found." }, { status: 404 });
   }
 
@@ -67,11 +67,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     .maybeSingle();
 
   if (updateErr) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return dbErrorResponse(`PATCH admin/supplier-verification/${applicationId}`, updateErr);
   }
   if (!updated) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "This application was already reviewed." }, { status: 409 });
   }
 
@@ -158,6 +158,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     });
   }
 
-  recordSuccess(limitKey);
+  await recordSuccess(limitKey);
   return Response.json({ success: true, application: updated });
 }

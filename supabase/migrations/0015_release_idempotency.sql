@@ -1,0 +1,37 @@
+-- 0015_release_idempotency.sql
+--
+-- Fixes a real bug found while hardening the escrow-release leg for
+-- production, AND removes an index that would have actively broken the
+-- retry feature this same pass adds.
+--
+-- The bug: migration 0014's idempotency backstop index
+-- (idx_payment_events_one_release_in_flight) guards
+-- `event_type = 'release_submitted'`, but no code path has ever inserted
+-- that event_type. The actual values lib/orderService.ts writes are
+-- 'release_initiated' / 'release_failed' (on the initial attempt) and
+-- 'release_confirmed' (once Circle confirms) — see attemptEscrowRelease
+-- and handleReleaseConfirmed. The index has never once fired.
+--
+-- Why not just repoint it at 'release_initiated' instead of dropping it:
+-- a permanent "at most one release_initiated row per order, ever" index
+-- would reject the SECOND, legitimate 'release_initiated' row a retry
+-- (app/api/admin/orders/[id]/retry-release, lib/orderService.ts's
+-- retryEscrowRelease) writes after a first attempt failed — exactly the
+-- feature this hardening pass is adding. Sequential retries producing
+-- multiple payment_events rows is the correct audit trail (one row per
+-- real attempt), not a bug to prevent.
+--
+-- What actually prevents a retry from double-paying the supplier, now
+-- that this index is gone:
+--   1. lib/circleEscrowProvider.ts's deterministic idempotencyKey
+--      (lib/uuidv5.ts) — Circle's own dedup on that key is the primary,
+--      provider-side protection; a resend with the same key returns the
+--      original transaction, never a second on-chain transfer.
+--   2. lib/ledger.ts's recordEscrowRelease now refuses to book a second
+--      SUPPLIER_PAYABLE debit for an order that already has one
+--      (DuplicateReleaseBookingError), a ledger-level backstop.
+--   3. handleReleaseConfirmed's own compare-and-swap
+--      (release_processing -> escrow_released) already ensures only ONE
+--      confirmation event per order ever reaches recordEscrowRelease in
+--      the normal flow.
+drop index if exists idx_payment_events_one_release_in_flight;

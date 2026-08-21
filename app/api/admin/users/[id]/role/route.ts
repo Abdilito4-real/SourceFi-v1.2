@@ -25,7 +25,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (auth instanceof Response) return auth;
 
   const limitKey = rateLimitKey("admin-role-change", auth.user.email);
-  const limit = checkRateLimit(limitKey);
+  const limit = await checkRateLimit(limitKey);
   if (!limit.allowed) {
     return Response.json(
       { error: "Too many role changes. Try again shortly." },
@@ -36,28 +36,28 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const { id } = await params;
   const targetId = Number(id);
   if (!Number.isInteger(targetId)) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "Invalid user id." }, { status: 400 });
   }
 
   const body = await request.json().catch(() => null);
   const nextRole = body?.role;
   if (typeof nextRole !== "string" || !VALID_ROLES.includes(nextRole as Role)) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: `role must be one of: ${VALID_ROLES.join(", ")}` }, { status: 400 });
   }
 
   if (targetId === auth.user.id) {
     // An admin locking themselves out (accidentally or via a compromised
     // session) shouldn't be a single API call, that needs another admin.
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "Cannot change your own role through this endpoint." }, { status: 400 });
   }
 
   const supabase = getSupabaseServerClient();
   const { data: target, error: fetchErr } = await supabase.from("users").select("*").eq("id", targetId).maybeSingle();
   if (fetchErr || !target) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "User not found." }, { status: 404 });
   }
 
@@ -70,11 +70,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     .single();
 
   if (updateErr) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return dbErrorResponse(`PATCH admin/users/${targetId}/role`, updateErr);
   }
 
-  recordSuccess(limitKey);
+  await recordSuccess(limitKey);
   await logAudit({
     actorEmail: auth.user.email,
     action: "role_change",

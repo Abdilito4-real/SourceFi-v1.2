@@ -20,3 +20,9 @@ public/workbox-*.js.map
 # didn't happen to cover.
 public/worker-*.js
 public/worker-*.js.map
+
+# Local Supabase CLI cache, not source.
+supabase/.temp/
+
+# Per-session lock file from the Claude Code harness, not source.
+.claude/scheduled_tasks.lock
