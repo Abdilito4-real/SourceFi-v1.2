@@ -82,13 +82,25 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     // Does this applicant already have a supplier_profiles row (a
     // re-verification after expiry)? Update it in place rather than
     // creating a second row for the same person.
-    const { data: existingProfile } = await supabase
-      .from("supplier_profiles")
-      .select("id")
-      .eq("user_id", application.user_id)
-      .maybeSingle();
+    const [{ data: existingProfile }, { data: payoutProfile }] = await Promise.all([
+      supabase.from("supplier_profiles").select("id").eq("user_id", application.user_id).maybeSingle(),
+      // migration 0019_supplier_payout.sql: required at application-submission
+      // time (app/api/supplier-verification/route.ts), so this should always
+      // exist for any application reaching approval — but an application from
+      // before that migration shipped could still be sitting pending, so this
+      // stays a plain lookup (payoutProfile ends up null), not a hard failure.
+      supabase.from("supplier_payout_profiles").select("bank_name, account_number, account_name, bank_network_id").eq("user_id", application.user_id).maybeSingle(),
+    ]);
 
     const profilePatch = {
+      ...(payoutProfile
+        ? {
+            payout_bank_name: payoutProfile.bank_name,
+            payout_account_number: payoutProfile.account_number,
+            payout_account_name: payoutProfile.account_name,
+            payout_bank_network_id: payoutProfile.bank_network_id,
+          }
+        : {}),
       business_name: application.business_name,
       cac_registration_number: application.cac_registration_number,
       tax_id_number: application.tax_id_number,

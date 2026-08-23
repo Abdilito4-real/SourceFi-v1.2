@@ -11,6 +11,13 @@
 // one-pending-per-user constraint, same flow. A supplier whose
 // verification expired applies again exactly the same way a brand-new
 // applicant does.
+//
+// Payout bank details (migration 0019_supplier_payout.sql) are required
+// here, not optional like supportingDocumentUrl: a supplier who can't be
+// paid out shouldn't be approvable in the first place. Upserted into
+// supplier_payout_profiles (not application columns) so a resubmission
+// after rejection/expiry updates the same row rather than creating a new
+// one, same reasoning as buyer_kyc_profiles being its own table.
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
 import { requireSession } from "../../../lib/authz";
 import { dbErrorResponse } from "../../../lib/dbErrorResponse";
@@ -26,12 +33,23 @@ export async function POST(request: Request) {
   const cacRegistrationNumber = typeof body?.cacRegistrationNumber === "string" ? body.cacRegistrationNumber.trim() || null : null;
   const taxIdNumber = typeof body?.taxIdNumber === "string" ? body.taxIdNumber.trim() || null : null;
   const supportingDocumentUrl = typeof body?.supportingDocumentUrl === "string" ? body.supportingDocumentUrl.trim() || null : null;
+  const payoutBankName = typeof body?.payoutBankName === "string" ? body.payoutBankName.trim() : "";
+  const payoutAccountNumber = typeof body?.payoutAccountNumber === "string" ? body.payoutAccountNumber.trim() : "";
+  const payoutAccountName = typeof body?.payoutAccountName === "string" ? body.payoutAccountName.trim() : "";
 
   if (!businessName || !businessLocation || !whatTheySell) {
     return Response.json({ error: "Business name, location, and what you sell are required." }, { status: 400 });
   }
+  if (!payoutBankName || !payoutAccountNumber || !payoutAccountName) {
+    return Response.json({ error: "Bank name, account number, and account holder name are required — this is how you'll be paid." }, { status: 400 });
+  }
 
   const supabase = getSupabaseServerClient();
+
+  const { error: payoutError } = await supabase
+    .from("supplier_payout_profiles")
+    .upsert({ user_id: auth.user.id, bank_name: payoutBankName, account_number: payoutAccountNumber, account_name: payoutAccountName }, { onConflict: "user_id" });
+  if (payoutError) return dbErrorResponse("POST supplier-verification (payout profile)", payoutError);
 
   // The unique partial index (migration 0004) is what actually enforces
   // "one pending application per user" under concurrent submits, this

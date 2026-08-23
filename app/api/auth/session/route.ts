@@ -49,6 +49,35 @@ export async function POST(request: Request) {
 
     let user = existing as UserRow | null;
 
+    // Backfill a wallet address that never got written. This happens when
+    // Privy's embedded wallet (createOnLogin: "all-users",
+    // components/Web3Providers.tsx) hasn't finished provisioning yet at
+    // the exact instant a brand-new user's row is first created below —
+    // wallet_address gets persisted as null and, before this fix, NEVER
+    // got revisited on any later login. Real-world impact: a supplier
+    // whose embedded wallet lagged their very first sign-in ends up
+    // permanently unpayable (MissingSupplierWalletError at release time),
+    // discovered only when a real release fails, not at signup. Only
+    // costs an extra Privy API call on the (rare, one-time-per-account)
+    // path where wallet_address is still missing — the common case
+    // (already on file) skips this entirely.
+    if (user && !user.wallet_address) {
+      const profile = await getVerifiedPrivyProfile(identity.privyUserId);
+      if (profile.walletAddress) {
+        const { data: patched, error: patchErr } = await supabase
+          .from("users")
+          .update({ wallet_address: profile.walletAddress })
+          .eq("id", user.id)
+          .select("*")
+          .single();
+        if (patchErr) {
+          console.error(`Failed to backfill wallet_address for user ${user.id}:`, patchErr);
+        } else {
+          user = patched as UserRow;
+        }
+      }
+    }
+
     if (!user) {
       // 2. First time this DID has established a session. Pull the
       // verified email/wallet from Privy itself, never from this
