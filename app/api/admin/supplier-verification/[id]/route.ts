@@ -20,7 +20,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (auth instanceof Response) return auth;
 
   const limitKey = rateLimitKey("supplier-verification-review", auth.user.email);
-  const limit = checkRateLimit(limitKey);
+  const limit = await checkRateLimit(limitKey);
   if (!limit.allowed) {
     return Response.json(
       { error: "Too many review actions. Try again shortly." },
@@ -31,7 +31,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const { id } = await params;
   const applicationId = Number(id);
   if (!Number.isInteger(applicationId)) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "Invalid application id." }, { status: 400 });
   }
 
@@ -39,7 +39,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const action = body?.action;
   const notes = typeof body?.notes === "string" ? body.notes.trim().slice(0, 1000) : null;
   if (action !== "approve" && action !== "reject") {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "action must be 'approve' or 'reject'." }, { status: 400 });
   }
 
@@ -50,7 +50,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     .eq("id", applicationId)
     .maybeSingle();
   if (fetchErr || !application) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "Application not found." }, { status: 404 });
   }
 
@@ -67,11 +67,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     .maybeSingle();
 
   if (updateErr) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return dbErrorResponse(`PATCH admin/supplier-verification/${applicationId}`, updateErr);
   }
   if (!updated) {
-    recordFailure(limitKey);
+    await recordFailure(limitKey);
     return Response.json({ error: "This application was already reviewed." }, { status: 409 });
   }
 
@@ -82,13 +82,25 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     // Does this applicant already have a supplier_profiles row (a
     // re-verification after expiry)? Update it in place rather than
     // creating a second row for the same person.
-    const { data: existingProfile } = await supabase
-      .from("supplier_profiles")
-      .select("id")
-      .eq("user_id", application.user_id)
-      .maybeSingle();
+    const [{ data: existingProfile }, { data: payoutProfile }] = await Promise.all([
+      supabase.from("supplier_profiles").select("id").eq("user_id", application.user_id).maybeSingle(),
+      // migration 0019_supplier_payout.sql: required at application-submission
+      // time (app/api/supplier-verification/route.ts), so this should always
+      // exist for any application reaching approval — but an application from
+      // before that migration shipped could still be sitting pending, so this
+      // stays a plain lookup (payoutProfile ends up null), not a hard failure.
+      supabase.from("supplier_payout_profiles").select("bank_name, account_number, account_name, bank_network_id").eq("user_id", application.user_id).maybeSingle(),
+    ]);
 
     const profilePatch = {
+      ...(payoutProfile
+        ? {
+            payout_bank_name: payoutProfile.bank_name,
+            payout_account_number: payoutProfile.account_number,
+            payout_account_name: payoutProfile.account_name,
+            payout_bank_network_id: payoutProfile.bank_network_id,
+          }
+        : {}),
       business_name: application.business_name,
       cac_registration_number: application.cac_registration_number,
       tax_id_number: application.tax_id_number,
@@ -158,6 +170,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     });
   }
 
-  recordSuccess(limitKey);
+  await recordSuccess(limitKey);
   return Response.json({ success: true, application: updated });
 }

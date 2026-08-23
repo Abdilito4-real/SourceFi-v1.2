@@ -28,7 +28,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const auth = await requireRole(["buyer"]);
   if (auth instanceof Response) return auth;
 
-  const quota = checkDualQuota("dispute-file", getClientIp(request), auth.user.email, 8, 10 * 60 * 1000);
+  const quota = await checkDualQuota("dispute-file", getClientIp(request), auth.user.email, 8, 10 * 60 * 1000);
   if (!quota.allowed) {
     return Response.json({ error: "Too many reports filed recently. Try again shortly." }, { status: 429, headers: { "Retry-After": String(quota.retryAfterSeconds ?? 60) } });
   }

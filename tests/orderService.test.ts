@@ -25,6 +25,7 @@ import {
   ensureCallRoomId,
   MIN_VERIFICATION_CALL_SECONDS,
   SupplierNotCurrentlyVerifiedError,
+  BuyerKycRequiredError,
   NotOrderOwnerError,
   VerificationCallIncompleteError,
   InvalidOrderAmountError,
@@ -36,7 +37,8 @@ import { MIN_ORDER_AMOUNT_MINOR } from "../lib/money";
 const NOW = Date.now();
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
-function freshFakeSupabase() {
+function freshFakeSupabase(opts: { withBuyerKyc?: boolean } = {}) {
+  const { withBuyerKyc = true } = opts;
   const fake = new FakeSupabase();
   fake.seed("users", [
     { id: 1, email: "buyer@example.com", role: "buyer" },
@@ -54,6 +56,26 @@ function freshFakeSupabase() {
       orders_since_verification: 0,
     },
   ]);
+  // Real Yellow Card integration: fundOrder now gates on this (migration
+  // 0018_buyer_kyc.sql), seeded by default so every existing
+  // fundOrder-touching test keeps passing without individually knowing
+  // about it — pass { withBuyerKyc: false } for the dedicated
+  // missing-KYC test instead.
+  if (withBuyerKyc) {
+    fake.seed("buyer_kyc_profiles", [
+      {
+        user_id: 1,
+        first_name: "Test",
+        last_name: "Buyer",
+        phone: "+2348000000000",
+        date_of_birth: "1990-01-01",
+        id_type: "nin",
+        id_number: "00000000000",
+        address: "1 Test Street, Lagos",
+        country: "NG",
+      },
+    ]);
+  }
   // Mirrors the real is_supplier_currently_verified() Postgres function
   // (migration 0004), evaluated against the fake's live table state so
   // it reflects whatever a test mutates mid-run.
@@ -242,6 +264,17 @@ describe("fundOrder: ownership and re-verification at funding time", () => {
     await supabase.from("supplier_profiles").update({ verification_expires_at: new Date(NOW - 1000).toISOString() }).eq("id", 1);
 
     await expect(fundOrder(supabase, provider, order.id, 1)).rejects.toThrow(SupplierNotCurrentlyVerifiedError);
+  });
+
+  it("rejects funding when the buyer has no KYC profile on file (real Yellow Card integration)", async () => {
+    const fake = freshFakeSupabase({ withBuyerKyc: false });
+    const supabase = asSupabaseClient(fake);
+    const { provider } = synchronousProvider(supabase);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000 });
+    await expect(fundOrder(supabase, provider, order.id, 1)).rejects.toThrow(BuyerKycRequiredError);
+    // Never even reached payment_processing, the order stays put.
+    const { data: unchanged } = await supabase.from("orders").select("status").eq("id", order.id).maybeSingle();
+    expect((unchanged as { status: string } | null)?.status).toBe("pending_payment");
   });
 });
 

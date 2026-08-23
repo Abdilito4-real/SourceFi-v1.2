@@ -23,9 +23,18 @@ export default function SupplierVerificationForm({ onSubmitted }: { onSubmitted:
   const [cacRegistrationNumber, setCacRegistrationNumber] = useState("");
   const [taxIdNumber, setTaxIdNumber] = useState("");
   const [supportingDocumentUrl, setSupportingDocumentUrl] = useState("");
+  const [payoutBankName, setPayoutBankName] = useState("");
+  const [payoutAccountNumber, setPayoutAccountNumber] = useState("");
+  const [payoutAccountName, setPayoutAccountName] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const valid = businessName.trim() && businessLocation.trim() && whatTheySell.trim();
+  const valid =
+    businessName.trim() &&
+    businessLocation.trim() &&
+    whatTheySell.trim() &&
+    payoutBankName.trim() &&
+    payoutAccountNumber.trim() &&
+    payoutAccountName.trim();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -35,7 +44,17 @@ export default function SupplierVerificationForm({ onSubmitted }: { onSubmitted:
       const res = await fetch("/api/supplier-verification", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ businessName, businessLocation, whatTheySell, cacRegistrationNumber, taxIdNumber, supportingDocumentUrl }),
+        body: JSON.stringify({
+          businessName,
+          businessLocation,
+          whatTheySell,
+          cacRegistrationNumber,
+          taxIdNumber,
+          supportingDocumentUrl,
+          payoutBankName,
+          payoutAccountNumber,
+          payoutAccountName,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to submit application.");
@@ -80,6 +99,28 @@ export default function SupplierVerificationForm({ onSubmitted }: { onSubmitted:
       <div>
         <Label htmlFor="verif-sells">What do you produce or sell?</Label>
         <Textarea id="verif-sells" value={whatTheySell} onChange={(e) => setWhatTheySell(e.target.value)} required />
+      </div>
+      <div className="border-t border-border pt-3.5">
+        <p className="mb-2.5 text-sm font-medium text-text-primary">Payout details</p>
+        <p className="mb-3 text-xs leading-relaxed text-text-secondary">
+          This is the bank account you&rsquo;ll be paid into. Required — an application can&rsquo;t be reviewed without it.
+        </p>
+        <div className="flex flex-col gap-3">
+          <div>
+            <Label htmlFor="verif-bank-name">Bank name</Label>
+            <Input id="verif-bank-name" value={payoutBankName} onChange={(e) => setPayoutBankName(e.target.value)} placeholder="e.g. GTBank" required />
+          </div>
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <Label htmlFor="verif-account-number">Account number</Label>
+              <Input id="verif-account-number" value={payoutAccountNumber} onChange={(e) => setPayoutAccountNumber(e.target.value)} required />
+            </div>
+            <div className="flex-1">
+              <Label htmlFor="verif-account-name">Account holder name</Label>
+              <Input id="verif-account-name" value={payoutAccountName} onChange={(e) => setPayoutAccountName(e.target.value)} required />
+            </div>
+          </div>
+        </div>
       </div>
       <Button type="submit" loading={submitting} disabled={!valid || submitting}>
         Submit for verification

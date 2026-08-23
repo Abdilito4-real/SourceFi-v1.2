@@ -26,7 +26,7 @@ import { isSupplierCurrentlyVerified } from "./supplierVerification";
 import { recordFundingConfirmed, recordEscrowRelease, recordSettlement, recordRefundFromEscrow, recordPartialRefundWithFee } from "./ledger";
 import { ORDER_PLATFORM_FEE_MINOR, MIN_ORDER_AMOUNT_MINOR, CANCELLATION_FEE_MINOR } from "./money";
 import { getNgnPerUsd } from "./fxRate";
-import type { PaymentBoundary, PaymentStatusEvent } from "./paymentBoundary";
+import type { PaymentBoundary, PaymentStatusEvent, FundingResult } from "./paymentBoundary";
 import type { CancellationCategory, DisputeCategory, DisputeRuling, DisputeType, OrderRow, OrderStatus, UserRow } from "./types";
 import { notifyUser, notifyAdmins } from "./notifications/dispatch";
 
@@ -397,6 +397,18 @@ export async function ensureCallRoomId(supabase: SupabaseClient, order: OrderRow
 export interface FundOrderResult {
   order: OrderRow;
   paymentReference: string;
+  /** Real Yellow Card bank-transfer funding returns account details the
+   * buyer needs to actually pay into (see PaymentBoundary's
+   * FundingResult.paymentInstructions), null for the stub and for any
+   * leg that doesn't need this (Circle's release, on-chain rating). */
+  paymentInstructions: FundingResult["paymentInstructions"] | null;
+}
+
+export class BuyerKycRequiredError extends Error {
+  constructor() {
+    super("Complete your buyer verification before funding an order.");
+    this.name = "BuyerKycRequiredError";
+  }
 }
 
 /** Buyer clicks "Fund Order". Re-checks supplier verification live (not
@@ -414,6 +426,18 @@ export async function fundOrder(
 
   const verified = await isSupplierCurrentlyVerified(supabase, order.supplier_id);
   if (!verified) throw new SupplierNotCurrentlyVerifiedError(order.supplier_id);
+
+  // Real Yellow Card integration: initiateOrderFunding's `recipient`
+  // object needs this on file (name/phone/dob/idType/idNumber/address),
+  // checked BEFORE the state transition below so a buyer without one
+  // gets a clear, specific error rather than the order silently moving
+  // to payment_processing and then failing inside the provider call.
+  // Checked here rather than only inside YellowCardProvider so the
+  // failure is a clean domain error, not a provider-level exception —
+  // the provider still re-checks too (defense in depth, same posture as
+  // everywhere else in this hardening pass).
+  const { data: kyc } = await supabase.from("buyer_kyc_profiles").select("id").eq("user_id", buyerId).maybeSingle();
+  if (!kyc) throw new BuyerKycRequiredError();
 
   const moved = await tryTransition(supabase, orderId, order.status, "payment_processing");
   if (!moved) throw new InvalidOrderTransitionError(order.status, "payment_processing");
@@ -434,7 +458,7 @@ export async function fundOrder(
   }
 
   const updated = await fetchOrder(supabase, orderId);
-  return { order: updated, paymentReference: result.paymentReference };
+  return { order: updated, paymentReference: result.paymentReference, paymentInstructions: result.paymentInstructions ?? null };
 }
 
 // ============================================================================
@@ -914,6 +938,84 @@ export async function setCallPresence(supabase: SupabaseClient, orderId: number,
 // Buyer approval -> release
 // ============================================================================
 
+export class ReleaseNotRetryableError extends Error {
+  readonly currentStatus: OrderStatus;
+  constructor(currentStatus: OrderStatus) {
+    super(`Order is at "${currentStatus}", not "release_submitted" — there is nothing to retry.`);
+    this.name = "ReleaseNotRetryableError";
+    this.currentStatus = currentStatus;
+  }
+}
+
+/** Shared by approveOrder and resolveDispute (the two places that
+ * transition an order INTO release_submitted and then immediately call
+ * the payment boundary) AND by retryEscrowRelease below (which calls
+ * this again for an order already sitting at release_submitted after a
+ * prior attempt failed). Extracted here, once, so the idempotency-key
+ * fix (lib/circleEscrowProvider.ts) and the payment_events audit trail
+ * apply identically at every call site instead of being duplicated (and
+ * risking drifting out of sync) across three of them.
+ *
+ * Deliberately does NOT transition order status itself, the caller
+ * already did that (release_submitted). A REAL provider
+ * (CircleEscrowProvider) can throw synchronously for reasons the stub
+ * never could: no wallet_address on file for the supplier, no USDC
+ * balance in escrow, insufficient balance. There is no legal transition
+ * back out of release_submitted except forward (see
+ * lib/orderStateMachine.ts), so a thrown error here leaves the order
+ * exactly there, on purpose, logged loudly and recorded on the order's
+ * own payment_events trail, not silently lost. Callers propagate the
+ * error; retryEscrowRelease below is the explicit, admin-triggered way
+ * to try again once the underlying issue is fixed. */
+async function attemptEscrowRelease(supabase: SupabaseClient, paymentProvider: PaymentBoundary, orderId: number): Promise<void> {
+  try {
+    const result = await paymentProvider.initiateEscrowRelease(orderId);
+    await supabase.from("payment_events").insert({
+      order_id: orderId,
+      leg: "release",
+      provider: "circle",
+      provider_reference: result.releaseReference,
+      event_type: result.status === "failed" ? "release_failed" : "release_initiated",
+      provider_state: result.status,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Escrow release failed for order ${orderId}, order stuck at release_submitted:`, err);
+    await supabase.from("payment_events").insert({
+      order_id: orderId,
+      leg: "release",
+      provider: "circle",
+      provider_reference: null,
+      event_type: "release_failed",
+      provider_state: "error",
+      raw_payload: { error: message },
+    });
+    throw err;
+  }
+}
+
+/** Admin-triggered retry for an order stuck at release_submitted after a
+ * prior attemptEscrowRelease call failed (see approveOrder/resolveDispute
+ * above). Requires the order to actually BE at release_submitted, a
+ * friendly ReleaseNotRetryableError otherwise (e.g. it already
+ * progressed past this point, or never reached it) — the route layer
+ * turns that into a clear "nothing to retry" response rather than a
+ * generic 500, same posture approve/route.ts's POST_APPROVAL_STATUSES
+ * check already uses for a landed-late duplicate click.
+ *
+ * Safe to call more than once, including concurrently: attemptEscrowRelease
+ * passes the SAME deterministic idempotencyKey (lib/uuidv5.ts) every time
+ * for this order, so Circle treats a resend as the original request, not
+ * a second transfer. See app/api/admin/orders/[id]/retry-release/route.ts. */
+export async function retryEscrowRelease(supabase: SupabaseClient, paymentProvider: PaymentBoundary, orderId: number): Promise<OrderRow> {
+  const order = await fetchOrder(supabase, orderId);
+  if (order.status !== "release_submitted") {
+    throw new ReleaseNotRetryableError(order.status);
+  }
+  await attemptEscrowRelease(supabase, paymentProvider, orderId);
+  return fetchOrder(supabase, orderId);
+}
+
 /** Buyer approves delivery proof. buyer_approved is intent only, no
  * funds move in that write. This function immediately continues into
  * release_submitted in the same call (matching the design doc's
@@ -951,46 +1053,7 @@ export async function approveOrder(
 
   const released = await tryTransition(supabase, orderId, "buyer_approved", "release_submitted");
   if (released) {
-    try {
-      const result = await paymentProvider.initiateEscrowRelease(orderId);
-      await supabase.from("payment_events").insert({
-        order_id: orderId,
-        leg: "release",
-        provider: "circle",
-        provider_reference: result.releaseReference,
-        event_type: result.status === "failed" ? "release_failed" : "release_initiated",
-        provider_state: result.status,
-      });
-    } catch (err) {
-      // A REAL provider (CircleEscrowProvider) can throw synchronously
-      // for reasons the stub never could, no wallet_address on file for
-      // the supplier, no USDC balance in escrow, insufficient balance.
-      // The order is already at release_submitted at this point; there is
-      // no legal transition back to buyer_approved (see
-      // lib/orderStateMachine.ts, release_submitted only goes forward to
-      // release_processing or disputed), so it stays here rather than
-      // being forced into a status that doesn't fit what happened. What
-      // matters is this is never silently lost: logged loudly, and
-      // recorded on the order's own payment_events trail (which the
-      // order-detail route already returns, so it's visible to the buyer,
-      // supplier, and admin, not buried in a server log only admin can
-      // reach). A real production version needs an explicit "retry
-      // release" admin action once the underlying issue (e.g. the
-      // supplier's wallet_address) is fixed, not built here; this is the
-      // honest boundary of what this stage covers, not a silent gap.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`Escrow release failed for order ${orderId}, order stuck at release_submitted:`, err);
-      await supabase.from("payment_events").insert({
-        order_id: orderId,
-        leg: "release",
-        provider: "circle",
-        provider_reference: null,
-        event_type: "release_failed",
-        provider_state: "error",
-        raw_payload: { error: message },
-      });
-      throw err;
-    }
+    await attemptEscrowRelease(supabase, paymentProvider, orderId);
   }
 
   getSupplierUserId(supabase, order.supplier_id).then((supplierUserId) => {
@@ -1223,15 +1286,14 @@ export async function resolveDispute(
     } else {
       const moved = await tryTransition(supabase, order.id, "disputed", "release_submitted");
       if (moved) {
-        const result = await paymentProvider.initiateEscrowRelease(order.id);
-        await supabase.from("payment_events").insert({
-          order_id: order.id,
-          leg: "release",
-          provider: "circle",
-          provider_reference: result.releaseReference,
-          event_type: result.status === "failed" ? "release_failed" : "release_initiated",
-          provider_state: result.status,
-        });
+        // Shared with approveOrder (see attemptEscrowRelease's doc
+        // comment): same idempotency-key protection, same
+        // payment_events failure trail. Previously this branch had no
+        // try/catch at all, a thrown provider error propagated out of
+        // resolveDispute with no payment_events row recorded; now it's
+        // consistent with the buyer-approval path instead of a second,
+        // divergent way to fail.
+        await attemptEscrowRelease(supabase, paymentProvider, order.id);
         autoActionTaken = "release_initiated";
       }
     }

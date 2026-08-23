@@ -26,15 +26,20 @@ credentials.
 
 | Function | Today | Turns real when |
 |---|---|---|
-| `initiateOrderFunding` | Simulated (`StubPaymentProvider`) | Yellow Card is integrated, see below |
-| `initiateEscrowRelease` | **Real** if Circle credentials are set, simulated otherwise | `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `ESCROW_WALLET_ID` are all set |
-| `initiateRefund` | Simulated | Yellow Card is integrated |
+| `initiateOrderFunding` | **Real** (bank-transfer only) if Yellow Card credentials + the buyer's KYC are set, simulated otherwise | `YELLOW_CARD_API_KEY`/`YELLOW_CARD_SECRET_KEY` set, see below |
+| `initiateEscrowRelease` | **Real** if Circle credentials are set, simulated otherwise. Production-hardened: idempotency-safe retry, a real webhook, and a reconciliation cron (see below) | `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `ESCROW_WALLET_ID` are all set |
+| `initiateRefund` | **Real** (full-amount only) if Yellow Card credentials are set, simulated otherwise | `YELLOW_CARD_API_KEY`/`YELLOW_CARD_SECRET_KEY` set, see below |
 | `submitRatingOnChain` | Always simulated, returns `"submitted"`, never `"confirmed"` | The rating contract/chain is decided (not scoped yet) |
 
-There's no partial-credit state for Circle: either all three env vars
-are present and `CircleEscrowProvider` handles every release, or none
-are and the stub handles all of them. Check `getPaymentProvider()` in
-`lib/paymentProvider.ts` if you want to see the exact switch.
+`lib/paymentProvider.ts`'s `getPaymentProvider()` composes each of the 4
+legs independently, not a flat stub-vs-Circle switch: release upgrades
+to `CircleEscrowProvider` the moment its three env vars are all set,
+funding/refund upgrade to `YellowCardProvider` the moment its two env
+vars are set, independently of each other. `getCircleEscrowProvider()`/
+`getYellowCardProvider()` return the concrete provider instance
+directly (needed by each provider's own webhook route and admin
+webhook-registration route, which call methods `PaymentBoundary`
+doesn't expose).
 
 ## Turning on real Circle escrow release
 
@@ -89,55 +94,157 @@ Two things worth understanding before you rely on this:
   `computeUsdcSplit`'s doc comment in `lib/orderService.ts` if you're
   touching this logic.
 
-### Known gaps, even with real credentials wired in
+### Idempotency (production-hardening pass)
 
-Before this goes anywhere near production money:
+`initiateEscrowRelease` passes a **deterministic** `idempotencyKey` to
+Circle's `createTransaction` (`lib/uuidv5.ts`, derived from
+`` `release:${orderId}` `` alone) on every call, original attempt or
+retry. Circle's own dedup on that key is the primary protection against
+a retried release becoming a second on-chain transfer. Two more
+independent layers, defense in depth:
 
-- No webhook endpoint exists yet. Release confirmation is polled
-  (`pollUntilConfirmed` in `lib/circleEscrowProvider.ts`), not pushed.
-  This works but is not how a mature integration should run.
-- A release that never reaches a terminal state after the poll limit
-  logs an error and stops, it does **not** retry or alert anyone
-  automatically. That's a manual reconciliation gap, not solved by
-  this codebase today.
-- **No retry action exists for a release that fails after the order
-  already reached `release_submitted`** (see `approveOrder`'s own
-  comment). If you build one, it MUST pass a stable `idempotencyKey`
-  to Circle's `createTransaction` derived from the order, not rely on
-  `tryTransition`'s compare-and-swap alone, that only guards against
-  two *concurrent* calls, not a *later* manual retry. Circle
-  auto-generates a fresh idempotency key per call today, so a naive
-  retry after an ambiguous failure (the transaction may have already
-  gone through on Circle's side) risks paying the supplier twice.
+- `lib/ledger.ts`'s `recordEscrowRelease` refuses to book a second
+  `SUPPLIER_PAYABLE` debit for an order that already has one
+  (`DuplicateReleaseBookingError`).
+- `handleReleaseConfirmed`'s own compare-and-swap
+  (`release_processing -> escrow_released`) ensures only one
+  confirmation event per order ever reaches that ledger write in the
+  normal flow.
+
+An admin can retry a release stuck at `release_submitted` (a prior
+attempt threw, e.g. no supplier wallet on file) via
+`POST /api/admin/orders/[id]/retry-release`. Safe to click more than
+once, for the same reason a resend is safe: same deterministic key.
+
+### Webhook + reconciliation (production-hardening pass)
+
+Release confirmation now has three independent paths, not just one:
+
+1. **Poll** (`pollUntilConfirmed` in `lib/circleEscrowProvider.ts`) — a
+   fast, best-effort first path, unchanged in spirit, just no longer the
+   only path.
+2. **Webhook** (`app/api/webhooks/circle/route.ts`) — Circle's real
+   notification, signature-verified
+   (`CircleEscrowProvider.verifyWebhookSignature`, `X-Circle-Signature`/
+   `X-Circle-Key-Id` headers, verified against the installed SDK's own
+   documented mechanism). Payload shape confirmed against Circle's own
+   published docs (`developers.circle.com/api-reference/wallets/common/
+   transactions-outbound` and `.../transactions-inbound`, plus the
+   notifications-quickstart envelope doc): the envelope is
+   `{ subscriptionId, notificationId, notificationType, notification,
+   timestamp, version }`, and `notification` for a transaction event
+   matches the REST `Transaction` object exactly (`id`, `state`,
+   `txHash`, `errorReason`, ...), the same shape `client.getTransaction()`
+   returns. Circle also sends a one-time `notificationType:
+   "webhooks.test"` ping when a subscription is first created, handled
+   as an expected no-op. The route reports directly from
+   `notification`'s own `state`/`txHash`/`errorReason`
+   (`CircleEscrowProvider.reportWebhookNotification`) rather than making
+   a second `client.getTransaction()` call — safe now that the shape is
+   confirmed: the signature already proves the message came from Circle,
+   and `handleReleaseConfirmed`'s `order.status` guard is already
+   idempotent against a stale/out-of-order delivery regardless of where
+   the state came from, so re-fetching bought no extra safety, only
+   latency. Falls back to a real re-fetch
+   (`checkAndReportReleaseStatus`) only if the body doesn't carry a
+   usable `state`. Register it once,
+   per deployment, via `POST /api/admin/circle-webhook/register` (idempotent — safe to call
+   again after a redeploy).
+3. **Reconciliation cron** (`app/api/cron/reconcile-releases/route.ts`,
+   `lib/releaseReconciliation.ts`) — the actual fix for "a process
+   restart mid-poll loses that release's confirmation forever": a
+   DB-driven sweep, independent of any one process's memory, for orders
+   stuck at `release_submitted`/`release_processing` longer than 2
+   minutes. Same `CRON_SECRET` pattern as `order-timeouts`. **Frequency
+   caveat:** Vercel's Hobby tier limits a cron to once/day, `vercel.json`
+   schedules this daily to stay valid on every tier, which is too coarse
+   to matter for a genuinely stuck release. If you're not on a tier that
+   allows more frequent Vercel crons, trigger this endpoint externally
+   on a tighter interval instead (e.g. a scheduled GitHub Action hitting
+   it with the `CRON_SECRET` bearer token) — the route itself doesn't
+   care who calls it, only that the secret matches.
+
+A release that never reaches a terminal state after ALL of the above
+(poll exhausted, no webhook received, reconciliation still finds it
+pending) needs actual manual investigation directly with Circle, none of
+this invents an outcome.
+
+### Other known gaps, even with real credentials wired in
+
 - The platform fee is never moved on-chain per order, it stays in the
   escrow wallet by design (see `lib/ledger.ts`'s
   `recordEscrowRelease`). Don't "fix" this without updating the ledger
   logic to match, they're written to agree with each other.
+- Rate limiting on every route that touches this (retry-release,
+  webhook registration, the auth/admin lockouts elsewhere) is now
+  Supabase-backed (`migration 0016_rate_limiting.sql`,
+  `lib/rateLimit.ts`), not in-memory, so it survives serverless cold
+  starts. See `docs/security.md`'s Rate limiting section.
 
-## Yellow Card (NGN funding and settlement)
+## Yellow Card (NGN funding and refund)
 
-**Not built at all.** There are no Yellow Card environment variables,
-no Yellow Card SDK dependency, and no partial implementation anywhere
-in this codebase. `initiateOrderFunding`, `initiateRefund`, and the
-settlement leg are 100% simulated regardless of any other credentials
-you set.
+**Real, bank-transfer only, sandbox-first.** `lib/yellowCardProvider.ts`
+calls Yellow Card's actual Business API (`docs.yellowcard.engineering`,
+confirmed directly against their published docs, not guessed), the
+moment `YELLOW_CARD_API_KEY` and `YELLOW_CARD_SECRET_KEY` are both set.
+Restricted to bank-transfer (`channelType: "bank"`) funding only, a
+deliberate product decision: refunds/cancellations are only documented
+to work for Nigeria bank-transfer receives, and every order this app
+creates must stay refundable. `YELLOW_CARD_ENVIRONMENT` gates
+sandbox vs. production, defaults to `sandbox` — never defaults to
+production, set it explicitly only once you're ready to move real
+money. The settlement leg (the second half of `escrow_released ->
+settled`) is still 100% simulated, there's no `initiateSettlement`
+boundary call at all by design (see `lib/paymentBoundary.ts`'s comment
+on why) — this section is about funding/refund only.
 
-### To integrate it
+### Setup steps
 
-1. Add a `YellowCardProvider` implementing the same `PaymentBoundary`
-   methods, following the shape of `CircleEscrowProvider` as a
-   reference (constructor takes config + an `onStatusUpdate`
-   callback, each method returns a `"processing"` result immediately
-   and reports the real outcome later through that callback).
-2. Wire it into `getPaymentProvider()` in `lib/paymentProvider.ts` the
-   same way Circle is wired in, gated on Yellow Card's own env vars
-   being present.
-3. Decide, and document, whether Yellow Card's API is webhook-based or
-   needs polling like Circle's does today, this determines whether
-   you need a new API route or can reuse the poll pattern.
-4. `initiateOrderFunding` and `initiateRefund` both need a real NGN
-   amount, in minor units (kobo), read from the order row, never from
-   client input, same rule as everywhere else in this codebase.
+1. Sign up / accept an invitation at the Treasury Portal
+   (`portal.yellowcard.io`). 2FA is mandatory on first login.
+2. API Keys → Create New. Grant both **API read** and **API write**
+   (collection request, payment request, settlement). The secret is
+   shown once, save it immediately. A sandbox key is enough to test
+   with — production credentials can wait.
+3. Set `YELLOW_CARD_API_KEY`/`YELLOW_CARD_SECRET_KEY` in `.env.local`
+   (or your hosting provider's environment settings) and restart the
+   app.
+4. Every buyer must have a `buyer_kyc_profiles` row on file before
+   funding works (migration `0018_buyer_kyc.sql`,
+   `POST /api/buyer-kyc`) — Yellow Card's `recipient` object requires
+   full name, phone, DOB, government ID, and address. The buyer UI
+   (`components/BuyerKycModal.tsx`) prompts for this reactively, the
+   first time a fund attempt fails with `kycRequired: true`.
+5. Register the webhook once deployed:
+   `POST /api/admin/yellowcard-webhook/register` (idempotent, same
+   pattern as Circle's).
+6. **Production only, not sandbox**: Yellow Card requires a static
+   outbound IP to whitelist. Vercel serverless functions have none by
+   default — you'll need a NAT/static-IP add-on before this goes live
+   for real money.
+
+### Known gaps and unconfirmed pieces, stated honestly
+
+- **Refund is full-amount only.** Yellow Card's refund endpoint
+  (`POST /receive/{id}/refund`) takes no amount parameter, only the
+  original receive's id — no partial-refund support is documented.
+  `initiateRefund` refuses (`YellowCardPartialRefundUnsupportedError`)
+  rather than guess when a fee-retention cancellation
+  (`recordPartialRefundWithFee`) asks for a partial amount. Confirm
+  with Yellow Card support whether this is possible via an
+  undocumented parameter before this path is exercised in production.
+- **No reconciliation cron for this leg yet**, unlike Circle's
+  `lib/releaseReconciliation.ts`. A stuck funding/refund event today is
+  only caught by Yellow Card's own webhook retry, not an independent
+  DB-driven sweep. Worth building the same pattern here if stuck events
+  turn out to be a real problem.
+- **Genuinely unconfirmed against Yellow Card's live schema**: the
+  exact nested `recipient` field names beyond what their docs' prose
+  states, the exact `bankInfo` response shape, and the refund webhook's
+  exact `event` name (inferred as containing "REFUND", not confirmed —
+  see `app/api/webhooks/yellowcard/route.ts`'s header). Confirm all
+  three against a real sandbox call before the first live funding
+  attempt.
 
 ## Testing without real credentials
 

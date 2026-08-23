@@ -1,27 +1,17 @@
 // lib/rateLimit.ts
 //
-// In-memory fixed-window counter + exponential-backoff lockout for
-// login/session/role-change endpoints.
-//
-// ⚠ Known limitation, not a subtle bug: this is a process-local Map. On a
-// single long-running dev server or a single traditional server process
-// it works as described. On serverless (Vercel functions, most "npm run
-// build && deploy" targets) each invocation can land on a different,
-// possibly-cold instance with its own empty Map, meaning limits reset
-// unpredictably and don't hold across instances. That's fine for this
-// stage's purpose (proves the enforcement logic and shape is correct,
-// which is what the tests check) but production deployment needs a
-// shared store, Upstash Redis or Supabase-backed counters, swapped in
-// behind the same checkRateLimit/recordFailure/recordSuccess interface.
+// Part 3 of the production-hardening pass: Supabase-backed instead of an
+// in-memory Map. The module header used to document exactly this as the
+// known gap ("production deployment needs a shared store... swapped in
+// behind the same checkRateLimit/recordFailure/recordSuccess
+// interface") — this file now does that swap. Every exported name is
+// unchanged; the SQL side (migration 0016_rate_limiting.sql) does the
+// atomic read-modify-write via `rl_*` Postgres functions, following the
+// existing supabase.rpc() pattern in lib/supplierVerification.ts. The
+// one call-site ripple: every function here is now async, so every
+// caller needs `await` (see the 9 call sites this rewrite touched).
 import "server-only";
-
-interface Bucket {
-  failureCount: number;
-  firstFailureAt: number;
-  lockedUntil: number | null;
-}
-
-const buckets = new Map<string, Bucket>();
+import { getSupabaseServerClient } from "./supabaseServer";
 
 const WINDOW_MS = 15 * 60 * 1000; // failures older than this don't count
 const BASE_LOCKOUT_MS = 2000; // first lockout: 2s
@@ -36,40 +26,41 @@ export interface RateLimitResult {
 /** Call before attempting the protected action. Does not itself count as
  * an attempt, pair with recordFailure()/recordSuccess() once the
  * action's real outcome is known. */
-export function checkRateLimit(key: string): RateLimitResult {
-  const bucket = buckets.get(key);
-  if (!bucket) return { allowed: true };
-
-  if (bucket.lockedUntil && bucket.lockedUntil > Date.now()) {
-    return { allowed: false, retryAfterSeconds: Math.ceil((bucket.lockedUntil - Date.now()) / 1000) };
+export async function checkRateLimit(key: string): Promise<RateLimitResult> {
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase.rpc("rl_check_rate_limit", { p_key: key });
+  if (error) {
+    // Fails OPEN (allowed: true) rather than blocking every request if
+    // the rate-limit store itself is unreachable, same posture
+    // lib/fxRate.ts takes toward "fail loudly, don't guess" for a
+    // DIFFERENT kind of failure (there, blocking IS the safe default;
+    // here, blocking every login/action because a lookup table is
+    // temporarily unreachable would turn an availability blip into a
+    // full outage for something that exists to slow down abuse, not to
+    // gate normal traffic).
+    console.error(`rl_check_rate_limit failed for key ${key}:`, error);
+    return { allowed: true };
   }
-  return { allowed: true };
+  const row = Array.isArray(data) ? data[0] : data;
+  return { allowed: row?.allowed ?? true, retryAfterSeconds: row?.retry_after_seconds ?? undefined };
 }
 
-export function recordFailure(key: string): void {
-  const now = Date.now();
-  const existing = buckets.get(key);
-
-  // Window expired since the first failure, start counting fresh rather
-  // than let a stale streak from an hour ago compound into today's lockout.
-  const bucket: Bucket =
-    existing && now - existing.firstFailureAt < WINDOW_MS
-      ? existing
-      : { failureCount: 0, firstFailureAt: now, lockedUntil: null };
-
-  bucket.failureCount += 1;
-
-  if (bucket.failureCount > LOCKOUT_AFTER_FAILURES) {
-    const exponent = bucket.failureCount - LOCKOUT_AFTER_FAILURES - 1;
-    const lockoutMs = Math.min(BASE_LOCKOUT_MS * 2 ** exponent, MAX_LOCKOUT_MS);
-    bucket.lockedUntil = now + lockoutMs;
-  }
-
-  buckets.set(key, bucket);
+export async function recordFailure(key: string): Promise<void> {
+  const supabase = getSupabaseServerClient();
+  const { error } = await supabase.rpc("rl_record_failure", {
+    p_key: key,
+    p_window_ms: WINDOW_MS,
+    p_base_lockout_ms: BASE_LOCKOUT_MS,
+    p_max_lockout_ms: MAX_LOCKOUT_MS,
+    p_lockout_after: LOCKOUT_AFTER_FAILURES,
+  });
+  if (error) console.error(`rl_record_failure failed for key ${key}:`, error);
 }
 
-export function recordSuccess(key: string): void {
-  buckets.delete(key);
+export async function recordSuccess(key: string): Promise<void> {
+  const supabase = getSupabaseServerClient();
+  const { error } = await supabase.rpc("rl_record_success", { p_key: key });
+  if (error) console.error(`rl_record_success failed for key ${key}:`, error);
 }
 
 /** Build a stable rate-limit key from the action name plus whatever
@@ -86,37 +77,24 @@ export function rateLimitKey(action: string, identifier: string): string {
 // recordSuccess() wipes the bucket, so it's the wrong tool for "cap total
 // volume regardless of outcome", a spam run of individually-valid dispute
 // filings would never trip it. This is a plain fixed-window request
-// counter instead: every call counts, success or not. Same in-memory-only
-// caveat as the module comment above (process-local, resets on
-// serverless cold starts), same "swap to Redis later behind this
-// interface" plan applies here too.
+// counter instead: every call counts, success or not.
 // ============================================================================
-
-interface QuotaBucket {
-  windowStart: number;
-  count: number;
-}
-
-const quotaBuckets = new Map<string, QuotaBucket>();
 
 export interface QuotaResult {
   allowed: boolean;
   retryAfterSeconds?: number;
 }
 
-function checkQuota(key: string, maxPerWindow: number, windowMs: number): QuotaResult {
-  const now = Date.now();
-  const bucket = quotaBuckets.get(key);
-
-  if (!bucket || now - bucket.windowStart >= windowMs) {
-    quotaBuckets.set(key, { windowStart: now, count: 1 });
+async function checkQuota(key: string, maxPerWindow: number, windowMs: number): Promise<QuotaResult> {
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase.rpc("rl_check_quota", { p_key: key, p_max_per_window: maxPerWindow, p_window_ms: windowMs });
+  if (error) {
+    // Same fail-open posture as checkRateLimit above, same reasoning.
+    console.error(`rl_check_quota failed for key ${key}:`, error);
     return { allowed: true };
   }
-  if (bucket.count >= maxPerWindow) {
-    return { allowed: false, retryAfterSeconds: Math.ceil((bucket.windowStart + windowMs - now) / 1000) };
-  }
-  bucket.count += 1;
-  return { allowed: true };
+  const row = Array.isArray(data) ? data[0] : data;
+  return { allowed: row?.allowed ?? true, retryAfterSeconds: row?.retry_after_seconds ?? undefined };
 }
 
 /** "Rate-limit per IP AND per account", two independent gates, either one
@@ -124,8 +102,24 @@ function checkQuota(key: string, maxPerWindow: number, windowMs: number): QuotaR
  * termination routes (cancel/abandon/withdraw), where every individual
  * call can look perfectly valid and checkRateLimit's failure-counting
  * wouldn't catch a volume spam run. */
-export function checkDualQuota(action: string, ip: string, accountKey: string, maxPerWindow: number, windowMs: number): QuotaResult {
-  const byIp = checkQuota(rateLimitKey(`${action}-ip`, ip), maxPerWindow, windowMs);
+export async function checkDualQuota(action: string, ip: string, accountKey: string, maxPerWindow: number, windowMs: number): Promise<QuotaResult> {
+  const byIp = await checkQuota(rateLimitKey(`${action}-ip`, ip), maxPerWindow, windowMs);
   if (!byIp.allowed) return byIp;
   return checkQuota(rateLimitKey(`${action}-account`, accountKey), maxPerWindow, windowMs);
+}
+
+/** Deletes rows untouched in >24h from both bucket tables so they don't
+ * grow unbounded. Piggybacked onto the existing daily order-timeouts
+ * cron (app/api/cron/order-timeouts/route.ts) rather than standing up
+ * new cron infra just for this. Best-effort: a failure here logs and
+ * moves on, it must never fail the cron run it's attached to. */
+export async function cleanupOldRateLimitBuckets(): Promise<void> {
+  const supabase = getSupabaseServerClient();
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const [rateLimitResult, quotaResult] = await Promise.allSettled([
+    supabase.from("rate_limit_buckets").delete().lt("first_failure_at", cutoff),
+    supabase.from("quota_buckets").delete().lt("window_start", cutoff),
+  ]);
+  if (rateLimitResult.status === "rejected") console.error("cleanupOldRateLimitBuckets: rate_limit_buckets cleanup failed:", rateLimitResult.reason);
+  if (quotaResult.status === "rejected") console.error("cleanupOldRateLimitBuckets: quota_buckets cleanup failed:", quotaResult.reason);
 }

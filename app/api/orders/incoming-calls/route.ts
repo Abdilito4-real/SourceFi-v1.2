@@ -10,6 +10,7 @@
 // counterpart, see lib/orderService.ts's setCallPresence and migration
 // 0012 for what actually writes these timestamps).
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
+import { getUserScopedOrFallbackClient } from "../../../../lib/supabaseUserClient";
 import { requireSession } from "../../../../lib/authz";
 
 // Mirrors OrderDetailsModal.tsx's own staleness window: a heartbeat-less
@@ -31,7 +32,13 @@ export async function GET() {
   const supabase = getSupabaseServerClient();
   const cutoff = new Date(Date.now() - PRESENCE_STALE_MS).toISOString();
 
-  let query = supabase
+  // Real RLS pilot (migration 0017_orders_rls_pilot.sql): the role
+  // check above already guarantees buyer/supplier here (admin returned
+  // early), so this always uses the authenticated-role client, no
+  // admin branch needed, see app/api/orders/route.ts for the full
+  // reasoning.
+  const readClient = await getUserScopedOrFallbackClient(auth.user.id);
+  let query = readClient
     .from("orders")
     .select("id, order_code, title")
     .in("status", LIVE_CALL_ELIGIBLE_STATUSES)
