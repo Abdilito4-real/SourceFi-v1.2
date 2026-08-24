@@ -43,6 +43,15 @@ interface LedgerBalance {
   net_minor: number;
 }
 
+interface FailedReleaseRow {
+  orderId: number;
+  orderCode: string | null;
+  stillStuck: boolean;
+  providerState: string;
+  errorReason: string | null;
+  createdAt: string;
+}
+
 const ROLE_TONE: Record<Role, BadgeTone> = {
   buyer: "neutral",
   supplier: "accent",
@@ -90,6 +99,7 @@ export default function AdminDashboard() {
   const [ledgerBalances, setLedgerBalances] = useState<LedgerBalance[]>([]);
   const [loadingLedger, setLoadingLedger] = useState(true);
   const [ledgerPaymentMode, setLedgerPaymentMode] = useState<{ ngnLive: boolean; usdcLive: boolean } | null>(null);
+  const [failedReleases, setFailedReleases] = useState<FailedReleaseRow[]>([]);
 
   const isAdmin = user?.role === "admin";
 
@@ -205,6 +215,7 @@ export default function AdminDashboard() {
       setLedgerEntries(data.entries || []);
       setLedgerBalances(data.balances || []);
       setLedgerPaymentMode(data.paymentMode || null);
+      setFailedReleases(data.failedReleases || []);
     } catch (err) {
       notify("error", err instanceof Error ? err.message : "Failed to load ledger.");
     } finally {
@@ -617,6 +628,34 @@ export default function AdminDashboard() {
                   </span>
                 </div>
               )}
+
+              {failedReleases.length > 0 && (
+                <div>
+                  <h2 className="mb-3 font-display text-lg italic text-text-primary">Recent failed releases</h2>
+                  <div className="flex flex-col gap-2">
+                    {failedReleases.map((f) => (
+                      <div
+                        key={`${f.orderId}:${f.createdAt}`}
+                        className="flex flex-col gap-1 rounded-lg border border-danger bg-danger-soft px-3 py-2.5 text-sm text-danger-text sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div>
+                          <span className="font-mono font-semibold">{f.orderCode || `#${f.orderId}`}</span> — {f.providerState}
+                          {f.errorReason ? `: ${f.errorReason}` : ""}
+                          <span className="ml-2 text-xs text-text-tertiary">{new Date(f.createdAt).toLocaleString()}</span>
+                        </div>
+                        {f.stillStuck ? (
+                          <Button size="sm" variant="secondary" onClick={() => setSection("orders")}>
+                            Go retry it
+                          </Button>
+                        ) : (
+                          <span className="text-xs text-text-tertiary">A later attempt already went through</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div>
                 <h2 className="mb-3 font-display text-lg italic text-text-primary">Account balances (all-time, net)</h2>
                 {ledgerBalances.length === 0 ? (

@@ -49,7 +49,14 @@ export const ORDER_STATUS_TONE: Record<OrderStatus, BadgeTone> = {
   release_submitted: "warning",
   release_processing: "warning",
   escrow_released: "success",
-  settlement_processing: "warning",
+  // Not actually "still working": the release that pays this leg out
+  // already confirmed on-chain by the time an order reaches this status
+  // (it's the system-transition target right after escrow_released, see
+  // lib/orderStateMachine.ts), and there's no real settlement integration
+  // yet to ever move it further (docs/payment-integration.md). Showing
+  // this as "warning" told users something was still in flight when it
+  // wasn't, forever, on an order that's actually done.
+  settlement_processing: "success",
   settled: "success",
   rejected: "danger",
   disputed: "danger",

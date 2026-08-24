@@ -93,13 +93,21 @@ const DISPUTE_CATEGORIES: { value: DisputeCategory; label: string }[] = [
 // Statuses where the underlying payment/blockchain state is still
 // resolving, the modal polls while in one of these so the buyer/supplier
 // see the outcome without having to close and reopen it.
+// settlement_processing deliberately NOT included: by the time an order
+// reaches it, the release that actually pays this leg out has already
+// confirmed on-chain (it's the system-transition target right after
+// escrow_released, lib/orderStateMachine.ts) — there's no real settlement
+// integration yet to ever move it further (docs/payment-integration.md),
+// so treating it as still-in-flight meant the stale-timer banner below
+// fired forever on an order that was actually done. See the terminal-
+// states block further down, which now renders the same "funds released"
+// banner for escrow_released AND settlement_processing.
 const IN_FLIGHT_STATUSES = new Set([
   "payment_processing",
   "converting",
   "escrow_depositing",
   "release_submitted",
   "release_processing",
-  "settlement_processing",
   "refund_processing",
 ]);
 
@@ -130,7 +138,6 @@ function getInFlightProgress(status: OrderStatus): { legLabel: string; step: Tra
     case "release_submitted":
       return { legLabel: "Release", step: "submitted" };
     case "release_processing":
-    case "settlement_processing":
       return { legLabel: "Release", step: "processing" };
     case "refund_processing":
       return { legLabel: "Refund", step: "processing" };
@@ -1305,8 +1312,16 @@ export default function OrderDetailsModal({
         </div>
       )}
 
-      {/* Terminal states */}
-      {order.status === "escrow_released" && (
+      {/* Terminal states. escrow_released is included here even though it
+          also has its own (now-empty) window in IN_FLIGHT_STATUSES logic
+          above never applying to it: the system auto-advances
+          escrow_released -> settlement_processing the instant release
+          confirms (lib/orderStateMachine.ts), so in practice this
+          component almost never renders while status is literally
+          "escrow_released" — settlement_processing is the actual resting
+          state users see, and by then the release has already confirmed,
+          same real-world fact, same banner. */}
+      {(order.status === "escrow_released" || order.status === "settlement_processing") && (
         <div className="mt-5 flex items-center gap-2 rounded-lg border border-success bg-success-soft px-4 py-3 text-sm text-success-text">
           <CheckCircle2 size={15} /> Funds released. Paying your supplier now.
         </div>

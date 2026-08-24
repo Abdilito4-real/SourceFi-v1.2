@@ -61,12 +61,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       err instanceof NoUsdcTokenOnEscrowWalletError ||
       err instanceof InsufficientEscrowBalanceError
     ) {
-      // Same "never leak the raw provider error" rule approve/route.ts
-      // already follows — this can still name wallet IDs/USDC amounts.
+      // Unlike approve/route.ts (buyer-facing, where the "never leak the
+      // raw provider error" rule really does apply), this route is
+      // admin-only — an admin already sees the escrow wallet's exact
+      // balance on the Ledger page, so hiding it here just forces a trip
+      // to server logs for something the UI could say directly. Each of
+      // these three error classes' own .message is already written as a
+      // plain, actionable sentence (see their constructors in
+      // lib/circleEscrowProvider.ts), not a stack trace, so it's safe to
+      // surface verbatim. Still logged server-side with a reference code
+      // for cross-referencing, same as everywhere else.
       const ref = logInternalError(`retryEscrowRelease, order ${orderId}`, err);
       return Response.json(
         {
-          error: `The retry didn't go through. Funds are still safely held in escrow, nothing was lost. Reference ${ref}.`,
+          error: `${err.message} Funds are still safely held in escrow, nothing was lost. Reference ${ref}.`,
           referenceCode: ref,
         },
         { status: 502 }

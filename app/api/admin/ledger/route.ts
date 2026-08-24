@@ -35,6 +35,41 @@ export async function GET(request: Request) {
 
   const entriesWithOrder = (entries || []).map((e) => ({ ...e, order_code: orderCodeById.get(e.order_id) ?? null }));
 
+  // Surfaced so an admin sees "this release failed and why" without
+  // digging through server logs — reportOutcome (lib/circleEscrowProvider.ts)
+  // used to only console.error a terminal FAILED/CANCELLED/DENIED
+  // outcome, this is the queryable trail that fix now leaves behind.
+  const { data: failedReleaseEvents, error: failedErr } = await supabase
+    .from("payment_events")
+    .select("order_id, provider_state, raw_payload, created_at")
+    .eq("leg", "release")
+    .eq("event_type", "release_failed")
+    .order("created_at", { ascending: false })
+    .limit(20);
+  if (failedErr) return dbErrorResponse("GET admin/ledger failed releases", failedErr);
+
+  const failedOrderIds = Array.from(new Set((failedReleaseEvents || []).map((e) => e.order_id)));
+  const { data: failedOrders } =
+    failedOrderIds.length > 0
+      ? await supabase.from("orders").select("id, order_code, status").in("id", failedOrderIds)
+      : { data: [] as { id: number; order_code: string; status: string }[] };
+  const failedOrderById = new Map((failedOrders || []).map((o) => [o.id, o]));
+
+  const failedReleases = (failedReleaseEvents || []).map((e) => {
+    const order = failedOrderById.get(e.order_id);
+    const payload = e.raw_payload as { errorReason?: string | null } | null;
+    return {
+      orderId: e.order_id,
+      orderCode: order?.order_code ?? null,
+      // Whether this one still needs a retry, or a later attempt already
+      // moved the order past release_submitted/release_processing.
+      stillStuck: order?.status === "release_submitted" || order?.status === "release_processing",
+      providerState: e.provider_state,
+      errorReason: payload?.errorReason ?? null,
+      createdAt: e.created_at,
+    };
+  });
+
   // Net balance per account+currency across EVERY entry ever written, not
   // just this page, the invariant worth watching isn't "do the last 100
   // rows balance", it's "does the whole ledger still balance."
@@ -62,5 +97,6 @@ export async function GET(request: Request) {
     entries: entriesWithOrder,
     balances: Array.from(balances.values()).sort((a, b) => a.account.localeCompare(b.account) || a.currency.localeCompare(b.currency)),
     paymentMode: { ngnLive: yellowCardConfigured, usdcLive: circleConfigured },
+    failedReleases,
   });
 }
