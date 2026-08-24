@@ -26,3 +26,8 @@ supabase/.temp/
 
 # Per-session lock file from the Claude Code harness, not source.
 .claude/scheduled_tasks.lock
+
+# Circle entity-secret recovery file (scripts/register-entity-secret.mjs).
+# The only way to ever reset the entity secret if it's lost — back it up
+# somewhere safe outside this repo, never commit it.
+/recovery

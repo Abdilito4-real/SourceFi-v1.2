@@ -166,16 +166,44 @@ export class CircleEscrowProvider implements PaymentBoundary {
     }
 
     // idempotencyKey: deterministic (lib/uuidv5.ts), derived from the
-    // order id alone, so the ORIGINAL attempt and any later retry
-    // (app/api/admin/orders/[id]/retry-release) send the exact same key.
-    // Circle's own docs describe idempotencyKey as making "multiple
-    // identical requests have the same effect as a single request" — a
-    // resend with this key returns the original transaction rather than
-    // creating a second on-chain transfer. This is the fix for the gap
-    // this comment used to describe: a naive retry risking paying the
-    // supplier twice. tryTransition()'s compare-and-swap remains a
-    // second, independent guard at the state-machine level; this is the
-    // provider-level one docs/payment-integration.md said was missing.
+    // order id alone by default, so the ORIGINAL attempt and any later
+    // retry (app/api/admin/orders/[id]/retry-release) send the exact
+    // same key — Circle's own docs describe idempotencyKey as making
+    // "multiple identical requests have the same effect as a single
+    // request", so a resend can't become a second on-chain transfer.
+    // tryTransition()'s compare-and-swap remains a second, independent
+    // guard at the state-machine level.
+    //
+    // EXCEPTION: if the most recent release event for this order is a
+    // CONFIRMED terminal failure (reportOutcome's "failed" branch below,
+    // which only ever fires from a real Circle-reported FAILED/CANCELLED/
+    // DENIED state with no txHash — i.e. we know for certain no money
+    // moved under the old key), the plain deterministic key would just
+    // hand back that same dead transaction forever, permanently stuck.
+    // In that one confirmed-dead case only, fold the count of prior
+    // failures into the key so this attempt is genuinely new to Circle.
+    // Every other outcome (still pending, or no prior attempt at all)
+    // keeps today's plain key, unchanged.
+    const { data: lastReleaseEvent } = await this.supabase
+      .from("payment_events")
+      .select("event_type")
+      .eq("order_id", orderId)
+      .eq("leg", "release")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let idempotencyKeySeed = `release:${orderId}`;
+    if (lastReleaseEvent?.event_type === "release_failed") {
+      const { count } = await this.supabase
+        .from("payment_events")
+        .select("id", { count: "exact", head: true })
+        .eq("order_id", orderId)
+        .eq("leg", "release")
+        .eq("event_type", "release_failed");
+      idempotencyKeySeed = `release:${orderId}:retry-after-failure:${count ?? 1}`;
+    }
+
     const response = await this.client.createTransaction({
       walletId: this.config.escrowWalletId,
       destinationAddress: supplier.wallet_address,
@@ -183,7 +211,7 @@ export class CircleEscrowProvider implements PaymentBoundary {
       amount: [amountMajor],
       fee: { type: "level", config: { feeLevel: "MEDIUM" } },
       refId: `order-${orderId}-release`,
-      idempotencyKey: uuidv5(`release:${orderId}`, SOURCEFI_UUID_NAMESPACE),
+      idempotencyKey: uuidv5(idempotencyKeySeed, SOURCEFI_UUID_NAMESPACE),
     });
 
     const releaseReference = response.data?.id;
@@ -295,6 +323,27 @@ export class CircleEscrowProvider implements PaymentBoundary {
           (outcome.errorReason ? ` (${outcome.errorReason})` : "") +
           `. Needs manual reconciliation (see app/api/admin/orders/[id]/retry-release).`
       );
+      // Previously this was ONLY a console.error — no queryable record at
+      // all, meaning the order looked identical to "still stuck, never
+      // even attempted" from the DB's own perspective. This is what
+      // initiateEscrowRelease's idempotency-key check above reads back to
+      // know a genuinely fresh attempt is safe (Circle confirmed FAILED,
+      // no txHash, no money moved). order.status deliberately stays at
+      // release_submitted/release_processing, unchanged — that's exactly
+      // the state POST /api/admin/orders/[id]/retry-release already
+      // expects to find and act on, not a new state to invent.
+      const { error: insertError } = await this.supabase.from("payment_events").insert({
+        order_id: orderId,
+        leg: "release",
+        provider: "circle",
+        provider_reference: transactionId,
+        event_type: "release_failed",
+        provider_state: outcome.state,
+        raw_payload: { errorReason: outcome.errorReason ?? null },
+      });
+      if (insertError) {
+        console.error(`Failed to record release_failed payment_event for order ${orderId} (transaction ${transactionId}):`, insertError);
+      }
       return true;
     }
     return false; // still pending (QUEUED, SENT, ...), check again later
