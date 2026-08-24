@@ -32,7 +32,15 @@ import type { SupplierListingRow, SupplierProfileRow, SupplierVerificationApplic
 
 type Section = "overview" | "orders" | "listings" | "verification";
 
-const TERMINAL_STATUSES = new Set(["settled", "refunded", "cancelled", "expired"]);
+// settlement_processing included alongside settled: the release that
+// actually pays the supplier has already confirmed on-chain by the time
+// an order reaches this status (system-transition target right after
+// escrow_released, lib/orderStateMachine.ts), and there's no real
+// settlement integration yet to ever advance it further
+// (docs/payment-integration.md). Same call already made for the UI
+// (components/ui/Badge.tsx, OrderDetailsModal.tsx), buyer dashboard, and
+// supplier trust scoring (lib/supplierTrust.ts).
+const TERMINAL_STATUSES = new Set(["settled", "settlement_processing", "refunded", "cancelled", "expired"]);
 
 interface SupplierTrust {
   ratingAverage: number | null;
@@ -341,7 +349,7 @@ export default function SupplierDashboard() {
   const activeOrders = orders.filter((o) => !TERMINAL_STATUSES.has(o.status));
   const historyOrders = orders.filter((o) => TERMINAL_STATUSES.has(o.status));
   const ordersTabbed = ordersTab === "active" ? activeOrders : historyOrders;
-  const settledOrders = orders.filter((o) => o.status === "settled");
+  const settledOrders = orders.filter((o) => o.status === "settled" || o.status === "settlement_processing");
   const earningsMinor = settledOrders.reduce((acc, o) => acc + (o.amount_minor - o.platform_fee_minor), 0);
   const incomingCount = orders.filter((o) => o.status === "funded" || o.status === "fulfilling").length;
 

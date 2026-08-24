@@ -44,7 +44,16 @@ interface SupplierListing {
   tier: SupplierTier | null;
 }
 
-const TERMINAL_STATUSES = new Set(["settled", "refunded", "cancelled", "expired"]);
+// settlement_processing included alongside settled: the release that
+// actually pays the supplier has already confirmed on-chain by the time
+// an order reaches this status (system-transition target right after
+// escrow_released, lib/orderStateMachine.ts), and there's no real
+// settlement integration yet to ever advance it further
+// (docs/payment-integration.md). Treating it as still "active" left a
+// fully-paid order sitting in the wrong tab forever. Same call already
+// made for the UI (components/ui/Badge.tsx, OrderDetailsModal.tsx) and
+// supplier trust scoring (lib/supplierTrust.ts).
+const TERMINAL_STATUSES = new Set(["settled", "settlement_processing", "refunded", "cancelled", "expired"]);
 
 function MaterialListingCard({ listing, onOrder }: { listing: SupplierListingRow; onOrder: (listing: SupplierListingRow) => void }) {
   return (
@@ -350,7 +359,7 @@ export default function BuyerDashboard() {
   }, [user, section, materialsQuery]);
 
   const activeCount = orders.filter((o) => !TERMINAL_STATUSES.has(o.status)).length;
-  const completedCount = orders.filter((o) => o.status === "settled").length;
+  const completedCount = orders.filter((o) => o.status === "settled" || o.status === "settlement_processing").length;
   const inEscrowMinor = orders
     .filter((o) => o.status === "funded" || o.status === "fulfilling" || o.status === "proof_submitted")
     .reduce((acc, o) => acc + o.amount_minor, 0);

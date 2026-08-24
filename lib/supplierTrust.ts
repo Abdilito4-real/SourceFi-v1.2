@@ -66,12 +66,28 @@ export const SUPPLIER_TIER_LABELS: Record<SupplierTier, string> = {
 };
 
 /** Bulk count of settled (successfully completed) orders per supplier,
- * one query for however many ids the caller has, not N+1. */
+ * one query for however many ids the caller has, not N+1.
+ *
+ * Counts settlement_processing alongside settled, not settled alone: by
+ * the time an order reaches settlement_processing the release that pays
+ * the supplier has already confirmed on-chain (system-transition target
+ * right after escrow_released, lib/orderStateMachine.ts), and there's no
+ * real settlement integration yet to ever advance it to settled
+ * (docs/payment-integration.md). Counting settled only meant every real
+ * Circle-paid order was invisible to trust-tier scoring — every supplier
+ * permanently stuck at zero completed orders, discovered while
+ * live-testing the first real release. Same "already done in every way
+ * that matters" call already made for the UI (components/ui/Badge.tsx,
+ * components/OrderDetailsModal.tsx). */
 export async function getCompletedOrderCounts(supabase: SupabaseClient, supplierIds: number[]): Promise<Map<number, number>> {
   const counts = new Map<number, number>();
   if (supplierIds.length === 0) return counts;
 
-  const { data } = await supabase.from("orders").select("supplier_id").eq("status", "settled").in("supplier_id", supplierIds);
+  const { data } = await supabase
+    .from("orders")
+    .select("supplier_id")
+    .in("status", ["settled", "settlement_processing"])
+    .in("supplier_id", supplierIds);
   for (const row of data ?? []) {
     const id = row.supplier_id as number;
     counts.set(id, (counts.get(id) ?? 0) + 1);
