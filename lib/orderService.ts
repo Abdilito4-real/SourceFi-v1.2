@@ -1191,7 +1191,11 @@ export async function reportPostSettlementIssue(
 ): Promise<{ disputeId: number }> {
   const order = await fetchOrder(supabase, orderId);
   if (order.buyer_id !== buyerId) throw new NotOrderOwnerError();
-  if (order.status !== "settled") {
+  // settlement_processing accepted alongside settled, same reasoning as
+  // submitRating above — real settlement never actually completes today,
+  // so requiring settled specifically made "report an issue" permanently
+  // unreachable on every real Circle-paid order.
+  if (order.status !== "settled" && order.status !== "settlement_processing") {
     throw new Error(`Order ${orderId} is not settled (status: ${order.status}). Use rejectProof before approval instead.`);
   }
 
@@ -1350,7 +1354,16 @@ export async function submitRating(
 ): Promise<{ txHash: string | null; confirmed: boolean }> {
   const order = await fetchOrder(supabase, orderId);
   if (order.buyer_id !== buyerId) throw new NotOrderOwnerError();
-  if (order.status !== "settled") throw new Error(`Order ${orderId} is not settled yet, cannot rate.`);
+  // settlement_processing accepted alongside settled: the release that
+  // pays the supplier has already confirmed on-chain by the time an
+  // order reaches settlement_processing (system-transition target right
+  // after escrow_released, lib/orderStateMachine.ts), and there's no
+  // real settlement integration yet to ever advance it to settled
+  // (docs/payment-integration.md). Requiring settled specifically made
+  // rating permanently unreachable on every real Circle-paid order.
+  if (order.status !== "settled" && order.status !== "settlement_processing") {
+    throw new Error(`Order ${orderId} is not settled yet, cannot rate.`);
+  }
 
   const { data: existing } = await supabase.from("ratings").select("id").eq("order_id", orderId).maybeSingle();
   if (existing) throw new Error(`Order ${orderId} has already been rated.`);

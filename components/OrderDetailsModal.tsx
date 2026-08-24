@@ -1326,11 +1326,22 @@ export default function OrderDetailsModal({
           <CheckCircle2 size={15} /> Funds released. Paying your supplier now.
         </div>
       )}
-      {order.status === "settled" && (
+      {/* Rating + report-issue: available once settlement_processing, not
+          only settled, same "already done in every way that matters"
+          reasoning as the banner above — settled would never arrive
+          under a real Circle release with no real settlement leg built
+          yet (docs/payment-integration.md), which made both of these
+          permanently unreachable. The "order complete" banner itself
+          only repeats for a literal settled (the settlement_processing
+          case already got its own confirmation from the banner above,
+          showing both here would just duplicate it). */}
+      {(order.status === "settled" || order.status === "settlement_processing") && (
         <div className="mt-5 flex flex-col gap-4">
-          <div className="flex items-center gap-2 rounded-lg border border-success bg-success-soft px-4 py-3 text-sm text-success-text">
-            <CheckCircle2 size={15} /> Order complete, supplier has been paid.
-          </div>
+          {order.status === "settled" && (
+            <div className="flex items-center gap-2 rounded-lg border border-success bg-success-soft px-4 py-3 text-sm text-success-text">
+              <CheckCircle2 size={15} /> Order complete, supplier has been paid.
+            </div>
+          )}
 
           {isBuyer && !rating && (
             <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface-sunken p-4">
