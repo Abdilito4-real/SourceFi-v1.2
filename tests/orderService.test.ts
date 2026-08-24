@@ -29,6 +29,7 @@ import {
   NotOrderOwnerError,
   VerificationCallIncompleteError,
   InvalidOrderAmountError,
+  ReleaseAlreadyConfirmedError,
 } from "../lib/orderService";
 import { InvalidOrderTransitionError } from "../lib/orderStateMachine";
 import { StubPaymentProvider, type PaymentStatusEvent } from "../lib/paymentBoundary";
@@ -370,6 +371,49 @@ describe("rejectProof -> disputed -> resolveDispute (pre-release refund path)", 
     confirmed = waitForConfirmation();
     await confirmed;
     expect(fake.getRows("orders").find((o) => o.id === order.id)!.status).toBe("settled");
+  });
+
+  // No live code path today can actually put an order into "disputed"
+  // once its release has already confirmed (every real dispute-opening
+  // caller only fires at funded/fulfilling/proof_submitted/rejected —
+  // see ReleaseAlreadyConfirmedError's own doc comment), so this
+  // simulates the guarded scenario directly by seeding the
+  // release_confirmed payment_event a real Circle release would have
+  // written, rather than by trying to reach it through the normal flow.
+  it("resolveDispute refuses to auto-refund a buyer-ruled dispute if the release already confirmed, even though that's unreachable through any live flow today", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider, waitForConfirmation } = synchronousProvider(supabase);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 200_000_00 });
+
+    let confirmed = waitForConfirmation();
+    await fundOrder(supabase, provider, order.id, 1);
+    await confirmed;
+
+    await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
+    await rejectProof(supabase, order.id, 1, { category: "item_not_as_described", description: "Wrong grade" });
+    const dispute = fake.getRows("disputes").find((d) => d.order_id === order.id)!;
+
+    // Simulate a real Circle release having already confirmed for this
+    // order — same row shape lib/circleEscrowProvider.ts's reportOutcome
+    // writes on a real "confirmed" outcome.
+    await supabase.from("payment_events").insert({
+      order_id: order.id,
+      leg: "release",
+      provider: "circle",
+      provider_reference: "circle-txn-already-confirmed",
+      event_type: "release_confirmed",
+      provider_state: "COMPLETE",
+      tx_hash: "0xalreadyconfirmed",
+    });
+
+    await expect(resolveDispute(supabase, provider, dispute.id as number, 3, "buyer", "Trying to refund after release.")).rejects.toThrow(
+      ReleaseAlreadyConfirmedError
+    );
+
+    // Refused before ever touching order status or initiating a refund.
+    const finalOrder = fake.getRows("orders").find((o) => o.id === order.id)!;
+    expect(finalOrder.status).toBe("disputed");
   });
 });
 

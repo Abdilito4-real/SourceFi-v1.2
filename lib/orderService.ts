@@ -210,6 +210,28 @@ export class NotOrderOwnerError extends Error {
   }
 }
 
+/** Defense in depth for resolveDispute's buyer-ruling refund branch, see
+ * that function's own comment for why: no live code path can currently
+ * reach a "disputed" order whose release already confirmed (traced
+ * exhaustively — every caller that opens a real dispute only fires at
+ * funded/fulfilling/proof_submitted/rejected, well before release), so
+ * this should never actually throw today. It exists for the same reason
+ * lib/ledger.ts's assertBalanced and the release idempotency's two
+ * independent layers exist: if a future feature or a bug ever DOES
+ * reach this branch after a real Circle release already sent USDC to
+ * the supplier, refunding the buyer on top of that would be a genuine
+ * double-pay, not a simulated one, the moment Yellow Card refund goes
+ * live. Fail loud here instead. */
+export class ReleaseAlreadyConfirmedError extends Error {
+  constructor(orderId: number) {
+    super(
+      `Order ${orderId}'s escrow release already confirmed on-chain — refunding the buyer now would double-pay. ` +
+        `This needs manual reconciliation with the supplier directly, not an automatic refund.`
+    );
+    this.name = "ReleaseAlreadyConfirmedError";
+  }
+}
+
 async function fetchOrder(supabase: SupabaseClient, orderId: number): Promise<OrderRow> {
   const { data, error } = await supabase.from("orders").select("*").eq("id", orderId).maybeSingle();
   if (error) throw error;
@@ -1274,6 +1296,21 @@ export async function resolveDispute(
 
   if (order.status === "disputed") {
     if (ruling === "buyer") {
+      // See ReleaseAlreadyConfirmedError's own comment: not reachable
+      // through any live code path today, this is an independent guard
+      // in case that ever changes, not a check standing in for a real
+      // one — same "guard redundantly, never trust a single check"
+      // posture as everywhere else money moves in this file.
+      const { data: releaseConfirmed } = await supabase
+        .from("payment_events")
+        .select("id")
+        .eq("order_id", order.id)
+        .eq("leg", "release")
+        .eq("event_type", "release_confirmed")
+        .limit(1)
+        .maybeSingle();
+      if (releaseConfirmed) throw new ReleaseAlreadyConfirmedError(order.id);
+
       const moved = await tryTransition(supabase, order.id, "disputed", "refund_processing");
       if (moved) {
         const result = await paymentProvider.initiateRefund(order.id, order.amount_minor);
