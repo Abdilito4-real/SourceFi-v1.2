@@ -20,6 +20,7 @@ import {
 import { InvalidOrderTransitionError } from "../../../../../lib/orderStateMachine";
 import { checkDualQuota } from "../../../../../lib/rateLimit";
 import { getClientIp } from "../../../../../lib/authz";
+import { dbErrorResponse } from "../../../../../lib/dbErrorResponse";
 import type { BuyerCancellationCategory } from "../../../../../lib/types";
 
 const VALID_CATEGORIES: BuyerCancellationCategory[] = ["changed_mind", "found_alternative", "no_longer_needed", "price_disagreement", "other"];
@@ -70,6 +71,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (err instanceof OrderNotFoundError) return Response.json({ error: err.message }, { status: 404 });
     if (err instanceof NotOrderOwnerError) return Response.json({ error: err.message }, { status: 403 });
     if (err instanceof InvalidOrderTransitionError) return Response.json({ error: err.message }, { status: 409 });
-    return Response.json({ error: err instanceof Error ? err.message : "Failed to cancel order." }, { status: 500 });
+    return dbErrorResponse(`cancel order ${orderId}`, err instanceof Error ? err : new Error(String(err)));
   }
 }

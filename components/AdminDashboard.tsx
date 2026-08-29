@@ -16,26 +16,53 @@
 // app/api/admin/supplier-verification/[id]/route.ts).
 import React, { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2, LayoutGrid, ShieldCheck, Users as UsersIcon, Check, X, UserCog, FileText, AlertTriangle, Scale } from "lucide-react";
+import { Loader2, LayoutGrid, ShieldCheck, Users as UsersIcon, Check, X, UserCog, FileText, AlertTriangle, Scale, ChevronDown } from "lucide-react";
 
 import { useSession } from "./SessionProvider";
+import { cn } from "./ui/cn";
 import DashboardShell, { type NavItem, type SwitchLink } from "./DashboardShell";
 import NotificationBell from "./NotificationBell";
 import OrderCard from "./OrderCard";
 import OrderDetailsModal from "./OrderDetailsModal";
-import StatCard from "./ui/StatCard";
+import StatCard, { StatCardSkeleton } from "./ui/StatCard";
 import Badge, { type BadgeTone } from "./ui/Badge";
 import Button from "./ui/Button";
 import ConfirmDialog from "./ui/ConfirmDialog";
+import Modal from "./ui/Modal";
 import Select from "./ui/Select";
 import { Label, Textarea } from "./ui/Field";
 import { Table, Thead, Tbody, Tr, Th, Td } from "./ui/Table";
 import SharedEmptyState from "./ui/EmptyState";
+import SectionHeader from "./ui/SectionHeader";
+import Tabs from "./ui/Tabs";
+import CardListSkeleton from "./ui/CardListSkeleton";
 import { useToast } from "./ui/Toast";
-import { formatMoney } from "../lib/money";
+import { formatMoney, TYPED_CONFIRMATION_THRESHOLD_MINOR } from "../lib/money";
+import ErrorPanel from "./ui/ErrorPanel";
+import { SUPPORTING_DOCUMENT_TYPES } from "../lib/supplierDocumentTypes";
 import type { AdminUserRow, ApplicationStatus, DisputeRow, DisputeRuling, DisputeStatus, LedgerEntryRow, OrderRow, Role, SupplierVerificationApplicationRow } from "../lib/types";
 
+// Reviewing admins see the human-readable label, not the raw stored
+// value ("passport", not "national_id") — applications from before
+// migration 0023 have no type on file at all, hence the "Document"
+// fallback where this Map has no entry.
+const SUPPORTING_DOCUMENT_TYPE_LABELS = new Map(SUPPORTING_DOCUMENT_TYPES.map((t) => [t.value, t.label]));
+
 type Section = "overview" | "verification" | "orders" | "disputes" | "ledger" | "users";
+
+// Same shape as OrderDetailsModal.tsx's own (unexported) FinancialError —
+// a toast is never the only confirmation of a financial FAILURE, per the
+// feedback-layer rule; resolveDispute and retry-release are the two
+// admin actions that move real, unbounded amounts of money, and both
+// previously only toasted on failure. Not imported from OrderDetailsModal
+// (kept local, same small shape) to avoid a cross-component type
+// dependency for something this small.
+interface AdminFinancialError {
+  title: string;
+  detail?: string;
+  fundPosition: string;
+  referenceCode?: string;
+}
 
 interface LedgerBalance {
   account: string;
@@ -57,6 +84,19 @@ const ROLE_TONE: Record<Role, BadgeTone> = {
   supplier: "accent",
   admin: "success",
 };
+
+type LedgerRangeKey = "all" | "24h" | "7d" | "30d" | "90d";
+
+// Filters "Recent entries" only, never the balances panel above it,
+// see the matching comment in app/api/admin/ledger/route.ts, those are
+// explicitly all-time net figures.
+const LEDGER_RANGE_OPTIONS: { key: LedgerRangeKey; label: string; hours: number | null }[] = [
+  { key: "all", label: "All time", hours: null },
+  { key: "24h", label: "Last 24 hours", hours: 24 },
+  { key: "7d", label: "Last 7 days", hours: 24 * 7 },
+  { key: "30d", label: "Last 30 days", hours: 24 * 30 },
+  { key: "90d", label: "Last 90 days", hours: 24 * 90 },
+];
 
 const ALL_ROLES: Role[] = ["buyer", "supplier", "admin"];
 
@@ -89,6 +129,7 @@ export default function AdminDashboard() {
   // app/api/admin/orders/[id]/retry-release/route.ts.
   const [retryReleaseOrder, setRetryReleaseOrder] = useState<OrderRow | null>(null);
   const [retryReleaseBusy, setRetryReleaseBusy] = useState(false);
+  const [retryReleaseError, setRetryReleaseError] = useState<AdminFinancialError | null>(null);
 
   const [disputes, setDisputes] = useState<(DisputeRow & { order: Pick<OrderRow, "id" | "order_code" | "status" | "amount_minor"> | null; raised_by_email: string | null })[]>([]);
   const [disputesStatus, setDisputesStatus] = useState<DisputeStatus>("open");
@@ -100,6 +141,12 @@ export default function AdminDashboard() {
   const [loadingLedger, setLoadingLedger] = useState(true);
   const [ledgerPaymentMode, setLedgerPaymentMode] = useState<{ ngnLive: boolean; usdcLive: boolean } | null>(null);
   const [failedReleases, setFailedReleases] = useState<FailedReleaseRow[]>([]);
+  // Collapsed by default: a real, actionable alert (something needs a
+  // manual retry), so it stays visible as a header the moment there's
+  // anything to show, but doesn't permanently eat vertical space above
+  // the balances/entries an admin more often actually came here for.
+  const [failedReleasesOpen, setFailedReleasesOpen] = useState(false);
+  const [ledgerRange, setLedgerRange] = useState<LedgerRangeKey>("all");
 
   const isAdmin = user?.role === "admin";
 
@@ -206,28 +253,34 @@ export default function AdminDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, disputesStatus]);
 
-  const loadLedger = useCallback(async () => {
-    setLoadingLedger(true);
-    try {
-      const res = await fetch("/api/admin/ledger");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to load ledger.");
-      setLedgerEntries(data.entries || []);
-      setLedgerBalances(data.balances || []);
-      setLedgerPaymentMode(data.paymentMode || null);
-      setFailedReleases(data.failedReleases || []);
-    } catch (err) {
-      notify("error", err instanceof Error ? err.message : "Failed to load ledger.");
-    } finally {
-      setLoadingLedger(false);
-    }
-  }, [notify]);
+  const loadLedger = useCallback(
+    async (rangeKey: LedgerRangeKey) => {
+      setLoadingLedger(true);
+      try {
+        const range = LEDGER_RANGE_OPTIONS.find((o) => o.key === rangeKey);
+        const qs = new URLSearchParams();
+        if (range?.hours) qs.set("from", new Date(Date.now() - range.hours * 60 * 60 * 1000).toISOString());
+        const res = await fetch(`/api/admin/ledger${qs.toString() ? `?${qs.toString()}` : ""}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to load ledger.");
+        setLedgerEntries(data.entries || []);
+        setLedgerBalances(data.balances || []);
+        setLedgerPaymentMode(data.paymentMode || null);
+        setFailedReleases(data.failedReleases || []);
+      } catch (err) {
+        notify("error", err instanceof Error ? err.message : "Failed to load ledger.");
+      } finally {
+        setLoadingLedger(false);
+      }
+    },
+    [notify]
+  );
 
   useEffect(() => {
     if (!isAdmin || section !== "ledger") return;
-    loadLedger();
+    loadLedger(ledgerRange);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin, section]);
+  }, [isAdmin, section, ledgerRange]);
 
   const handleReview = async (application: SupplierVerificationApplicationRow, action: "approve" | "reject") => {
     setReviewingId(application.id);
@@ -322,22 +375,47 @@ export default function AdminDashboard() {
 
   const handleConfirmRetryRelease = async () => {
     if (!retryReleaseOrder) return;
+    setRetryReleaseError(null);
     setRetryReleaseBusy(true);
     try {
       const res = await fetch(`/api/admin/orders/${retryReleaseOrder.id}/retry-release`, { method: "POST" });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to retry the release.");
+      if (!res.ok) {
+        // Persistent ErrorPanel, not just a toast — this retries a real
+        // escrow release, same standard OrderDetailsModal's
+        // runFinancialAction already holds fund/cancel/abandon to.
+        setRetryReleaseError({
+          title: data.error || "Failed to retry the release.",
+          fundPosition: "Funds are still safely held in escrow, nothing was lost.",
+          referenceCode: data.referenceCode,
+        });
+        return;
+      }
       setOrders((rows) => rows.map((o) => (o.id === retryReleaseOrder.id ? data.order : o)));
       notify("success", `Retry sent for order ${retryReleaseOrder.order_code}.`);
       setRetryReleaseOrder(null);
-    } catch (err) {
-      notify("error", err instanceof Error ? err.message : "Failed to retry the release.");
+    } catch {
+      setRetryReleaseError({
+        title: "Couldn't reach the server.",
+        detail: "Check your connection and try again.",
+        fundPosition: "Funds are still safely held in escrow, nothing was lost.",
+      });
     } finally {
       setRetryReleaseBusy(false);
     }
   };
 
-  const handleResolveDispute = async (disputeId: number, ruling: DisputeRuling, notes: string) => {
+  // Returns a result instead of only toasting, so DisputeCard (which owns
+  // the ConfirmDialog this fires from) can render a persistent
+  // ErrorPanel on failure — this ruling can trigger a real, unbounded
+  // refund or release (lib/orderService.ts's resolveDispute), a toast
+  // alone doesn't meet the bar fund/cancel/abandon/retry-release hold
+  // themselves to for that.
+  const handleResolveDispute = async (
+    disputeId: number,
+    ruling: DisputeRuling,
+    notes: string
+  ): Promise<{ success: true } | { success: false; error: AdminFinancialError }> => {
     setResolvingId(disputeId);
     try {
       const res = await fetch(`/api/admin/disputes/${disputeId}`, {
@@ -346,7 +424,16 @@ export default function AdminDashboard() {
         body: JSON.stringify({ ruling, notes }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to resolve dispute.");
+      if (!res.ok) {
+        return {
+          success: false,
+          error: {
+            title: data.error || "Failed to resolve dispute.",
+            fundPosition: "Nothing has changed — no refund or release was triggered.",
+            referenceCode: data.referenceCode,
+          },
+        };
+      }
       setDisputes((rows) => rows.filter((d) => d.id !== disputeId));
       const actionNote =
         data.autoActionTaken === "refund_initiated"
@@ -355,8 +442,16 @@ export default function AdminDashboard() {
           ? " Release initiated."
           : " Ruling recorded. No automatic fund movement (order already settled or outside the pre-release window).";
       notify("success", `Dispute resolved for the ${ruling}.${actionNote}`);
-    } catch (err) {
-      notify("error", err instanceof Error ? err.message : "Failed to resolve dispute.");
+      return { success: true };
+    } catch {
+      return {
+        success: false,
+        error: {
+          title: "Couldn't reach the server.",
+          detail: "Check your connection and try again.",
+          fundPosition: "Nothing has changed — no refund or release was triggered.",
+        },
+      };
     } finally {
       setResolvingId(null);
     }
@@ -448,21 +543,30 @@ export default function AdminDashboard() {
               hint={applicationsStatus === "pending" ? undefined : "Switch to Verification to view"}
             />
             <StatCard label="Open disputes" value={disputesStatus === "open" ? disputes.length : "—"} icon={<AlertTriangle size={16} />} />
-            <StatCard label="Suppliers" value={loadingUsers ? "—" : supplierCount} icon={<UserCog size={16} />} />
-            <StatCard label="Buyers" value={loadingUsers ? "—" : buyerCount} icon={<UsersIcon size={16} />} />
+            {loadingUsers ? (
+              <>
+                <StatCardSkeleton />
+                <StatCardSkeleton />
+              </>
+            ) : (
+              <>
+                <StatCard label="Suppliers" value={supplierCount} icon={<UserCog size={16} />} />
+                <StatCard label="Buyers" value={buyerCount} icon={<UsersIcon size={16} />} />
+              </>
+            )}
           </div>
 
           <div>
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="font-display text-xl italic text-text-primary">Pending verification applications</h2>
-              <button type="button" onClick={() => setSection("verification")} className="text-sm font-semibold text-accent-text hover:underline">
-                View all
-              </button>
-            </div>
+            <SectionHeader
+              title="Pending verification applications"
+              action={
+                <button type="button" onClick={() => setSection("verification")} className="text-sm font-semibold text-accent-text hover:underline">
+                  View all
+                </button>
+              }
+            />
             {loadingApplications ? (
-              <div className="flex justify-center py-10">
-                <Loader2 size={22} className="spin-icon text-accent" />
-              </div>
+              <CardListSkeleton rows={3} />
             ) : applications.length === 0 ? (
               <SharedEmptyState title="No pending applications right now" description="New supplier verification requests show up here for review." />
             ) : (
@@ -478,25 +582,15 @@ export default function AdminDashboard() {
 
       {section === "verification" && (
         <div>
-          <div className="mb-5 flex w-fit rounded-lg border border-border bg-surface p-1">
-            {(["pending", "approved", "rejected"] as ApplicationStatus[]).map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setApplicationsStatus(s)}
-                className={`rounded-md px-3.5 py-1.5 text-xs font-semibold capitalize transition-colors duration-base ease-base ${
-                  applicationsStatus === s ? "bg-accent text-accent-contrast" : "text-text-secondary hover:text-text-primary"
-                }`}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
+          <Tabs
+            className="mb-5"
+            active={applicationsStatus}
+            onChange={(key) => setApplicationsStatus(key as ApplicationStatus)}
+            items={(["pending", "approved", "rejected"] as ApplicationStatus[]).map((s) => ({ key: s, label: s }))}
+          />
 
           {loadingApplications ? (
-            <div className="flex justify-center py-10">
-              <Loader2 size={22} className="spin-icon text-accent" />
-            </div>
+            <CardListSkeleton rows={4} />
           ) : applications.length === 0 ? (
             <SharedEmptyState title={`No ${applicationsStatus} applications`} />
           ) : (
@@ -538,9 +632,7 @@ export default function AdminDashboard() {
             </div>
           )}
           {loadingOrders ? (
-            <div className="flex justify-center py-10">
-              <Loader2 size={22} className="spin-icon text-accent" />
-            </div>
+            <CardListSkeleton rows={4} />
           ) : orders.length === 0 ? (
             <SharedEmptyState title="No orders on the platform yet" description="Orders appear here as soon as a buyer creates one." />
           ) : (
@@ -551,18 +643,36 @@ export default function AdminDashboard() {
             </div>
           )}
 
+          {retryReleaseError && (
+            <ErrorPanel
+              title={retryReleaseError.title}
+              detail={retryReleaseError.detail}
+              fundPosition={retryReleaseError.fundPosition}
+              referenceCode={retryReleaseError.referenceCode}
+              retrying={retryReleaseBusy}
+              onRetry={handleConfirmRetryRelease}
+              onDismiss={() => setRetryReleaseError(null)}
+              className="mb-3"
+            />
+          )}
           <ConfirmDialog
             open={retryReleaseOrder !== null}
             title="Retry escrow release"
             body={
               <p>
-                Retry sending order <strong>{retryReleaseOrder?.order_code}</strong>&rsquo;s escrow release to Circle. Safe
-                to click even if a prior attempt partially went through, this uses the same idempotency key every
-                time, it cannot pay the supplier twice.
+                Retry sending order <strong>{retryReleaseOrder?.order_code}</strong>&rsquo;s{" "}
+                <strong>{retryReleaseOrder ? formatMoney(retryReleaseOrder.amount_minor, "NGN") : ""}</strong> escrow
+                release to Circle. Safe to click even if a prior attempt partially went through, this uses the same
+                idempotency key every time, it cannot pay the supplier twice.
               </p>
             }
             confirmLabel="Retry release"
             loading={retryReleaseBusy}
+            requireTypedConfirmation={
+              retryReleaseOrder && retryReleaseOrder.amount_minor >= TYPED_CONFIRMATION_THRESHOLD_MINOR
+                ? formatMoney(retryReleaseOrder.amount_minor, "NGN")
+                : undefined
+            }
             onConfirm={handleConfirmRetryRelease}
             onCancel={() => setRetryReleaseOrder(null)}
           />
@@ -571,25 +681,18 @@ export default function AdminDashboard() {
 
       {section === "disputes" && (
         <div>
-          <div className="mb-5 flex w-fit rounded-lg border border-border bg-surface p-1">
-            {(["open", "under_review", "resolved_buyer", "resolved_supplier", "resolved_split"] as DisputeStatus[]).map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setDisputesStatus(s)}
-                className={`rounded-md px-3 py-1.5 text-xs font-semibold capitalize transition-colors duration-base ease-base ${
-                  disputesStatus === s ? "bg-accent text-accent-contrast" : "text-text-secondary hover:text-text-primary"
-                }`}
-              >
-                {s.replace("_", " ")}
-              </button>
-            ))}
-          </div>
+          <Tabs
+            className="mb-5"
+            active={disputesStatus}
+            onChange={(key) => setDisputesStatus(key as DisputeStatus)}
+            items={(["open", "under_review", "resolved_buyer", "resolved_supplier", "resolved_split"] as DisputeStatus[]).map((s) => ({
+              key: s,
+              label: s.replace("_", " "),
+            }))}
+          />
 
           {loadingDisputes ? (
-            <div className="flex justify-center py-10">
-              <Loader2 size={22} className="spin-icon text-accent" />
-            </div>
+            <CardListSkeleton rows={3} />
           ) : disputes.length === 0 ? (
             <SharedEmptyState title={`No ${disputesStatus.replace("_", " ")} disputes`} />
           ) : (
@@ -630,34 +733,71 @@ export default function AdminDashboard() {
               )}
 
               {failedReleases.length > 0 && (
-                <div>
-                  <h2 className="mb-3 font-display text-lg italic text-text-primary">Recent failed releases</h2>
-                  <div className="flex flex-col gap-2">
-                    {failedReleases.map((f) => (
-                      <div
-                        key={`${f.orderId}:${f.createdAt}`}
-                        className="flex flex-col gap-1 rounded-lg border border-danger bg-danger-soft px-3 py-2.5 text-sm text-danger-text sm:flex-row sm:items-center sm:justify-between"
-                      >
-                        <div>
-                          <span className="font-mono font-semibold">{f.orderCode || `#${f.orderId}`}</span> — {f.providerState}
-                          {f.errorReason ? `: ${f.errorReason}` : ""}
-                          <span className="ml-2 text-xs text-text-tertiary">{new Date(f.createdAt).toLocaleString()}</span>
-                        </div>
-                        {f.stillStuck ? (
-                          <Button size="sm" variant="secondary" onClick={() => setSection("orders")}>
-                            Go retry it
-                          </Button>
-                        ) : (
-                          <span className="text-xs text-text-tertiary">A later attempt already went through</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
+                <div className="overflow-hidden rounded-xl border border-danger bg-danger-soft">
+                  <button
+                    type="button"
+                    onClick={() => setFailedReleasesOpen((v) => !v)}
+                    aria-expanded={failedReleasesOpen}
+                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+                  >
+                    <span className="flex items-center gap-2 text-sm font-semibold text-danger-text">
+                      <AlertTriangle size={15} className="shrink-0" />
+                      Recent failed releases
+                      <span className="rounded-pill bg-danger px-2 py-0.5 text-[10px] font-bold text-white">{failedReleases.length}</span>
+                    </span>
+                    <ChevronDown
+                      size={16}
+                      className={cn("shrink-0 text-danger-text transition-transform duration-base ease-base", failedReleasesOpen && "rotate-180")}
+                    />
+                  </button>
+                  {failedReleasesOpen && (
+                    <div className="border-t border-danger px-4 pb-4 pt-3">
+                      {/* A table, not a repeated bordered-box-per-row
+                          list: that version scaled badly, "A later
+                          attempt already went through" repeated in full
+                          on every resolved row made a handful of entries
+                          read as a wall of text. Table.tsx's own
+                          overflow-x-auto wrapper keeps this from forcing
+                          the page to scroll sideways on a narrow screen,
+                          it scrolls internally instead. */}
+                      <Table>
+                        <Thead>
+                          <Tr>
+                            <Th>Order</Th>
+                            <Th>Issue</Th>
+                            <Th>When</Th>
+                            <Th>Status</Th>
+                          </Tr>
+                        </Thead>
+                        <Tbody>
+                          {failedReleases.map((f) => (
+                            <Tr key={`${f.orderId}:${f.createdAt}`}>
+                              <Td className="font-mono text-xs">{f.orderCode || `#${f.orderId}`}</Td>
+                              <Td className="text-danger-text">
+                                {f.providerState}
+                                {f.errorReason ? `: ${f.errorReason}` : ""}
+                              </Td>
+                              <Td className="text-text-secondary">{new Date(f.createdAt).toLocaleString()}</Td>
+                              <Td>
+                                {f.stillStuck ? (
+                                  <Button size="sm" variant="secondary" onClick={() => setSection("orders")}>
+                                    Go retry it
+                                  </Button>
+                                ) : (
+                                  <span className="text-xs text-text-tertiary">Already resolved</span>
+                                )}
+                              </Td>
+                            </Tr>
+                          ))}
+                        </Tbody>
+                      </Table>
+                    </div>
+                  )}
                 </div>
               )}
 
               <div>
-                <h2 className="mb-3 font-display text-lg italic text-text-primary">Account balances (all-time, net)</h2>
+                <SectionHeader title="Account balances (all-time, net)" size="sm" />
                 {ledgerBalances.length === 0 ? (
                   <SharedEmptyState title="No ledger activity yet" description="Entries appear once an order reaches funded." />
                 ) : (
@@ -675,9 +815,36 @@ export default function AdminDashboard() {
               </div>
 
               <div>
-                <h2 className="mb-3 font-display text-lg italic text-text-primary">Recent entries</h2>
+                <SectionHeader
+                  title="Recent entries"
+                  size="sm"
+                  action={
+                    <div className="flex items-center gap-2">
+                      <Select
+                        aria-label="Filter recent entries by time range"
+                        value={ledgerRange}
+                        onChange={(e) => setLedgerRange(e.target.value as LedgerRangeKey)}
+                        className="w-auto py-1.5 pr-8 text-xs"
+                      >
+                        {LEDGER_RANGE_OPTIONS.map((o) => (
+                          <option key={o.key} value={o.key}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </Select>
+                      {ledgerRange !== "all" && (
+                        <Button size="sm" variant="ghost" onClick={() => setLedgerRange("all")}>
+                          Clear
+                        </Button>
+                      )}
+                    </div>
+                  }
+                />
                 {ledgerEntries.length === 0 ? (
-                  <SharedEmptyState title="No ledger entries yet" />
+                  <SharedEmptyState
+                    title="No ledger entries yet"
+                    description={ledgerRange !== "all" ? "Nothing in this time range. Try a wider one, or clear the filter." : undefined}
+                  />
                 ) : (
                   <Table>
                     <Thead>
@@ -841,6 +1008,12 @@ function ApplicationCard({
   reviewing: boolean;
   onReview?: (application: SupplierVerificationApplicationRow, action: "approve" | "reject") => void;
 }) {
+  // "View" used to navigate away to the raw Cloudinary URL in a new tab
+  // — an admin reviewing several applications in a row shouldn't lose
+  // this page's scroll position/context for that. Same in-app preview
+  // pattern as SupplierDashboard's material-listing photo preview.
+  const [previewOpen, setPreviewOpen] = useState(false);
+
   return (
     <div className="rounded-xl border border-border bg-surface p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -858,6 +1031,10 @@ function ApplicationCard({
 
       <dl className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div>
+          <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Phone</dt>
+          <dd className="mt-0.5 text-sm text-text-primary">{application.phone || "Not provided"}</dd>
+        </div>
+        <div>
           <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Location</dt>
           <dd className="mt-0.5 text-sm text-text-primary">{application.business_location || "Not specified"}</dd>
         </div>
@@ -873,9 +1050,13 @@ function ApplicationCard({
           <dt className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Supporting document</dt>
           <dd className="mt-0.5 text-sm text-text-primary">
             {application.supporting_document_url ? (
-              <a href={application.supporting_document_url} target="_blank" rel="noopener noreferrer" className="text-accent-text underline">
-                View
-              </a>
+              <>
+                {SUPPORTING_DOCUMENT_TYPE_LABELS.get(application.supporting_document_type || "") ?? "Document"}
+                {" — "}
+                <button type="button" onClick={() => setPreviewOpen(true)} className="text-accent-text underline">
+                  View
+                </button>
+              </>
             ) : (
               "Not provided"
             )}
@@ -897,6 +1078,14 @@ function ApplicationCard({
           </Button>
         </div>
       )}
+
+      <Modal open={previewOpen} onClose={() => setPreviewOpen(false)} size="lg">
+        {application.supporting_document_url && (
+          // eslint-disable-next-line @next/next/no-img-element -- a
+          // Cloudinary URL, not a local Next.js image asset.
+          <img src={application.supporting_document_url} alt="" className="max-h-[75dvh] w-full rounded-lg object-contain" />
+        )}
+      </Modal>
     </div>
   );
 }
@@ -908,7 +1097,7 @@ function DisputeCard({
 }: {
   dispute: DisputeRow & { order: Pick<OrderRow, "id" | "order_code" | "status" | "amount_minor"> | null; raised_by_email: string | null };
   resolving: boolean;
-  onResolve?: (disputeId: number, ruling: DisputeRuling, notes: string) => void;
+  onResolve?: (disputeId: number, ruling: DisputeRuling, notes: string) => Promise<{ success: true } | { success: false; error: AdminFinancialError }>;
 }) {
   const [notes, setNotes] = useState("");
   // A ruling can trigger a REAL refund or release (see
@@ -918,9 +1107,40 @@ function DisputeCard({
   // feedback-layer pass: financial/irreversible actions need explicit
   // confirmation with the exact amount, same as OrderDetailsModal.
   const [pendingRuling, setPendingRuling] = useState<DisputeRuling | null>(null);
+  // Owned locally, not lifted to the parent: only this card's own
+  // resolve attempt can produce this error, same "component owns what
+  // only it needs" posture as ApplicationCard's previewOpen above.
+  const [resolveError, setResolveError] = useState<AdminFinancialError | null>(null);
+  // Survives the dialog closing (unlike pendingRuling, which the
+  // ConfirmDialog's own open state is keyed on) — this is what
+  // ErrorPanel's Retry button re-fires with, since by the time it's
+  // clicked the dialog has already closed and pendingRuling is null.
+  const [lastRuling, setLastRuling] = useState<DisputeRuling | null>(null);
+
+  const attemptResolve = async (ruling: DisputeRuling) => {
+    if (!onResolve) return;
+    setLastRuling(ruling);
+    setResolveError(null);
+    const result = await onResolve(dispute.id, ruling, notes);
+    if (!result.success) setResolveError(result.error);
+  };
+
+  const confirmResolve = async () => {
+    if (!pendingRuling) return;
+    const ruling = pendingRuling;
+    // Same pattern as OrderDetailsModal's runCancel/runAbandon: the
+    // dialog always closes, success or fail — the ErrorPanel below is
+    // what persists on failure, not the dialog itself.
+    setPendingRuling(null);
+    await attemptResolve(ruling);
+  };
 
   return (
-    <div className="rounded-xl border border-border bg-surface p-5">
+    <div
+      className={`rounded-xl border border-l-4 border-border bg-surface p-5 ${
+        dispute.dispute_type === "post_settlement_report" ? "border-l-warning" : "border-l-danger"
+      }`}
+    >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -950,6 +1170,17 @@ function DisputeCard({
               Rule for supplier
             </Button>
           </div>
+          {resolveError && (
+            <ErrorPanel
+              title={resolveError.title}
+              detail={resolveError.detail}
+              fundPosition={resolveError.fundPosition}
+              referenceCode={resolveError.referenceCode}
+              retrying={resolving}
+              onRetry={lastRuling ? () => attemptResolve(lastRuling) : undefined}
+              onDismiss={() => setResolveError(null)}
+            />
+          )}
           <ConfirmDialog
             open={pendingRuling !== null}
             tone="danger"
@@ -970,10 +1201,12 @@ function DisputeCard({
             }
             confirmLabel={`Yes, rule for the ${pendingRuling ?? ""}`}
             loading={resolving}
-            onConfirm={() => {
-              if (pendingRuling) onResolve(dispute.id, pendingRuling, notes);
-              setPendingRuling(null);
-            }}
+            requireTypedConfirmation={
+              dispute.order && dispute.order.amount_minor >= TYPED_CONFIRMATION_THRESHOLD_MINOR
+                ? formatMoney(dispute.order.amount_minor, "NGN")
+                : undefined
+            }
+            onConfirm={confirmResolve}
             onCancel={() => setPendingRuling(null)}
           />
         </div>

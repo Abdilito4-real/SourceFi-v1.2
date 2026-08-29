@@ -90,3 +90,11 @@ export const TYPED_CONFIRMATION_THRESHOLD_MINOR = 100_000_000; // ₦1,000,000.0
  * the server-side lib/orderService.ts (which re-exports this same value
  * as CANCELLATION_FEE_MINOR) read one shared number, never two. */
 export const CANCELLATION_FEE_MINOR = ORDER_PLATFORM_FEE_MINOR;
+
+/** Smallest wallet top-up the platform will accept, in NGN minor units.
+ * Same "round placeholder, not a precise business number" posture as
+ * MIN_ORDER_AMOUNT_MINOR. Below MIN_ORDER_AMOUNT_MINOR itself would be a
+ * top-up that can never actually fund any order on its own, so this
+ * matches that floor exactly rather than inventing a separate number.
+ * Enforced in lib/walletService.ts's initiateWalletTopup(). */
+export const MIN_WALLET_TOPUP_MINOR = MIN_ORDER_AMOUNT_MINOR;

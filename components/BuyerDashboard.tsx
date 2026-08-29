@@ -5,12 +5,15 @@
 // Real route (/buyer), Overview, Suppliers, Orders, Materials.
 // Marketplace pivot: no more "post a request and a sourcer claims it"
 // the buyer picks a currently-verified supplier directly and creates an
-// order against them (design doc Section 0). No wallet/crypto UI
-// anywhere here, Fund Order is a single button, NGN in, NGN shown
-// (design doc Section 3).
+// order against them (design doc Section 0). NGN in, NGN shown
+// throughout (design doc Section 3), no crypto UI anywhere. A buyer
+// DOES have a real, visible platform wallet balance now (migration
+// 0020_buyer_wallet.sql): "Fund order" draws from it instantly instead
+// of a fresh bank-transfer request per order, gated on the balance
+// actually covering the order.
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2, Coins, Package, LayoutGrid, FileText, History, Store, XCircle, Search } from "lucide-react";
+import { Loader2, Coins, Package, LayoutGrid, FileText, History, Store, XCircle, Search, Wallet, Eye, EyeOff } from "lucide-react";
 
 import { formatMoney, MIN_ORDER_AMOUNT_MINOR } from "../lib/money";
 import { useSession } from "./SessionProvider";
@@ -21,13 +24,18 @@ import OrderCard from "./OrderCard";
 import OrderDetailsModal from "./OrderDetailsModal";
 import SupplierVerificationForm from "./SupplierVerificationForm";
 import SupplierTrustProfile from "./SupplierTrustProfile";
+import WalletTopupModal from "./WalletTopupModal";
+import ReceiptModal from "./ReceiptModal";
 import Button from "./ui/Button";
 import { Card } from "./ui/Card";
 import Modal from "./ui/Modal";
-import StatCard from "./ui/StatCard";
+import StatCard, { StatCardSkeleton } from "./ui/StatCard";
 import SupplierTierBadge, { type SupplierTier } from "./ui/SupplierTierBadge";
 import { Label, Input, Textarea } from "./ui/Field";
 import SharedEmptyState from "./ui/EmptyState";
+import SectionHeader from "./ui/SectionHeader";
+import Tabs from "./ui/Tabs";
+import CardListSkeleton from "./ui/CardListSkeleton";
 import { useToast } from "./ui/Toast";
 import type { OrderRow, SupplierListingRow, SupplierVerificationApplicationRow } from "../lib/types";
 
@@ -54,6 +62,13 @@ interface SupplierListing {
 // made for the UI (components/ui/Badge.tsx, OrderDetailsModal.tsx) and
 // supplier trust scoring (lib/supplierTrust.ts).
 const TERMINAL_STATUSES = new Set(["settled", "settlement_processing", "refunded", "cancelled", "expired"]);
+
+// Privacy toggle for the wallet balance stat card (an actual money
+// figure sitting on the overview by default), persisted across visits
+// like most wallet/banking UIs do, not just per-session — a buyer who
+// hides it once because they're in a public place shouldn't have it
+// flash back on every reload.
+const WALLET_BALANCE_VISIBLE_KEY = "sourcefi:wallet-balance-visible";
 
 function MaterialListingCard({ listing, onOrder }: { listing: SupplierListingRow; onOrder: (listing: SupplierListingRow) => void }) {
   return (
@@ -267,8 +282,51 @@ export default function BuyerDashboard() {
   const [materialsQuery, setMaterialsQuery] = useState("");
   const [latestSupplierApplication, setLatestSupplierApplication] = useState<SupplierVerificationApplicationRow | null>(null);
   const [showReapplyForm, setShowReapplyForm] = useState(false);
+  const [walletBalanceMinor, setWalletBalanceMinor] = useState<number | null>(null);
+  const [showTopupModal, setShowTopupModal] = useState(false);
+  const [topupShortfallMinor, setTopupShortfallMinor] = useState<number | null>(null);
+  const [receiptEndpoint, setReceiptEndpoint] = useState<string | null>(null);
+  // Lazy-initialized from localStorage (guarded for the server-rendered
+  // pass, where `window` doesn't exist yet) rather than defaulting true
+  // and correcting in an effect, so a buyer who hid their balance last
+  // visit doesn't see it flash visible for a frame on this one.
+  const [balanceVisible, setBalanceVisible] = useState(() => {
+    if (typeof window === "undefined") return true;
+    try {
+      const stored = window.localStorage.getItem(WALLET_BALANCE_VISIBLE_KEY);
+      return stored === null ? true : stored === "true";
+    } catch {
+      return true;
+    }
+  });
+
+  const toggleBalanceVisible = () => {
+    setBalanceVisible((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(WALLET_BALANCE_VISIBLE_KEY, String(next));
+      } catch {
+        // Private browsing / storage disabled: the toggle still works
+        // for this render, it just won't persist, not worth surfacing.
+      }
+      return next;
+    });
+  };
 
   const isBuyer = user?.role === "buyer";
+
+  const loadWalletBalance = () => {
+    fetch("/api/wallet")
+      .then((res) => res.json())
+      .then((data) => setWalletBalanceMinor(typeof data.balanceMinor === "number" ? data.balanceMinor : 0))
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    if (!user || !isBuyer) return;
+    loadWalletBalance();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, isBuyer]);
 
   // Push notificationclick deep-links here as e.g. /buyer?order=482
   // open the right order/section on load instead of just landing on the
@@ -500,23 +558,70 @@ export default function BuyerDashboard() {
 
       {section === "overview" && (
         <div className="flex flex-col gap-8">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <StatCard label="Active orders" value={activeCount} icon={<FileText size={16} />} />
-            <StatCard label="In escrow" value={formatMoney(inEscrowMinor, "NGN")} icon={<Coins size={16} />} tone="accent" />
-            <StatCard label="Completed" value={completedCount} icon={<History size={16} />} />
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-text-secondary">Your wallet balance is what funds new orders, instantly, no bank transfer per order.</p>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                setTopupShortfallMinor(null);
+                setShowTopupModal(true);
+              }}
+            >
+              <Wallet size={14} /> Top up wallet
+            </Button>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {walletBalanceMinor === null ? (
+              <StatCardSkeleton />
+            ) : (
+              <StatCard
+                label="Wallet balance"
+                value={
+                  <span className="inline-flex items-center gap-2">
+                    {balanceVisible ? formatMoney(walletBalanceMinor, "NGN") : "₦ ****"}
+                    <button
+                      type="button"
+                      onClick={toggleBalanceVisible}
+                      aria-label={balanceVisible ? "Hide wallet balance" : "Show wallet balance"}
+                      aria-pressed={!balanceVisible}
+                      className="-m-1 rounded-md p-1 text-text-tertiary transition-colors duration-base ease-base hover:text-text-primary"
+                    >
+                      {balanceVisible ? <Eye size={18} /> : <EyeOff size={18} />}
+                    </button>
+                  </span>
+                }
+                icon={<Wallet size={16} />}
+                tone="accent"
+              />
+            )}
+            {loadingOrders ? (
+              <>
+                <StatCardSkeleton />
+                <StatCardSkeleton />
+                <StatCardSkeleton />
+              </>
+            ) : (
+              <>
+                <StatCard label="Active orders" value={activeCount} icon={<FileText size={16} />} />
+                <StatCard label="In escrow" value={formatMoney(inEscrowMinor, "NGN")} icon={<Coins size={16} />} />
+                <StatCard label="Completed" value={completedCount} icon={<History size={16} />} />
+              </>
+            )}
           </div>
 
           <div>
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="font-display text-xl italic text-text-primary">Recent orders</h2>
-              <button type="button" onClick={() => setSection("orders")} className="text-sm font-semibold text-accent-text hover:underline">
-                View all
-              </button>
-            </div>
+            <SectionHeader
+              title="Recent orders"
+              action={
+                <button type="button" onClick={() => setSection("orders")} className="text-sm font-semibold text-accent-text hover:underline">
+                  View all
+                </button>
+              }
+            />
             {loadingOrders ? (
-              <div className="flex justify-center py-10">
-                <Loader2 size={22} className="spin-icon text-accent" />
-              </div>
+              <CardListSkeleton rows={3} />
             ) : orders.length === 0 ? (
               <EmptyOrders onBrowse={() => setSection("suppliers")} />
             ) : (
@@ -533,9 +638,7 @@ export default function BuyerDashboard() {
       {section === "suppliers" && (
         <div>
           {loadingSuppliers ? (
-            <div className="flex justify-center py-10">
-              <Loader2 size={22} className="spin-icon text-accent" />
-            </div>
+            <CardListSkeleton rows={6} layout="grid" />
           ) : suppliers.length === 0 ? (
             <SharedEmptyState title="No verified suppliers yet" description="Check back soon." />
           ) : (
@@ -573,9 +676,7 @@ export default function BuyerDashboard() {
           </div>
 
           {loadingMaterials ? (
-            <div className="flex justify-center py-10">
-              <Loader2 size={22} className="spin-icon text-accent" />
-            </div>
+            <CardListSkeleton rows={6} layout="grid" />
           ) : materials.length === 0 ? (
             <SharedEmptyState
               title={materialsQuery ? `No materials matching "${materialsQuery}"` : "No materials listed yet"}
@@ -593,31 +694,25 @@ export default function BuyerDashboard() {
 
       {section === "orders" && (
         <div>
-          <div className="mb-5 flex w-fit rounded-lg border border-border bg-surface p-1">
-            <button
-              type="button"
-              onClick={() => setTab("active")}
-              className={`rounded-md px-3.5 py-1.5 text-xs font-semibold transition-colors duration-base ease-base ${
-                tab === "active" ? "bg-accent text-accent-contrast" : "text-text-secondary hover:text-text-primary"
-              }`}
-            >
-              Active ({activeCount})
-            </button>
-            <button
-              type="button"
-              onClick={() => setTab("history")}
-              className={`flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-semibold transition-colors duration-base ease-base ${
-                tab === "history" ? "bg-accent text-accent-contrast" : "text-text-secondary hover:text-text-primary"
-              }`}
-            >
-              <History size={13} /> History
-            </button>
-          </div>
+          <Tabs
+            className="mb-5"
+            active={tab}
+            onChange={(key) => setTab(key as "active" | "history")}
+            items={[
+              { key: "active", label: `Active (${activeCount})` },
+              {
+                key: "history",
+                label: (
+                  <span className="flex items-center gap-1.5">
+                    <History size={13} /> History
+                  </span>
+                ),
+              },
+            ]}
+          />
 
           {loadingOrders ? (
-            <div className="flex justify-center py-10">
-              <Loader2 size={22} className="spin-icon text-accent" />
-            </div>
+            <CardListSkeleton rows={4} />
           ) : tabbed.length === 0 ? (
             <EmptyOrders onBrowse={() => setSection("suppliers")} historyTab={tab === "history"} />
           ) : (
@@ -650,11 +745,37 @@ export default function BuyerDashboard() {
           onClose={() => setSelectedOrderId(null)}
           onOrderChange={(order) => setOrders((prev) => prev.map((o) => (o.id === order.id ? order : o)))}
           showNotification={notify}
-          onFunded={() => setPushPromptOpen(true)}
+          onFunded={() => {
+            setPushPromptOpen(true);
+            loadWalletBalance(); // funding just debited it
+          }}
+          onInsufficientBalance={(shortfallMinor) => {
+            setTopupShortfallMinor(shortfallMinor);
+            setShowTopupModal(true);
+          }}
           autoJoinCall={autoJoinCall}
           onAutoJoinCallHandled={() => setAutoJoinCall(false)}
         />
       )}
+      {showTopupModal && (
+        <WalletTopupModal
+          open={showTopupModal}
+          onClose={() => setShowTopupModal(false)}
+          prefillShortfallMinor={topupShortfallMinor}
+          onSubmitted={(reference) => {
+            setShowTopupModal(false);
+            // WalletTopupModal only calls this once the top-up is
+            // actually confirmed: immediately for the simulated stub
+            // path, or after its own balance poll saw a real Yellow
+            // Card transfer land (which can take real minutes) — either
+            // way, the balance has already moved by the time this fires.
+            notify("success", "Wallet topped up.");
+            loadWalletBalance();
+            setReceiptEndpoint(`/api/wallet/topups/${encodeURIComponent(reference)}/receipt`);
+          }}
+        />
+      )}
+      <ReceiptModal open={receiptEndpoint !== null} onClose={() => setReceiptEndpoint(null)} endpoint={receiptEndpoint ?? ""} />
       <PushSoftPrompt open={pushPromptOpen} onClose={() => setPushPromptOpen(false)} reason="You just funded escrow." />
     </DashboardShell>
   );

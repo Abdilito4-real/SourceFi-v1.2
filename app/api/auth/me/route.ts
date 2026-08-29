@@ -8,6 +8,7 @@
 // requireRole(), not by trusting that the client read this correctly.
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { requireSession } from "../../../../lib/authz";
+import { isCloudinaryUrl } from "../../../../lib/uploadValidation";
 import { dbErrorResponse } from "../../../../lib/dbErrorResponse";
 
 export async function GET() {
@@ -23,6 +24,7 @@ export async function GET() {
       username: user.username,
       role: user.role,
       walletAddress: user.wallet_address ?? null,
+      profilePictureUrl: user.profile_picture_url ?? null,
     },
   });
 }
@@ -43,20 +45,40 @@ export async function PATCH(request: Request) {
     return Response.json({ error: "Username must be at least 3 characters." }, { status: 400 });
   }
 
+  const patch: Record<string, unknown> = { username };
+
+  // Optional here: this route is called once at onboarding (where the
+  // form requires it, see components/OnboardingScreen.tsx step 0) but
+  // also serves any FUTURE "change your photo" settings action, which
+  // shouldn't be forced to also resend a username. Only touches the
+  // column when the field is actually present in the request at all —
+  // `null` explicitly clears it, `undefined`/absent leaves it alone.
+  if ("profilePictureUrl" in (body ?? {})) {
+    const raw = body.profilePictureUrl;
+    if (raw === null) {
+      patch.profile_picture_url = null;
+    } else if (typeof raw === "string" && isCloudinaryUrl(raw)) {
+      patch.profile_picture_url = raw;
+    } else {
+      return Response.json({ error: "Invalid profile picture — upload one, don't paste a URL." }, { status: 400 });
+    }
+  }
+
   const supabase = getSupabaseServerClient();
-  const { data: updated, error } = await supabase
-    .from("users")
-    .update({ username })
-    .eq("id", auth.user.id)
-    .select("*")
-    .single();
+  const { data: updated, error } = await supabase.from("users").update(patch).eq("id", auth.user.id).select("*").single();
 
   if (error) {
-    return dbErrorResponse("PATCH auth/me username", error);
+    return dbErrorResponse("PATCH auth/me", error);
   }
 
   return Response.json({
     success: true,
-    user: { email: updated.email, username: updated.username, role: updated.role, walletAddress: updated.wallet_address ?? null },
+    user: {
+      email: updated.email,
+      username: updated.username,
+      role: updated.role,
+      walletAddress: updated.wallet_address ?? null,
+      profilePictureUrl: updated.profile_picture_url ?? null,
+    },
   });
 }

@@ -33,22 +33,78 @@ product.
 
 ### Still open
 
-**Row Level Security provides no real defense in depth.** The app
-always connects with Supabase's service-role key, which bypasses RLS
-entirely. The API route layer is the actual (and only) authorization
-boundary today. See [docs/security.md](docs/security.md).
+**Row Level Security is real on 11 tables, a default-deny backstop
+everywhere else.** A per-request JWT (`lib/supabaseUserClient.ts`)
+switches the Postgres role to `authenticated` for self- and
+order-scoped reads — `orders`, `supplier_profiles`, `payment_events`,
+`delivery_proofs`, `disputes`, `ratings`, `notifications`,
+`notification_preferences`, `supplier_verification_applications`,
+`buyer_kyc_profiles`, `buyer_wallets` — so RLS policies actually run
+there instead of being bypassed by the service-role key every other
+query still (legitimately) uses. The API route layer stays the primary
+authorization boundary everywhere; RLS is a genuine second, independent
+layer on those 11 tables specifically, not yet the rest. See
+[docs/security.md](docs/security.md).
 
-**Yellow Card (NGN funding/settlement) is entirely unbuilt.** No
-credentials, no partial implementation, funding and refunds are fully
-simulated regardless of any other env vars you set. See
+**Yellow Card funding/refund/settlement are all real now — real
+credentials are genuinely the only remaining blocker, one caveat below.**
+`lib/yellowCardProvider.ts` calls Yellow Card's actual Business API
+(bank-transfer funding, full-amount-only refund, and a real supplier
+payout: escrow release pays the supplier's bank account via Yellow
+Card's Send API instead of their own crypto wallet) once
+`YELLOW_CARD_API_KEY`/`YELLOW_CARD_SECRET_KEY` are set; simulated
+otherwise. Real settlement additionally needs
+`YELLOW_CARD_ESCROW_CRYPTO_NETWORK` set to match Circle's escrow wallet's
+actual chain, and production credentials additionally need a static
+outbound IP whitelisted.
+
+Audited end to end (integration, security, feedback) to confirm this:
+rate limiting and error-message sanitization added to the wallet
+top-up/order-fund routes, `ErrorPanel`/typed-confirmation parity added
+across every financial admin/buyer/supplier action, and a reconciliation
+cron (`lib/yellowCardReconciliation.ts`, mirroring Circle's own) now
+backstops the refund/settlement/wallet-topup legs the same way
+`lib/releaseReconciliation.ts` already did for Circle. The one thing
+that genuinely can't be resolved by writing more code: the webhook
+signature scheme (HMAC-SHA256, base64) is confirmed **textually** from
+Yellow Card's own docs, but has never been verified byte-for-byte
+against a real received webhook (no worked example exists, unlike
+request signing) — if that reading is subtly wrong, verification fails
+*closed* (401, logged), not open, but every funding/refund/settlement/
+top-up webhook would be silently rejected with no crash. Watch server
+logs for `Yellow Card webhook: signature did not verify` the moment
+real sandbox credentials go in. See
 [docs/payment-integration.md](docs/payment-integration.md).
+
+**The buyer wallet's top-up is real but one-way, deliberately.** A
+buyer tops up a platform balance and funds orders from it instantly
+(`lib/walletService.ts`, `lib/yellowCardWalletTopupProvider.ts`, real
+the moment Yellow Card credentials are set), but there is no
+withdrawal: Yellow Card's refund API can't give back an unspent
+*portion* of a top-up, only refund one whole original transfer. A buyer
+who tops up more than they spend has no way to get the difference back
+today. See [docs/payment-integration.md](docs/payment-integration.md).
 
 **On-chain rating submission always returns `"submitted"`, never
 `"confirmed"`.** The contract/chain for this isn't decided yet.
 
-**Two dependency vulnerabilities remain** (`ws` via Privy's SDK,
-`serialize-javascript` via next-pwa), both need a breaking
-major-version bump, deliberately not forced blind.
+**The `ws` and `serialize-javascript` high-severity vulnerabilities are
+fixed**, via a `package.json` `overrides` pin
+(`ws` >=8.21.0, `serialize-javascript` >=7.0.5) rather than a
+major-version bump of Privy or next-pwa themselves, since neither
+publishes a version whose own dependency tree resolves to a patched
+copy. Verified with a full `npm run build` (the service worker
+actually regenerates through `workbox-build`, the path that pulls in
+`serialize-javascript`) and the full test suite, not just `npm audit`'s
+say-so.
+
+**15 moderate-severity advisories remain**, all several levels deep in
+Privy's wallet-connector tree (Reown/WalletConnect, MetaMask, Farcaster,
+Solana packages pulled in transitively for wallet login). `npm audit`
+has no fix for any of them short of a major Privy bump, which risks
+breaking the auth flow every buyer/supplier/admin session depends on —
+not attempted blind. Re-run `npm audit` after any Privy upgrade to see
+if it's closed the gap upstream.
 
 ## Tech stack
 
@@ -71,16 +127,17 @@ major-version bump, deliberately not forced blind.
   session cookie (`jose`) that every protected route checks. See
   [docs/architecture.md](docs/architecture.md).
 - **Circle** developer-controlled wallets for USDC escrow release,
-  **Yellow Card** for NGN legs (unbuilt, see
-  [docs/payment-integration.md](docs/payment-integration.md))
+  **Yellow Card** for NGN funding/refund (settlement stays simulated by
+  design, see [docs/payment-integration.md](docs/payment-integration.md))
 - **Supabase** (Postgres) for data
 
 ### Comms and testing
 
 - **Jitsi** for the live buyer/supplier verification call
 - **web-push** + Resend (email fallback) for notifications
-- **Vitest**, 122 tests across auth, the state machine, the ledger,
-  order lifecycle, termination flows, and an adversarial attack suite
+- **Vitest**, 261 tests across auth, the state machine, the ledger,
+  order lifecycle, termination flows, reconciliation sweeps, and an
+  adversarial attack suite
 
 ## Auth & roles
 

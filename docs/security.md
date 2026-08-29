@@ -74,7 +74,11 @@ Real and shipped, each with a caveat worth knowing.
 ### Rate limiting
 
 Dispute filing and every termination route capped per IP and per
-account (8 per 10 min). **Updated, production-hardening pass:**
+account (8 per 10 min). **Updated again:** wallet top-up (10 per 10
+min) and order funding (20 per 10 min) now carry the same per-IP +
+per-account dual quota — the two routes that actually move real money
+had none at all before, unlike the lower-stakes termination routes
+that already did. **Updated, production-hardening pass:**
 Supabase-backed (`migration 0016_rate_limiting.sql`,
 `lib/rateLimit.ts`), not in-memory, survives a serverless cold start and
 is shared across instances. Atomic `rl_*` Postgres functions do the
@@ -106,18 +110,37 @@ state on Privy's own side.
 ### Internal error leaks
 
 48 raw Postgres/Supabase error messages across 14 route files
-sanitized, plus a specific wallet/USDC leak found and fixed. Custom
-error classes thrown deep inside `orderService.ts` that reach a
-generic catch-all weren't individually re-audited beyond the ones
-already checked, same category of risk, smaller and not exhaustively
-swept.
+sanitized, plus a specific wallet/USDC leak found and fixed. **Updated
+again:** the five remaining money-moving routes that still fell through
+to a raw `err.message` — `orders/[id]/fund`, `wallet/topup`,
+`orders/[id]/cancel`, `orders/[id]/abandon`, `orders/[id]/reject` — now
+route their generic-failure branch through `dbErrorResponse()` too,
+same as the other 15. Custom error classes thrown deep inside
+`orderService.ts` that reach a generic catch-all weren't individually
+re-audited beyond the ones already checked, same category of risk,
+smaller and not exhaustively swept.
 
 ### Dependency vulnerabilities
 
-35 down to 33. The one non-breaking fix (axios, high severity) is
-applied via `package.json` `overrides`. Two remaining high-severity
-issues (`ws` via Privy's SDK, `serialize-javascript` via next-pwa)
-need a major-version bump each, deliberately not forced blind.
+Both high-severity issues (`ws` via Privy's SDK, `serialize-javascript`
+via next-pwa) are fixed, the same way as the earlier axios fix: a
+`package.json` `overrides` pin (`ws` >=8.21.0, `serialize-javascript`
+>=7.0.5), not a major-version bump of Privy or next-pwa. Neither
+package publishes a version whose own tree resolves to a patched copy
+on its own — `npm ls` showed the vulnerable copies nested 3-6 levels
+deep under specific WalletConnect/viem/workbox sub-dependency
+versions, so overriding was the only way to reach them. Verified with
+a full `npm run build` (workbox-build, the path that actually calls
+`serialize-javascript`, has to run and produce `public/sw.js` for this
+to mean anything) and the full test suite, not just a clean `npm
+audit` line.
+
+15 moderate-severity advisories remain, all several levels deep in
+Privy's own wallet-connector tree (Reown/WalletConnect, MetaMask,
+Farcaster, Solana packages pulled in for wallet login). `npm audit`
+has no fix for any of them short of a major Privy version bump, which
+risks breaking the auth flow every session depends on — not attempted
+blind.
 
 ### Buyer KYC PII (`buyer_kyc_profiles`)
 
@@ -141,38 +164,53 @@ correct under interleaving. It does not prove true multi-connection
 Postgres concurrency, that guarantee comes from Postgres's own atomic
 `UPDATE ... WHERE` semantics, not from the test fixture.
 
-### Row Level Security: a real pilot exists now, not yet everywhere
+### Row Level Security: real on 11 tables now, not yet everywhere
 
-**Updated.** A genuine identity bridge now exists
+**Updated.** A genuine identity bridge exists
 (`lib/supabaseUserClient.ts`): a per-request JWT minted for the
 specific calling user, carrying a custom `user_row_id` claim (not
 `auth.uid()` — that casts to `uuid` and would error on this app's
 `bigint` identity), switching the Postgres role to `authenticated` so
 RLS policies actually run instead of being bypassed by `service_role`.
-Piloted on the highest-stakes table: `GET /api/orders`,
-`GET /api/orders/[id]`, `GET /api/orders/[id]/timeline`, and
-`GET /api/orders/incoming-calls` (buyer/supplier branches only, admin
-unchanged) now run their ownership-determining `orders` query through
-this real `authenticated`-role client, backed by migration
-`0017_orders_rls_pilot.sql`'s `orders_select_own` policy (plus a
-required companion `supplier_profiles_select_own` policy the orders
-policy's own subquery depends on). The existing app-layer ownership
-checks stay, deliberately redundant — this is a genuine second,
-independent layer now, not a decorative one.
 
-**Still true for the other ~25 tables**: no identity bridge is wired
-into them, RLS-enabled-zero-policies remains a default-deny backstop
-against key misuse there, not an active layer. Extending the pattern
-table-by-table (payment_events, disputes, notifications, ...) is real,
-bounded follow-up work now that the hard part (the JWT bridge itself)
-exists and is proven on the highest-value table.
+Started on the highest-stakes table (`0017_orders_rls_pilot.sql`:
+`orders`, plus a companion `supplier_profiles_select_own` its subquery
+depends on) and now expanded to 9 more
+(`0021_rls_expand_pilot.sql`), all `SELECT`-only, no write path
+touched:
 
-**Honest limitation**: this can't be verified by the automated test
-suite (`FakeSupabase` doesn't run real Postgres) — verifying the second
-layer is genuinely load-bearing, not just coincidentally redundant with
-the app-layer check, needs a manual test against the real database
-(temporarily disable the app-layer check, confirm cross-tenant access
-is still blocked by RLS alone).
+- **Order-scoped**, visible to either party of that order (mirrors
+  `orders_select_own`'s own check via a subquery): `payment_events`,
+  `delivery_proofs`, `disputes`, `ratings` — all read alongside
+  `orders` itself in `GET /api/orders/[id]`.
+- **Self-scoped**, a direct `user_id = current_app_user_id()` check:
+  `notifications`, `notification_preferences`,
+  `supplier_verification_applications` (new in this pass), plus
+  `buyer_kyc_profiles` and `buyer_wallets` — both already had this
+  exact policy since their own migrations (0018, 0020), just never
+  wired into a route until now (`GET /api/buyer-kyc/me`,
+  `GET /api/wallet`).
+
+11 tables with an actively-exercised policy in total. Two more,
+`wallet_transactions` and `supplier_payout_profiles`, already carry
+the identical self-only policy (same 0018/0020 migrations) but sit
+inert — no route reads either one back yet (a transaction-history
+screen, a "view my payout bank details" screen), so add the route and
+the policy is already waiting. Every other table (the public catalog —
+`materials`, `supplier_listings` — system/admin-only tables like
+`audit_log`, `ledger_entries`, `rate_limit_buckets`, and a few
+pre-marketplace-pivot leftovers like `sourcing_requests`) stays
+RLS-enabled-zero-policies, a default-deny backstop against key misuse,
+not an active layer. The app-layer ownership checks stay everywhere,
+deliberately redundant — every RLS policy above is a genuine second,
+independent layer, not a decorative one.
+
+**Honest limitation, unchanged**: this can't be verified by the
+automated test suite (`FakeSupabase` doesn't run real Postgres) —
+verifying the second layer is genuinely load-bearing, not just
+coincidentally redundant with the app-layer check, needs a manual test
+against the real database (temporarily disable the app-layer check,
+confirm cross-tenant access is still blocked by RLS alone).
 
 ## Unmitigated
 

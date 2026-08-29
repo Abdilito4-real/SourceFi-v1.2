@@ -31,6 +31,31 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
 
 export class PushSetupError extends Error {}
 
+// navigator.serviceWorker.ready never resolves until a service worker
+// actually activates — which never happens at all in local dev
+// (next.config.mjs disables the PWA plugin there on purpose: HMR and the
+// SW fight over caching, see that file's own comment). Every caller in
+// this file used to `await navigator.serviceWorker.ready` directly,
+// which is exactly why "Turn on" hung on loading forever instead of
+// failing with a message: there was nothing to time out against. Racing
+// it against a bounded wait turns that into a clear, dismissable error
+// instead, in dev AND in the rarer case a real browser's SW registration
+// genuinely stalls.
+async function getReadyRegistration(timeoutMs = 8000): Promise<ServiceWorkerRegistration> {
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      reject(
+        new PushSetupError(
+          process.env.NODE_ENV === "development"
+            ? "Push notifications need the service worker, which is disabled in local dev (see next.config.mjs). Run `npm run build && npm start` to test this."
+            : "Couldn't set up notifications, the service worker never became ready. Reload the page and try again."
+        )
+      );
+    }, timeoutMs);
+  });
+  return Promise.race([navigator.serviceWorker.ready, timeout]);
+}
+
 /** Requests the native permission (must be called from a user gesture,
  * per browser rules, the caller, PushSoftPrompt, only calls this after
  * its own soft prompt was accepted), then subscribes and registers with
@@ -53,7 +78,7 @@ export async function enablePush(): Promise<void> {
     throw new PushSetupError("Push notifications aren't available right now. Try again later.");
   }
 
-  const registration = await navigator.serviceWorker.ready;
+  const registration = await getReadyRegistration();
   const subscription = await registration.pushManager.subscribe({
     userVisibleOnly: true, // required by Chrome/Firefox: every push must show a visible notification, never a silent one
     // lib.dom.d.ts's ArrayBufferView<ArrayBuffer> vs our Uint8Array's
@@ -86,7 +111,7 @@ export async function enablePush(): Promise<void> {
  * the server-side row doesn't linger for a device that no longer has it. */
 export async function disablePush(): Promise<void> {
   if (!isPushSupported()) return;
-  const registration = await navigator.serviceWorker.ready;
+  const registration = await getReadyRegistration();
   const subscription = await registration.pushManager.getSubscription();
   if (!subscription) return;
 
@@ -102,7 +127,7 @@ export async function disablePush(): Promise<void> {
 export async function getExistingSubscription(): Promise<PushSubscription | null> {
   if (!isPushSupported()) return null;
   try {
-    const registration = await navigator.serviceWorker.ready;
+    const registration = await getReadyRegistration();
     return registration.pushManager.getSubscription();
   } catch {
     return null;

@@ -14,6 +14,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { Menu, X, LogOut, ArrowLeftRight } from "lucide-react";
 import { cn } from "./ui/cn";
+import { useBodyScrollLock } from "./ui/useBodyScrollLock";
 import ThemeToggle from "./ui/ThemeToggle";
 import PushSoftPrompt from "./PushSoftPrompt";
 import IncomingCallBanner from "./IncomingCallBanner";
@@ -63,7 +64,13 @@ function SidebarContent({
   onNavigate?: () => void;
 }) {
   return (
-    <div className="flex h-full flex-col bg-nav-bg px-4 py-6">
+    // overflow-y-auto: defensive, not just for desktop's fixed h-screen
+    // sidebar. The mobile drawer is full-height too, and with enough nav
+    // items + switch links + account footer (Admin's 6 nav items is
+    // already close), a short landscape-phone viewport can run out of
+    // room; without this the bottom (sign out) would just be clipped
+    // with no way to reach it.
+    <div className="flex h-full flex-col overflow-y-auto bg-nav-bg px-4 py-6">
       <div className="mb-8 flex items-center gap-2.5 px-2">
         <Image src="/logo-mark.png" alt="" width={32} height={32} className="rounded-md" priority />
         <span className="font-display text-lg font-bold italic text-nav-text">SourceFi</span>
@@ -79,9 +86,20 @@ function SidebarContent({
               onNavigate?.();
             }}
             aria-current={item.active ? "page" : undefined}
+            // border-left-color deliberately left out of the transition
+            // (background-color/color only, not the blanket
+            // transition-colors): it's theme-driven, and transitioning a
+            // var()-only color change under a held `transition` can get
+            // visibly stuck on the pre-toggle color until something else
+            // forces a reflow, see the identical note in OrderCard.tsx.
+            // py-3 (not py-2.5): this is the mobile drawer's nav list as
+            // much as the desktop sidebar's, ~44px is the real minimum
+            // comfortable tap target on a touch screen.
             className={cn(
-              "flex items-center justify-between rounded-md px-3 py-2.5 text-left font-body text-sm font-semibold transition-colors duration-base ease-base",
-              item.active ? "bg-nav-active-bg text-nav-active-text" : "text-nav-text-muted hover:bg-white/5 hover:text-nav-text"
+              "flex items-center justify-between rounded-md border-l-2 px-3 py-3 text-left font-body text-sm font-semibold transition-[background-color,color] duration-base ease-base",
+              item.active
+                ? "border-l-accent bg-nav-active-bg text-nav-active-text"
+                : "border-l-transparent text-nav-text-muted hover:bg-white/5 hover:text-nav-text"
             )}
           >
             <span className="flex items-center gap-2.5">
@@ -108,14 +126,26 @@ function SidebarContent({
             key={link.href}
             href={link.href}
             onClick={() => onNavigate?.()}
-            className="flex items-center gap-2.5 rounded-md px-3 py-2.5 font-body text-sm font-semibold text-nav-text-muted transition-colors duration-base ease-base hover:bg-white/5 hover:text-nav-text"
+            className="flex items-center gap-2.5 rounded-md px-3 py-3 font-body text-sm font-semibold text-nav-text-muted transition-colors duration-base ease-base hover:bg-white/5 hover:text-nav-text"
           >
             <ArrowLeftRight size={16} />
             {link.label}
           </Link>
         ))}
 
-        <div className="flex items-center justify-between gap-2 px-1 pt-2">
+        <div className="flex items-center gap-2.5 px-1 pt-2">
+          {user.profilePictureUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element -- a
+            // Cloudinary URL, not a local Next.js image asset.
+            <img src={user.profilePictureUrl} alt="" className="h-8 w-8 shrink-0 rounded-full border border-white/10 object-cover" />
+          ) : (
+            <div
+              aria-hidden="true"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/10 font-display text-xs font-semibold text-nav-text"
+            >
+              {(user.username || user.identity || "?").charAt(0).toUpperCase()}
+            </div>
+          )}
           <div className="min-w-0">
             <div className="truncate font-body text-sm font-semibold text-nav-text">
               {user.username ? `@${user.username}` : user.identity}
@@ -129,7 +159,7 @@ function SidebarContent({
           onClick={onSignOut}
           disabled={signingOut}
           aria-busy={signingOut || undefined}
-          className="mt-1 flex items-center gap-2.5 rounded-md px-3 py-2.5 text-left font-body text-sm font-semibold text-nav-text-muted transition-colors duration-base ease-base hover:bg-white/5 hover:text-nav-text disabled:cursor-not-allowed disabled:opacity-60"
+          className="mt-1 flex items-center gap-2.5 rounded-md px-3 py-3 text-left font-body text-sm font-semibold text-nav-text-muted transition-colors duration-base ease-base hover:bg-white/5 hover:text-nav-text disabled:cursor-not-allowed disabled:opacity-60"
         >
           <LogOut size={16} />
           {signingOut ? "Signing out…" : "Sign out"}
@@ -153,6 +183,11 @@ export default function DashboardShell({
   children,
 }: DashboardShellProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  // Same missing-lock bug Modal.tsx had: this drawer is also a `fixed
+  // inset-0` overlay, so touch-dragging its backdrop could scroll the
+  // dashboard behind it. Shared, reference-counted with every Modal —
+  // see components/ui/useBodyScrollLock.ts.
+  useBodyScrollLock(mobileNavOpen);
 
   // First thing after sign-in: this shell is what mounts the moment a
   // signed-in user lands on their dashboard, so this is that moment.
@@ -193,7 +228,9 @@ export default function DashboardShell({
           // doesn't jump, but invisible while the drawer's own close
           // button is up, otherwise this peeks through the drawer's
           // semi-transparent backdrop as a second, confusing menu icon.
-          className={cn("rounded-md p-2 text-nav-text hover:bg-white/5", mobileNavOpen && "invisible")}
+          // p-2.5, not p-2: the primary way into navigation on mobile,
+          // worth the extra few px toward a real ~44px tap target.
+          className={cn("-mr-1 rounded-md p-2.5 text-nav-text hover:bg-white/5", mobileNavOpen && "invisible")}
         >
           <Menu size={20} />
         </button>
@@ -208,7 +245,7 @@ export default function DashboardShell({
                 type="button"
                 onClick={() => setMobileNavOpen(false)}
                 aria-label="Close navigation"
-                className="rounded-md bg-nav-bg p-2 text-nav-text hover:bg-white/5"
+                className="rounded-md bg-nav-bg p-2.5 text-nav-text hover:bg-white/5"
               >
                 <X size={18} />
               </button>
@@ -227,9 +264,9 @@ export default function DashboardShell({
 
       {/* Main content */}
       <div className="min-w-0 flex-1">
-        <header className="flex flex-col gap-4 border-b border-border bg-surface px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
+        <header className="flex flex-col gap-4 border-b border-border bg-surface px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6 sm:py-5">
           <div>
-            <h1 className="font-display text-2xl font-semibold italic text-text-primary">{pageTitle}</h1>
+            <h1 className="font-display text-xl font-semibold italic text-text-primary sm:text-2xl">{pageTitle}</h1>
             {pageSubtitle && <p className="mt-1 text-sm text-text-secondary">{pageSubtitle}</p>}
           </div>
           <div className="flex flex-wrap items-center gap-3">
@@ -240,7 +277,7 @@ export default function DashboardShell({
           </div>
         </header>
 
-        <main className="px-6 py-8">{children}</main>
+        <main className="px-4 py-6 sm:px-6 sm:py-8">{children}</main>
       </div>
 
       <PushSoftPrompt

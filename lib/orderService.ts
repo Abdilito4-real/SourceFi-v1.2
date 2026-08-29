@@ -27,8 +27,16 @@ import { recordFundingConfirmed, recordEscrowRelease, recordSettlement, recordRe
 import { ORDER_PLATFORM_FEE_MINOR, MIN_ORDER_AMOUNT_MINOR, CANCELLATION_FEE_MINOR } from "./money";
 import { getNgnPerUsd } from "./fxRate";
 import type { PaymentBoundary, PaymentStatusEvent, FundingResult } from "./paymentBoundary";
+import { getWalletBalance, debitWalletForOrder, creditWalletForRefund, wasOrderFundedFromWallet, InsufficientWalletBalanceError } from "./walletService";
 import type { CancellationCategory, DisputeCategory, DisputeRuling, DisputeType, OrderRow, OrderStatus, UserRow } from "./types";
 import { notifyUser, notifyAdmins } from "./notifications/dispatch";
+
+// Buyer wallet balance (migration 0020): fundOrder() below is wallet-first
+// from this point on, re-exported here so route code
+// (app/api/orders/[id]/fund/route.ts) has one place to import every
+// error fundOrder can throw from, rather than reaching into
+// lib/walletService.ts directly for just this one.
+export { InsufficientWalletBalanceError };
 
 // ============================================================================
 // Termination flows (Prompt 3 of the feedback/notifications/security
@@ -426,20 +434,20 @@ export interface FundOrderResult {
   paymentInstructions: FundingResult["paymentInstructions"] | null;
 }
 
-export class BuyerKycRequiredError extends Error {
-  constructor() {
-    super("Complete your buyer verification before funding an order.");
-    this.name = "BuyerKycRequiredError";
-  }
-}
-
-/** Buyer clicks "Fund Order". Re-checks supplier verification live (not
- * just at order-creation time) and ownership, then hands off to the
- * payment boundary, this function never touches Yellow Card or Circle
- * itself, see lib/paymentBoundary.ts. */
+/** Buyer clicks "Fund Order". Wallet-first as of migration 0020: this no
+ * longer calls a payment provider at all, it requires the buyer's
+ * platform wallet balance to already cover the order and debits it
+ * atomically (lib/walletService.ts's debitWalletForOrder, backed by the
+ * wallet_debit RPC's row lock — never a check-then-act race). KYC is no
+ * longer checked here: it's now a gate on topping up the wallet in the
+ * first place (lib/walletService.ts's initiateWalletTopup), since that's
+ * the step that will eventually make a real external call needing it —
+ * by the time money is IN the wallet it already went through a KYC'd
+ * top-up, re-checking here would be redundant, not an extra layer of
+ * safety. Re-checks supplier verification live (not just at
+ * order-creation time) and ownership, same as before. */
 export async function fundOrder(
   supabase: SupabaseClient,
-  paymentProvider: PaymentBoundary,
   orderId: number,
   buyerId: number
 ): Promise<FundOrderResult> {
@@ -449,38 +457,49 @@ export async function fundOrder(
   const verified = await isSupplierCurrentlyVerified(supabase, order.supplier_id);
   if (!verified) throw new SupplierNotCurrentlyVerifiedError(order.supplier_id);
 
-  // Real Yellow Card integration: initiateOrderFunding's `recipient`
-  // object needs this on file (name/phone/dob/idType/idNumber/address),
-  // checked BEFORE the state transition below so a buyer without one
-  // gets a clear, specific error rather than the order silently moving
-  // to payment_processing and then failing inside the provider call.
-  // Checked here rather than only inside YellowCardProvider so the
-  // failure is a clean domain error, not a provider-level exception —
-  // the provider still re-checks too (defense in depth, same posture as
-  // everywhere else in this hardening pass).
-  const { data: kyc } = await supabase.from("buyer_kyc_profiles").select("id").eq("user_id", buyerId).maybeSingle();
-  if (!kyc) throw new BuyerKycRequiredError();
+  // Upfront, cheap read before touching order status at all: the common
+  // case (balance already insufficient) fails clean with the order left
+  // exactly at pending_payment, no wasted transition/rollback. This is
+  // an optimization, not the actual safety mechanism — debitWalletForOrder's
+  // atomic RPC below is what's still authoritative if a concurrent
+  // request changes the balance in between.
+  const { balanceMinor } = await getWalletBalance(supabase, buyerId);
+  if (balanceMinor < order.amount_minor) {
+    throw new InsufficientWalletBalanceError(order.amount_minor - balanceMinor);
+  }
 
   const moved = await tryTransition(supabase, orderId, order.status, "payment_processing");
   if (!moved) throw new InvalidOrderTransitionError(order.status, "payment_processing");
 
-  const result = await paymentProvider.initiateOrderFunding(orderId);
-
-  await supabase.from("payment_events").insert({
-    order_id: orderId,
-    leg: "funding",
-    provider: "yellow_card",
-    provider_reference: result.paymentReference,
-    event_type: result.status === "failed" ? "funding_failed" : "funding_initiated",
-    provider_state: result.status,
-  });
-
-  if (result.status === "failed") {
+  try {
+    await debitWalletForOrder(supabase, buyerId, orderId, order.amount_minor);
+  } catch (err) {
+    // Lost a race against another concurrent debit since the balance
+    // check above — genuinely rare, same "said processing, turned out to
+    // fail" shape the old provider-failure path below already handled,
+    // reusing the exact same legal transition rather than inventing a
+    // new one.
     await tryTransition(supabase, orderId, "payment_processing", "payment_failed");
+    throw err;
   }
 
+  // No async gap to wait out (the debit above already moved the money,
+  // atomically, inside this same request) — fire the confirmation
+  // straight through the existing event consumer instead of a separate
+  // "initiated" phase. See lib/walletService.ts's module comment: this
+  // reuses handleFundingConfirmed completely unchanged, provider:
+  // "wallet" is just a third event source alongside StubPaymentProvider
+  // and Yellow Card's real webhook.
+  await handlePaymentStatusEvent(supabase, {
+    orderId,
+    leg: "funding",
+    provider: "wallet",
+    providerReference: `wallet-fund-${orderId}`,
+    providerState: "confirmed",
+  });
+
   const updated = await fetchOrder(supabase, orderId);
-  return { order: updated, paymentReference: result.paymentReference, paymentInstructions: result.paymentInstructions ?? null };
+  return { order: updated, paymentReference: `wallet-fund-${orderId}`, paymentInstructions: null };
 }
 
 // ============================================================================
@@ -711,14 +730,34 @@ async function handleRefundConfirmed(supabase: SupabaseClient, event: PaymentSta
     .limit(1)
     .maybeSingle();
 
+  // Hoisted out of the if/else below (was computed inline, only in the
+  // fee-retaining branch) so the wallet-credit step further down can
+  // reuse the EXACT same figure the ledger just booked, whichever branch
+  // ran — no chance of the wallet ending up credited a different amount
+  // than what the ledger recorded as "the buyer's money again".
+  const ngnRefundMinor =
+    cancellation && cancellation.fee_charged_minor > 0
+      ? cancellation.refund_minor ?? order.amount_minor - cancellation.fee_charged_minor
+      : order.amount_minor;
+
   if (cancellation && cancellation.fee_charged_minor > 0) {
     const feeFraction = cancellation.fee_charged_minor / order.amount_minor;
     const usdcFeeMinor = Math.round(totalUsdcMinor * feeFraction);
     const usdcRefundMinor = totalUsdcMinor - usdcFeeMinor;
-    const ngnRefundMinor = cancellation.refund_minor ?? order.amount_minor - cancellation.fee_charged_minor;
     await recordPartialRefundWithFee(supabase, event.orderId, ngnRefundMinor, usdcRefundMinor, usdcFeeMinor);
   } else {
-    await recordRefundFromEscrow(supabase, event.orderId, order.amount_minor, totalUsdcMinor);
+    await recordRefundFromEscrow(supabase, event.orderId, ngnRefundMinor, totalUsdcMinor);
+  }
+
+  // If this order was funded from the buyer's wallet, the money coming
+  // back is platform-custody money returning to platform-custody
+  // balance, not a fresh external bank payout — credit it back to the
+  // wallet instead. This is also what sidesteps Yellow Card's
+  // full-receive-only refund limit entirely for a wallet-funded order:
+  // crediting a wallet has no such restriction. See
+  // lib/walletService.ts's module comment for the full reasoning.
+  if (await wasOrderFundedFromWallet(supabase, event.orderId)) {
+    await creditWalletForRefund(supabase, order.buyer_id, event.orderId, ngnRefundMinor);
   }
 
   // critical: true, a refund is as much "your money moved" as a release is.
@@ -732,6 +771,47 @@ async function handleRefundConfirmed(supabase: SupabaseClient, event: PaymentSta
     body: "Your refund has been processed. Tap to view.",
     deepLink: `/buyer?order=${order.id}`,
     critical: true,
+  });
+}
+
+/** Shared by every refund-initiating call site (resolveDispute's
+ * buyer-ruling branch, cancelFundedOrder, abandonOrder): if this order
+ * was funded from the buyer's wallet, there is no real Yellow Card
+ * receive to refund against — Yellow Card's refund API refunds one
+ * whole original receive, and a wallet-funded order was never funded
+ * via one, so calling paymentProvider.initiateRefund here would either
+ * hit its full-amount-only guard on a partial refund or try to refund a
+ * receive that plain doesn't exist. Route straight to the wallet-credit
+ * event path instead: synchronous, no external call, reuses
+ * handleRefundConfirmed completely unchanged (same "a third event
+ * source feeding the same consumer" shape fundOrder uses above).
+ * Otherwise, unchanged: call the real provider and log the initiation
+ * the same way every refund path always has. */
+async function initiateRefundForOrder(
+  supabase: SupabaseClient,
+  paymentProvider: PaymentBoundary,
+  orderId: number,
+  amountMinor: number
+): Promise<void> {
+  if (await wasOrderFundedFromWallet(supabase, orderId)) {
+    await handlePaymentStatusEvent(supabase, {
+      orderId,
+      leg: "refund",
+      provider: "wallet",
+      providerReference: `wallet-refund-${orderId}`,
+      providerState: "confirmed",
+    });
+    return;
+  }
+
+  const result = await paymentProvider.initiateRefund(orderId, amountMinor);
+  await supabase.from("payment_events").insert({
+    order_id: orderId,
+    leg: "refund",
+    provider: "yellow_card",
+    provider_reference: result.refundReference,
+    event_type: result.status === "failed" ? "refund_failed" : "refund_initiated",
+    provider_state: result.status,
   });
 }
 
@@ -1313,15 +1393,7 @@ export async function resolveDispute(
 
       const moved = await tryTransition(supabase, order.id, "disputed", "refund_processing");
       if (moved) {
-        const result = await paymentProvider.initiateRefund(order.id, order.amount_minor);
-        await supabase.from("payment_events").insert({
-          order_id: order.id,
-          leg: "refund",
-          provider: "yellow_card",
-          provider_reference: result.refundReference,
-          event_type: result.status === "failed" ? "refund_failed" : "refund_initiated",
-          provider_state: result.status,
-        });
+        await initiateRefundForOrder(supabase, paymentProvider, order.id, order.amount_minor);
         autoActionTaken = "refund_initiated";
       }
     } else {
@@ -1540,15 +1612,7 @@ export async function cancelFundedOrder(
     refund_minor: refundMinor,
   });
 
-  const result = await paymentProvider.initiateRefund(orderId, refundMinor);
-  await supabase.from("payment_events").insert({
-    order_id: orderId,
-    leg: "refund",
-    provider: "yellow_card",
-    provider_reference: result.refundReference,
-    event_type: result.status === "failed" ? "refund_failed" : "refund_initiated",
-    provider_state: result.status,
-  });
+  await initiateRefundForOrder(supabase, paymentProvider, orderId, refundMinor);
 
   getSupplierUserId(supabase, order.supplier_id).then((supplierUserId) => {
     if (supplierUserId == null) return;
@@ -1606,15 +1670,7 @@ export async function abandonOrder(
     refund_minor: order.amount_minor,
   });
 
-  const result = await paymentProvider.initiateRefund(orderId, order.amount_minor);
-  await supabase.from("payment_events").insert({
-    order_id: orderId,
-    leg: "refund",
-    provider: "yellow_card",
-    provider_reference: result.refundReference,
-    event_type: result.status === "failed" ? "refund_failed" : "refund_initiated",
-    provider_state: result.status,
-  });
+  await initiateRefundForOrder(supabase, paymentProvider, orderId, order.amount_minor);
 
   // created_at set explicitly (not left to the column's DB-side default)
   //, the escalation check right below filters on it via .gte(), so it

@@ -121,8 +121,29 @@ export async function POST(request: Request) {
           })
           .select("*")
           .single();
-        if (createErr) throw createErr;
-        user = created as UserRow;
+        if (createErr) {
+          // 23505 = unique_violation on users.email: this exact race is
+          // real, not theoretical — React 18 StrictMode double-invokes
+          // this component's mount effect in dev, firing two genuine
+          // concurrent POSTs here for a brand-new identity; both pass the
+          // `byEmail` check above (neither committed yet), both attempt
+          // this insert, one wins, one lands here. Outside dev, two
+          // browser tabs opening at once is the same shape of race. The
+          // OTHER request already created the row correctly by the time
+          // this one's insert fails — re-select and use it instead of
+          // throwing (this is the exact same "guard redundantly, prefer
+          // reading the winner over erroring the loser" posture as e.g.
+          // lib/orderService.ts's compare-and-swap transitions).
+          if (createErr.code === "23505") {
+            const { data: wonByOther } = await supabase.from("users").select("*").eq("email", email).maybeSingle();
+            if (!wonByOther) throw createErr; // genuinely unexpected, not just a lost race — surface the real error
+            user = wonByOther as UserRow;
+          } else {
+            throw createErr;
+          }
+        } else {
+          user = created as UserRow;
+        }
       }
     }
 
@@ -136,7 +157,13 @@ export async function POST(request: Request) {
 
     return Response.json({
       success: true,
-      user: { email: user.email, username: user.username, role: user.role, walletAddress: user.wallet_address ?? null },
+      user: {
+        email: user.email,
+        username: user.username,
+        role: user.role,
+        walletAddress: user.wallet_address ?? null,
+        profilePictureUrl: user.profile_picture_url ?? null,
+      },
     });
   } catch (err) {
     await recordFailure(limitKey);

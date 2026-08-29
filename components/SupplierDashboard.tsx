@@ -9,7 +9,7 @@
 // Section 0), receiving orders buyers place directly and fulfilling them.
 import React, { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2, Coins, ShieldCheck, ShieldAlert, LayoutGrid, FileText, History, Clock, Package, Plus, Pencil, Trash2, EyeOff, Eye } from "lucide-react";
+import { Loader2, Coins, ShieldCheck, ShieldAlert, LayoutGrid, FileText, History, Clock, Package, Plus, Pencil, Trash2, EyeOff, Eye, Maximize2 } from "lucide-react";
 
 import { formatMoney } from "../lib/money";
 import { useSession } from "./SessionProvider";
@@ -22,11 +22,15 @@ import SupplierVerificationForm from "./SupplierVerificationForm";
 import Button from "./ui/Button";
 import { Card } from "./ui/Card";
 import Modal from "./ui/Modal";
-import StatCard from "./ui/StatCard";
+import StatCard, { StatCardSkeleton } from "./ui/StatCard";
 import Badge from "./ui/Badge";
 import SupplierTierBadge, { type SupplierTier } from "./ui/SupplierTierBadge";
 import { Label, Input, Textarea } from "./ui/Field";
+import ImageUploadField from "./ui/ImageUploadField";
 import SharedEmptyState from "./ui/EmptyState";
+import SectionHeader from "./ui/SectionHeader";
+import Tabs from "./ui/Tabs";
+import CardListSkeleton from "./ui/CardListSkeleton";
 import { useToast } from "./ui/Toast";
 import type { SupplierListingRow, SupplierProfileRow, SupplierVerificationApplicationRow } from "../lib/types";
 
@@ -35,11 +39,13 @@ type Section = "overview" | "orders" | "listings" | "verification";
 // settlement_processing included alongside settled: the release that
 // actually pays the supplier has already confirmed on-chain by the time
 // an order reaches this status (system-transition target right after
-// escrow_released, lib/orderStateMachine.ts), and there's no real
-// settlement integration yet to ever advance it further
-// (docs/payment-integration.md). Same call already made for the UI
-// (components/ui/Badge.tsx, OrderDetailsModal.tsx), buyer dashboard, and
-// supplier trust scoring (lib/supplierTrust.ts).
+// escrow_released, lib/orderStateMachine.ts) — treated as terminal
+// here regardless of whether the real settlement leg (Yellow Card Send,
+// docs/payment-integration.md) has confirmed yet, since nothing left in
+// this dashboard's own flow depends on that distinction. Same call
+// already made for the UI (components/ui/Badge.tsx,
+// OrderDetailsModal.tsx), buyer dashboard, and supplier trust scoring
+// (lib/supplierTrust.ts).
 const TERMINAL_STATUSES = new Set(["settled", "settlement_processing", "refunded", "cancelled", "expired"]);
 
 interface SupplierTrust {
@@ -66,14 +72,22 @@ function ListingFormModal({
   onClose,
   onSubmit,
   submitting,
+  requireImage,
 }: {
   title: string;
   initial: ListingFormValues;
   onClose: () => void;
   onSubmit: (values: ListingFormValues) => void;
   submitting: boolean;
+  /** True on create, false on edit — an existing listing without a
+   * photo (from before this was required) isn't forced to add one just
+   * to edit its price. app/api/supplier-listings/route.ts's own POST
+   * handler enforces the same rule server-side, this is just the UI
+   * half of it. */
+  requireImage: boolean;
 }) {
   const [values, setValues] = useState<ListingFormValues>(initial);
+  const [imageTouched, setImageTouched] = useState(false);
 
   return (
     <Modal open onClose={onClose} title={title} size="sm">
@@ -109,15 +123,28 @@ function ListingFormModal({
             placeholder="8,500"
           />
         </div>
-        <div>
-          <Label htmlFor="listing-image">Image URL (optional)</Label>
-          <Input id="listing-image" value={values.imageUrl} onChange={(e) => setValues({ ...values, imageUrl: e.target.value })} placeholder="https://…" />
-        </div>
+        <ImageUploadField
+          label="Material photo"
+          folder="material_listings"
+          required={requireImage}
+          invalid={imageTouched && requireImage && !values.imageUrl}
+          value={values.imageUrl || null}
+          onChange={(url) => {
+            setImageTouched(true);
+            setValues({ ...values, imageUrl: url || "" });
+          }}
+          helperText={requireImage ? "Buyers decide off this photo — required." : undefined}
+        />
         <div>
           <Label htmlFor="listing-desc">Description</Label>
           <Textarea id="listing-desc" value={values.description} onChange={(e) => setValues({ ...values, description: e.target.value })} placeholder="Grade, typical quantities, delivery notes…" />
         </div>
-        <Button type="submit" fullWidth loading={submitting} disabled={submitting || !values.name.trim()}>
+        <Button
+          type="submit"
+          fullWidth
+          loading={submitting}
+          disabled={submitting || !values.name.trim() || (requireImage && !values.imageUrl)}
+        >
           Save
         </Button>
       </form>
@@ -148,6 +175,9 @@ export default function SupplierDashboard() {
   const [loadingListings, setLoadingListings] = useState(true);
   const [showNewListing, setShowNewListing] = useState(false);
   const [editingListing, setEditingListing] = useState<SupplierListingRow | null>(null);
+  // "See full image" — the card banner is a cropped h-36 object-cover
+  // thumbnail, this shows the actual uploaded photo uncropped.
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
   const [savingListing, setSavingListing] = useState(false);
 
   const isSupplier = user?.role === "supplier";
@@ -419,33 +449,46 @@ export default function SupplierDashboard() {
       {section === "overview" && (
         <div className="flex flex-col gap-8">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <StatCard label="Earnings (settled)" value={formatMoney(earningsMinor, "NGN")} icon={<Coins size={16} />} tone="accent" />
-            <StatCard label="Incoming orders" value={incomingCount} icon={<FileText size={16} />} />
-            <StatCard
-              label="Trust tier"
-              value={currentlyVerified ? (trust?.tier ? <SupplierTierBadge tier={trust.tier} className="!text-sm !px-3 !py-1.5" /> : "Verified") : "Not verified"}
-              hint={
-                currentlyVerified && trust
-                  ? `${trust.completedOrderCount} completed order${trust.completedOrderCount === 1 ? "" : "s"}${
-                      trust.ratingCount > 0 ? ` · ★ ${trust.ratingAverage?.toFixed(1)} (${trust.ratingCount})` : ""
-                    }`
-                  : undefined
-              }
-              icon={currentlyVerified ? <ShieldCheck size={16} /> : <ShieldAlert size={16} />}
-            />
+            {loadingOrders ? (
+              <>
+                <StatCardSkeleton />
+                <StatCardSkeleton />
+              </>
+            ) : (
+              <>
+                <StatCard label="Earnings (settled)" value={formatMoney(earningsMinor, "NGN")} icon={<Coins size={16} />} tone="accent" />
+                <StatCard label="Incoming orders" value={incomingCount} icon={<FileText size={16} />} />
+              </>
+            )}
+            {loadingVerification ? (
+              <StatCardSkeleton />
+            ) : (
+              <StatCard
+                label="Trust tier"
+                value={currentlyVerified ? (trust?.tier ? <SupplierTierBadge tier={trust.tier} className="!text-sm !px-3 !py-1.5" /> : "Verified") : "Not verified"}
+                hint={
+                  currentlyVerified && trust
+                    ? `${trust.completedOrderCount} completed order${trust.completedOrderCount === 1 ? "" : "s"}${
+                        trust.ratingCount > 0 ? ` · ★ ${trust.ratingAverage?.toFixed(1)} (${trust.ratingCount})` : ""
+                      }`
+                    : undefined
+                }
+                icon={currentlyVerified ? <ShieldCheck size={16} /> : <ShieldAlert size={16} />}
+              />
+            )}
           </div>
 
           <div>
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="font-display text-xl italic text-text-primary">Recent orders</h2>
-              <button type="button" onClick={() => setSection("orders")} className="text-sm font-semibold text-accent-text hover:underline">
-                View all
-              </button>
-            </div>
+            <SectionHeader
+              title="Recent orders"
+              action={
+                <button type="button" onClick={() => setSection("orders")} className="text-sm font-semibold text-accent-text hover:underline">
+                  View all
+                </button>
+              }
+            />
             {loadingOrders ? (
-              <div className="flex justify-center py-10">
-                <Loader2 size={22} className="spin-icon text-accent" />
-              </div>
+              <CardListSkeleton rows={3} />
             ) : orders.length === 0 ? (
               <SharedEmptyState title="No orders yet" description="They'll show up here as soon as a buyer funds one against your business." />
             ) : (
@@ -461,31 +504,25 @@ export default function SupplierDashboard() {
 
       {section === "orders" && (
         <div>
-          <div className="mb-5 flex w-fit rounded-lg border border-border bg-surface p-1">
-            <button
-              type="button"
-              onClick={() => setOrdersTab("active")}
-              className={`rounded-md px-3.5 py-1.5 text-xs font-semibold transition-colors duration-base ease-base ${
-                ordersTab === "active" ? "bg-accent text-accent-contrast" : "text-text-secondary hover:text-text-primary"
-              }`}
-            >
-              Active ({activeOrders.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setOrdersTab("history")}
-              className={`flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-semibold transition-colors duration-base ease-base ${
-                ordersTab === "history" ? "bg-accent text-accent-contrast" : "text-text-secondary hover:text-text-primary"
-              }`}
-            >
-              <History size={13} /> History
-            </button>
-          </div>
+          <Tabs
+            className="mb-5"
+            active={ordersTab}
+            onChange={(key) => setOrdersTab(key as "active" | "history")}
+            items={[
+              { key: "active", label: `Active (${activeOrders.length})` },
+              {
+                key: "history",
+                label: (
+                  <span className="flex items-center gap-1.5">
+                    <History size={13} /> History
+                  </span>
+                ),
+              },
+            ]}
+          />
 
           {loadingOrders ? (
-            <div className="flex justify-center py-10">
-              <Loader2 size={22} className="spin-icon text-accent" />
-            </div>
+            <CardListSkeleton rows={4} />
           ) : ordersTabbed.length === 0 ? (
             <SharedEmptyState title={ordersTab === "history" ? "No completed orders yet" : "No active orders right now"} />
           ) : (
@@ -507,55 +544,77 @@ export default function SupplierDashboard() {
           </div>
 
           {loadingListings ? (
-            <div className="flex justify-center py-10">
-              <Loader2 size={22} className="spin-icon text-accent" />
-            </div>
+            <CardListSkeleton rows={6} layout="grid" />
           ) : listings.length === 0 ? (
             <SharedEmptyState title="No listings yet" description="Add what you sell so buyers can find it in search." />
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {listings.map((listing) => (
-                <Card key={listing.id} className="flex flex-col gap-3 p-5">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-text">
-                      <Package size={18} />
+                <Card key={listing.id} className="flex flex-col overflow-hidden">
+                  {/* Full-bleed photo banner — image_url is required on
+                      create now (ImageUploadField, app/api/supplier-listings/
+                      route.ts), but a listing from before that requirement
+                      can still be null, hence the icon fallback. */}
+                  <div className="relative h-36 w-full shrink-0 bg-surface-sunken">
+                    {listing.image_url ? (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewImageUrl(listing.image_url)}
+                        aria-label="See full image"
+                        className="group block h-full w-full"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element
+                            -- a Cloudinary URL, not a local Next.js image asset. */}
+                        <img src={listing.image_url} alt="" className="h-full w-full object-cover" />
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-[background-color,opacity] duration-base ease-base group-hover:bg-black/30 group-hover:opacity-100">
+                          <Maximize2 size={18} aria-hidden="true" />
+                        </div>
+                      </button>
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-text-tertiary">
+                        <Package size={26} aria-hidden="true" />
+                      </div>
+                    )}
+                    <div className="absolute right-2.5 top-2.5">
+                      <Badge tone={listing.active ? "success" : "neutral"}>{listing.active ? "Active" : "Paused"}</Badge>
                     </div>
-                    <Badge tone={listing.active ? "success" : "neutral"}>{listing.active ? "Active" : "Paused"}</Badge>
                   </div>
-                  <div>
-                    <h3 className="font-display text-lg italic leading-tight text-text-primary">{listing.name}</h3>
-                    {listing.category && <div className="mt-0.5 text-xs text-text-tertiary">{listing.category}</div>}
-                  </div>
-                  {listing.description && <p className="line-clamp-2 text-sm leading-relaxed text-text-secondary">{listing.description}</p>}
-                  <div className="mt-auto flex items-center justify-between border-t border-border pt-3">
-                    <span className="text-sm font-semibold text-text-secondary">
-                      {listing.price_minor ? `${formatMoney(listing.price_minor, "NGN")}${listing.unit ? ` ${listing.unit}` : ""}` : "No price set"}
-                    </span>
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => handleToggleActive(listing)}
-                        title={listing.active ? "Pause" : "Resume"}
-                        className="rounded-md p-1.5 text-text-tertiary hover:bg-surface-sunken hover:text-text-primary"
-                      >
-                        {listing.active ? <EyeOff size={14} /> : <Eye size={14} />}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingListing(listing)}
-                        title="Edit"
-                        className="rounded-md p-1.5 text-text-tertiary hover:bg-surface-sunken hover:text-text-primary"
-                      >
-                        <Pencil size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteListing(listing)}
-                        title="Delete"
-                        className="rounded-md p-1.5 text-text-tertiary hover:bg-danger-soft hover:text-danger-text"
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                  <div className="flex flex-1 flex-col gap-3 p-5">
+                    <div>
+                      <h3 className="font-display text-lg italic leading-tight text-text-primary">{listing.name}</h3>
+                      {listing.category && <div className="mt-0.5 text-xs text-text-tertiary">{listing.category}</div>}
+                    </div>
+                    {listing.description && <p className="line-clamp-2 text-sm leading-relaxed text-text-secondary">{listing.description}</p>}
+                    <div className="mt-auto flex items-center justify-between border-t border-border pt-3">
+                      <span className="text-sm font-semibold text-text-secondary">
+                        {listing.price_minor ? `${formatMoney(listing.price_minor, "NGN")}${listing.unit ? ` ${listing.unit}` : ""}` : "No price set"}
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleActive(listing)}
+                          title={listing.active ? "Pause" : "Resume"}
+                          className="rounded-md p-1.5 text-text-tertiary hover:bg-surface-sunken hover:text-text-primary"
+                        >
+                          {listing.active ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingListing(listing)}
+                          title="Edit"
+                          className="rounded-md p-1.5 text-text-tertiary hover:bg-surface-sunken hover:text-text-primary"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteListing(listing)}
+                          title="Delete"
+                          className="rounded-md p-1.5 text-text-tertiary hover:bg-danger-soft hover:text-danger-text"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </Card>
@@ -672,11 +731,19 @@ export default function SupplierDashboard() {
       )}
 
       {showNewListing && (
-        <ListingFormModal title="Add listing" initial={EMPTY_LISTING_FORM} onClose={() => setShowNewListing(false)} onSubmit={handleCreateListing} submitting={savingListing} />
+        <ListingFormModal
+          title="Add listing"
+          initial={EMPTY_LISTING_FORM}
+          onClose={() => setShowNewListing(false)}
+          onSubmit={handleCreateListing}
+          submitting={savingListing}
+          requireImage
+        />
       )}
       {editingListing && (
         <ListingFormModal
           title="Edit listing"
+          requireImage={false}
           initial={{
             name: editingListing.name,
             category: editingListing.category || "",
@@ -690,6 +757,13 @@ export default function SupplierDashboard() {
           submitting={savingListing}
         />
       )}
+      <Modal open={previewImageUrl !== null} onClose={() => setPreviewImageUrl(null)} size="lg">
+        {previewImageUrl && (
+          // eslint-disable-next-line @next/next/no-img-element -- a
+          // Cloudinary URL, not a local Next.js image asset.
+          <img src={previewImageUrl} alt="" className="max-h-[75dvh] w-full rounded-lg object-contain" />
+        )}
+      </Modal>
       <PushSoftPrompt open={pushPromptOpen} onClose={() => setPushPromptOpen(false)} reason="You just added your first listing. Buyers can now find and order it." />
     </DashboardShell>
   );

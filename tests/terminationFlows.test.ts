@@ -8,8 +8,17 @@
 // consequence, the ledger split, ownership, and the strike/block
 // escalation, same integration style as tests/orderService.test.ts
 // against the same fake Supabase client.
+//
+// Every order here is funded via fundOrder, which is wallet-first as of
+// migration 0020 (lib/walletService.ts) — both the funding confirmation
+// AND a wallet-funded order's refund confirmation now resolve fully
+// SYNCHRONOUSLY (no external provider round-trip to wait out), so this
+// file no longer needs the waitForConfirmation()/confirmed dance around
+// either step, unlike tests/orderService.test.ts's release/settlement
+// flows, which still go through the genuinely-async Circle/Yellow Card
+// stub path unchanged.
 import { describe, it, expect } from "vitest";
-import { FakeSupabase, asSupabaseClient } from "./testUtils/fakeSupabase";
+import { FakeSupabase, asSupabaseClient, wireWalletRpcs } from "./testUtils/fakeSupabase";
 import {
   createOrder,
   fundOrder,
@@ -52,12 +61,13 @@ function freshFakeSupabase() {
       orders_since_verification: 0,
     },
   ]);
-  // Real Yellow Card integration: fundOrder now gates on this (migration
-  // 0018_buyer_kyc.sql), seeded here so every existing fundOrder call in
-  // this file keeps passing without individually knowing about it.
-  fake.seed("buyer_kyc_profiles", [
-    { user_id: 1, first_name: "Test", last_name: "Buyer", phone: "+2348000000000", date_of_birth: "1990-01-01", id_type: "nin", id_number: "00000000000", address: "1 Test Street, Lagos", country: "NG" },
-  ]);
+  // fundOrder is wallet-first (migration 0020): a generous default
+  // balance so every existing fundOrder call in this file keeps passing
+  // without individually knowing about it, same posture
+  // buyer_kyc_profiles used to have here before KYC moved to gate wallet
+  // top-up instead of funding.
+  fake.seed("buyer_wallets", [{ user_id: 1, balance_minor: 10_000_000_00, currency: "NGN" }]);
+  wireWalletRpcs(fake);
   fake.setRpc("is_supplier_currently_verified", (args) => {
     const supplier = fake.getRows("supplier_profiles").find((s) => s.id === args.p_supplier_id);
     if (!supplier) return false;
@@ -71,19 +81,15 @@ function freshFakeSupabase() {
   return fake;
 }
 
-function synchronousProvider(supabase: ReturnType<typeof asSupabaseClient>) {
-  let resolveNext: (() => void) | null = null;
-  const provider = new StubPaymentProvider(async (event: PaymentStatusEvent) => {
+/** Only still needed for the paymentProvider argument
+ * cancelFundedOrder/abandonOrder still take (used for a non-wallet-funded
+ * order's refund, which nothing in this file exercises since every order
+ * here is wallet-funded) — waitForConfirmation isn't needed anymore, see
+ * this file's header comment. */
+function stubProvider(supabase: ReturnType<typeof asSupabaseClient>) {
+  return new StubPaymentProvider(async (event: PaymentStatusEvent) => {
     await handlePaymentStatusEvent(supabase, event);
-    resolveNext?.();
   }, 0);
-  return {
-    provider,
-    waitForConfirmation: () =>
-      new Promise<void>((resolve) => {
-        resolveNext = resolve;
-      }),
-  };
 }
 
 function netByAccount(entries: Array<Record<string, unknown>>): Map<string, number> {
@@ -122,34 +128,31 @@ describe("cancelBeforeFunding: flow 1, no funds ever moved", () => {
   it("refuses once the order is already funded: too late for this flow", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 100_000_00 });
 
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     await expect(cancelBeforeFunding(supabase, order.id, 1, { category: "other" })).rejects.toThrow(InvalidOrderTransitionError);
   });
 });
 
 describe("cancelFundedOrder: flow 4 / Decision 2, refund minus the disclosed fee", () => {
-  it("refunds amount minus CANCELLATION_FEE_MINOR, and the fee lands in PLATFORM_REVENUE", async () => {
+  it("refunds amount minus CANCELLATION_FEE_MINOR, and the fee lands in PLATFORM_REVENUE, credited back to the wallet", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
+    const provider = stubProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000_00 });
 
-    let confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
-    confirmed = waitForConfirmation();
     const result = await cancelFundedOrder(supabase, provider, order.id, 1, { category: "changed_mind", description: "no longer needed" });
     expect(result.feeMinor).toBe(CANCELLATION_FEE_MINOR);
     expect(result.refundMinor).toBe(500_000_00 - CANCELLATION_FEE_MINOR);
-    expect(result.order.status).toBe("refund_processing");
-    await confirmed;
+    // Fully resolved by the time cancelFundedOrder returns: it was
+    // funded from the wallet, so the refund routes straight to the
+    // wallet-credit event path (migration 0020), synchronous, no
+    // external provider round-trip to wait out.
+    expect(result.order.status).toBe("refunded");
 
     const finalOrder = fake.getRows("orders").find((o) => o.id === order.id)!;
     expect(finalOrder.status).toBe("refunded");
@@ -161,20 +164,23 @@ describe("cancelFundedOrder: flow 4 / Decision 2, refund minus the disclosed fee
     expect(entries.some((e) => e.account === "SUPPLIER_PAYABLE")).toBe(false); // supplier delivered nothing
     const byAccount = netByAccount(entries);
     expect(byAccount.get("ESCROW_WALLET_USDC:USDC")).toBe(0); // everything that went in came back out (refund + fee)
+
+    // The refund (amount minus the fee) landed back in the wallet, not
+    // lost, and not the full amount either — the fee stays retained.
+    const wallet = fake.getRows("buyer_wallets").find((w) => w.user_id === 1)!;
+    expect(wallet.balance_minor).toBe(10_000_000_00 - CANCELLATION_FEE_MINOR);
   });
 
   it("never charges more than the order is worth, for an order smaller than the flat fee", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
+    const provider = stubProvider(supabase);
     // Smaller than CANCELLATION_FEE_MINOR (₦2,000) but still clears
     // MIN_ORDER_AMOUNT_MINOR (₦5,000), createOrder would reject 2000
     // below the floor set on purpose, so this uses the floor itself, above the fee.
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000 });
 
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     const result = await cancelFundedOrder(supabase, provider, order.id, 1, { category: "other" });
     expect(result.feeMinor).toBeLessThanOrEqual(500_000);
@@ -184,51 +190,44 @@ describe("cancelFundedOrder: flow 4 / Decision 2, refund minus the disclosed fee
   it("refuses to cancel someone else's funded order", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
+    const provider = stubProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     await expect(cancelFundedOrder(supabase, provider, order.id, 99, { category: "other" })).rejects.toThrow(NotOrderOwnerError);
   });
 });
 
 describe("abandonOrder: flow 6 / Decision 4, full refund + strike escalation", () => {
-  it("refunds in full, no fee, on a single abandonment", async () => {
+  it("refunds in full, no fee, on a single abandonment, credited back to the wallet", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
+    const provider = stubProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 300_000_00 });
 
-    let confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
-
-    confirmed = waitForConfirmation();
+    await fundOrder(supabase, order.id, 1);
     await abandonOrder(supabase, provider, order.id, 2, { category: "cannot_fulfill", description: null });
-    await confirmed;
 
     const finalOrder = fake.getRows("orders").find((o) => o.id === order.id)!;
     expect(finalOrder.status).toBe("refunded");
     const entries = fake.getRows("ledger_entries") as Array<Record<string, unknown>>;
     expect(entries.some((e) => e.account === "PLATFORM_REVENUE")).toBe(false); // no fee on a supplier-caused exit
     expect(fake.getRows("supplier_strikes")).toHaveLength(1);
+
+    // Full refund, back in the wallet exactly where it started.
+    const wallet = fake.getRows("buyer_wallets").find((w) => w.user_id === 1)!;
+    expect(wallet.balance_minor).toBe(10_000_000_00);
   });
 
   it("a 2nd strike within 90 days blocks the supplier from new orders for 7 days", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
+    const provider = stubProvider(supabase);
 
     for (let i = 0; i < 2; i++) {
-      const { provider, waitForConfirmation } = synchronousProvider(supabase);
       const order = await createOrder(supabase, 1, { supplierId: 1, title: `order ${i}`, deliveryLocation: "y", amountMinor: 300_000_00 });
-      let confirmed = waitForConfirmation();
-      await fundOrder(supabase, provider, order.id, 1);
-      await confirmed;
-      confirmed = waitForConfirmation();
+      await fundOrder(supabase, order.id, 1);
       await abandonOrder(supabase, provider, order.id, 2, { category: "cannot_fulfill" });
-      await confirmed;
     }
 
     const supplier = fake.getRows("supplier_profiles").find((s) => s.id === 1)!;
@@ -244,11 +243,9 @@ describe("abandonOrder: flow 6 / Decision 4, full refund + strike escalation", (
   it("refuses to abandon on behalf of a different supplier", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
+    const provider = stubProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 300_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     await expect(abandonOrder(supabase, provider, order.id, 999, { category: "cannot_fulfill" })).rejects.toThrow(NotOrderOwnerError);
   });
@@ -258,11 +255,8 @@ describe("withdrawProof: flow 7 / Decision 5, short window only", () => {
   it("succeeds within the window and reverts to fulfilling", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 300_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
 
     const reverted = await withdrawProof(supabase, order.id, 2);
@@ -272,11 +266,8 @@ describe("withdrawProof: flow 7 / Decision 5, short window only", () => {
   it("refuses once the window has closed", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 300_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
 
     // Backdate the proof past the window directly, submitDeliveryProof
@@ -296,11 +287,8 @@ describe("withdrawProof: flow 7 / Decision 5, short window only", () => {
   it("refuses for a supplier who isn't a party to the order", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 300_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
 
     await expect(withdrawProof(supabase, order.id, 999)).rejects.toThrow(NotOrderOwnerError);
@@ -321,11 +309,8 @@ describe("supplier suspension: flow 10 / Decision 9", () => {
   it("does not touch an in-flight order that predates the suspension", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 300_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     await suspendSupplier(supabase, 2, 3, "Under review.");
 

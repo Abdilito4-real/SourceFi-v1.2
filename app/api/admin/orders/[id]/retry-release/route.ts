@@ -14,7 +14,13 @@ import { requireRole, logAudit } from "../../../../../../lib/authz";
 import { checkRateLimit, recordFailure, recordSuccess, rateLimitKey } from "../../../../../../lib/rateLimit";
 import { getPaymentProvider } from "../../../../../../lib/paymentProvider";
 import { retryEscrowRelease, ReleaseNotRetryableError, OrderNotFoundError } from "../../../../../../lib/orderService";
-import { MissingSupplierWalletError, NoUsdcTokenOnEscrowWalletError, InsufficientEscrowBalanceError } from "../../../../../../lib/circleEscrowProvider";
+import {
+  MissingSupplierWalletError,
+  MissingYellowCardConfigError,
+  NoUsdcTokenOnEscrowWalletError,
+  InsufficientEscrowBalanceError,
+} from "../../../../../../lib/circleEscrowProvider";
+import { MissingSupplierPayoutProfileError } from "../../../../../../lib/yellowCardProvider";
 import { logInternalError } from "../../../../../../lib/errorReference";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -58,6 +64,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     }
     if (
       err instanceof MissingSupplierWalletError ||
+      err instanceof MissingSupplierPayoutProfileError ||
+      err instanceof MissingYellowCardConfigError ||
       err instanceof NoUsdcTokenOnEscrowWalletError ||
       err instanceof InsufficientEscrowBalanceError
     ) {

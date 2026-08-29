@@ -91,7 +91,10 @@ export function middleware(request: NextRequest) {
     "default-src 'self'",
     scriptSrc,
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https://images.unsplash.com https://meet.jit.si https://8x8.vc",
+    // res.cloudinary.com: where every uploaded image (profile picture,
+    // material listing photo, supplier verification document) actually
+    // renders from once uploaded, lib/uploadClient.ts / ImageUploadField.
+    "img-src 'self' data: blob: https://images.unsplash.com https://meet.jit.si https://8x8.vc https://res.cloudinary.com",
     "font-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",
@@ -109,7 +112,12 @@ export function middleware(request: NextRequest) {
     // call. Scheme-only sources (no host) are the standard, documented
     // way to allow WebRTC media relay under CSP, since a call provider's
     // TURN fleet is typically many regional hosts, not one fixed domain.
-    "connect-src 'self' https://auth.privy.io wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org https://*.rpc.privy.systems https://explorer-api.walletconnect.com https://rpc.testnet.arc.network wss://meet.jit.si https://meet.jit.si wss://8x8.vc https://8x8.vc wss://*.8x8.vc https://*.8x8.vc stun: turn: turns:",
+    // api.cloudinary.com: lib/uploadClient.ts uploads directly from the
+    // browser to Cloudinary (the signed-upload handshake,
+    // app/api/uploads/sign) — this app's own server never proxies the
+    // file bytes, so this connect-src entry is what actually lets that
+    // upload leave the browser at all.
+    "connect-src 'self' https://auth.privy.io wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org https://*.rpc.privy.systems https://explorer-api.walletconnect.com https://rpc.testnet.arc.network wss://meet.jit.si https://meet.jit.si wss://8x8.vc https://8x8.vc wss://*.8x8.vc https://*.8x8.vc stun: turn: turns: https://api.cloudinary.com",
     "worker-src 'self'",
     "manifest-src 'self'",
     "upgrade-insecure-requests",

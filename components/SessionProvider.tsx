@@ -30,7 +30,7 @@ interface SessionContextValue {
    * button can show a loading state without re-triggering the full-page
    * spinner. */
   completingOnboarding: boolean;
-  completeOnboarding: (username: string) => Promise<{ success: boolean; error?: string }>;
+  completeOnboarding: (username: string, profilePictureUrl: string) => Promise<{ success: boolean; error?: string }>;
   /** Server-verified: role is 'supplier' or 'admin'. A UX hint for which
    * nav links to show, never the actual authorization boundary, which
    * every route re-checks via requireRole() server-side regardless. */
@@ -110,6 +110,7 @@ export default function SessionProvider({ children }: { children: React.ReactNod
           username: data.user.username,
           walletAddress: data.user.walletAddress,
           role: data.user.role,
+          profilePictureUrl: data.user.profilePictureUrl ?? null,
         };
         setUser(updatedUser);
         setNeedsOnboarding(!data.user.username);
@@ -184,17 +185,17 @@ export default function SessionProvider({ children }: { children: React.ReactNod
   }, [user]);
 
   const completeOnboarding = useCallback(
-    async (username: string) => {
+    async (username: string, profilePictureUrl: string) => {
       setCompletingOnboarding(true);
       try {
         const res = await fetch("/api/auth/me", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username }),
+          body: JSON.stringify({ username, profilePictureUrl }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed to save your profile.");
-        setUser((prev) => (prev ? { ...prev, username: data.user.username } : prev));
+        setUser((prev) => (prev ? { ...prev, username: data.user.username, profilePictureUrl: data.user.profilePictureUrl } : prev));
         setNeedsOnboarding(false);
         notify("success", "Profile completed.");
         return { success: true };
