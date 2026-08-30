@@ -440,9 +440,22 @@ export default function OrderDetailsModal({
       setIncomingCallBannerOpen(true);
       playIncomingCallChime();
     }
+    // FALLING edge while THIS party is still actively on the call: the
+    // other party left (a clean hangup, closing the tab, or a crash —
+    // counterpartyInCall's own 45s staleness window already treats all
+    // three the same way, see its comment above) without this side ever
+    // finding out, leaving them alone in an empty room with no
+    // explanation. End it for them too — closing the panel unmounts
+    // JitsiMeetRoom, whose own cleanup (JitsiMeetRoom.tsx) still reports
+    // whatever segment was in progress before disposing, so no call time
+    // is lost by ending it this way instead of a manual Hide/hangup.
+    if (!counterpartyInCall && prevCounterpartyInCallRef.current && showCall) {
+      showNotification("info", `Your ${role === "buyer" ? "supplier" : "buyer"} left the call.`);
+      setShowCall(false);
+    }
     if (!counterpartyInCall) setIncomingCallBannerOpen(false);
     prevCounterpartyInCallRef.current = counterpartyInCall;
-  }, [counterpartyInCall, showCall]);
+  }, [counterpartyInCall, showCall, role, showNotification]);
 
   const runAction = async (path: string, body?: unknown, successMessage?: string) => {
     setActing(true);

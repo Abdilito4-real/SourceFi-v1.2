@@ -289,6 +289,7 @@ export default function BuyerDashboard() {
   // opening the order and making them find the call section themselves.
   const [autoJoinCall, setAutoJoinCall] = useState(false);
   const [pushPromptOpen, setPushPromptOpen] = useState(false);
+  const [pushPromptReason, setPushPromptReason] = useState("You just funded escrow.");
   const [suppliers, setSuppliers] = useState<SupplierListing[]>([]);
   const [loadingSuppliers, setLoadingSuppliers] = useState(true);
   const [orderingSupplier, setOrderingSupplier] = useState<SupplierListing | null>(null);
@@ -362,6 +363,16 @@ export default function BuyerDashboard() {
     const orderParam = searchParams.get("order");
     if (orderParam && Number.isInteger(Number(orderParam))) setSelectedOrderId(Number(orderParam));
     if (searchParams.get("call") === "1") setAutoJoinCall(true);
+    // RootGate.tsx's onboarding-complete redirect, "the first thing to
+    // do after sign up" rather than waiting for the later fund-triggered
+    // prompt some buyers might not reach quickly. PushSoftPrompt's own
+    // eligibility check (permission still "default", never soft-declined)
+    // means this is a no-op if they've already decided one way or the
+    // other some other way in the meantime.
+    if (searchParams.get("welcome") === "1") {
+      setPushPromptReason("Welcome to SourceFi!");
+      setPushPromptOpen(true);
+    }
     const sectionParam = searchParams.get("section");
     if (sectionParam === "overview" || sectionParam === "suppliers" || sectionParam === "orders" || sectionParam === "materials") {
       setSection(sectionParam);
@@ -773,6 +784,7 @@ export default function BuyerDashboard() {
           onOrderChange={(order) => setOrders((prev) => prev.map((o) => (o.id === order.id ? order : o)))}
           showNotification={notify}
           onFunded={() => {
+            setPushPromptReason("You just funded escrow.");
             setPushPromptOpen(true);
             loadWalletBalance(); // funding just debited it
           }}
@@ -803,7 +815,7 @@ export default function BuyerDashboard() {
         />
       )}
       <ReceiptModal open={receiptEndpoint !== null} onClose={() => setReceiptEndpoint(null)} endpoint={receiptEndpoint ?? ""} />
-      <PushSoftPrompt open={pushPromptOpen} onClose={() => setPushPromptOpen(false)} reason="You just funded escrow." />
+      <PushSoftPrompt open={pushPromptOpen} onClose={() => setPushPromptOpen(false)} reason={pushPromptReason} />
     </DashboardShell>
   );
 }

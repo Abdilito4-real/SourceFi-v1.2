@@ -134,6 +134,16 @@ export default function RootGate() {
   // down and let handleSubmit's own POST be the sole source of truth
   // whenever a submission is genuinely in flight.
   const submittingApplicationRef = useRef(false);
+  // Set right when completeOnboarding() succeeds below, read by the
+  // redirect effect that follows: distinguishes "this /buyer redirect is
+  // happening because onboarding JUST finished" from "this /buyer
+  // redirect is just an already-onboarded returning user bouncing
+  // through / again" (which happens on every fresh app open, PWA
+  // start_url is "/"). Only the former should carry the one-time
+  // welcome push-notification prompt; a ref, not state, because it only
+  // needs to be read once, synchronously, by the effect that fires
+  // immediately after this same render.
+  const justOnboardedRef = useRef(false);
 
   useEffect(() => {
     try {
@@ -210,7 +220,13 @@ export default function RootGate() {
     // and SupplierDashboard's switchLinks no longer offering the link at
     // all), this was the actual root cause, not just a stray nav link.
     const destination = user?.role === "admin" ? "/admin" : user?.role === "supplier" ? "/supplier" : "/buyer";
-    router.replace(destination);
+    // ?welcome=1 is the buyer dashboard's cue to offer the push-
+    // notification soft prompt as literally the first thing after sign
+    // up, instead of waiting for a later "value is obvious" moment
+    // (funding an order) some buyers might never reach quickly, or at
+    // all. Only added on the actual onboarding-just-completed redirect,
+    // never on a returning user's routine bounce through this same path.
+    router.replace(justOnboardedRef.current ? `${destination}?welcome=1` : destination);
   }, [readyForDashboard, pendingApplicationChecked, pendingApplication, user, router]);
 
   if (checkingSession || introSeen === null) {
@@ -284,6 +300,7 @@ export default function RootGate() {
       setError(result.error || "Something went wrong.");
       return;
     }
+    justOnboardedRef.current = true;
 
     // The profile save always happens; the application is a second,
     // independent step on top of it, a failure here shouldn't undo the
