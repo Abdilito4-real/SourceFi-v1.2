@@ -128,3 +128,27 @@ export async function getSupplierRatingAggregates(
   }
   return aggregates;
 }
+
+/** Bulk profile-picture lookup, keyed by supplier_profiles.id (not
+ * users.id) so callers can map straight off the profile rows they
+ * already have, same "one bulk query, not N+1" shape as the two
+ * aggregates above. A supplier IS a users row (migration 0004's own
+ * header comment) with this profile attached, so "the supplier's
+ * photo" is genuinely users.profile_picture_url, not a column of its
+ * own on supplier_profiles. */
+export async function getSupplierProfilePictures(
+  supabase: SupabaseClient,
+  suppliers: { id: number; user_id: number }[]
+): Promise<Map<number, string | null>> {
+  const pictures = new Map<number, string | null>();
+  if (suppliers.length === 0) return pictures;
+
+  const userIds = Array.from(new Set(suppliers.map((s) => s.user_id)));
+  const { data } = await supabase.from("users").select("id, profile_picture_url").in("id", userIds);
+  const byUserId = new Map<number, string | null>((data ?? []).map((u) => [u.id as number, (u.profile_picture_url as string | null) ?? null]));
+
+  for (const s of suppliers) {
+    pictures.set(s.id, byUserId.get(s.user_id) ?? null);
+  }
+  return pictures;
+}

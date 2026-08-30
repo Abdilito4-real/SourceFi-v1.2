@@ -31,6 +31,12 @@ interface SessionContextValue {
    * spinner. */
   completingOnboarding: boolean;
   completeOnboarding: (username: string, profilePictureUrl: string) => Promise<{ success: boolean; error?: string }>;
+  /** True while /api/auth/me is being patched with a new (or cleared)
+   * profile picture from the "my profile" view, distinct from
+   * completingOnboarding — this fires post-onboarding, any time, for
+   * any role. */
+  updatingProfilePicture: boolean;
+  updateProfilePicture: (profilePictureUrl: string | null) => Promise<{ success: boolean; error?: string }>;
   /** Server-verified: role is 'supplier' or 'admin'. A UX hint for which
    * nav links to show, never the actual authorization boundary, which
    * every route re-checks via requireRole() server-side regardless. */
@@ -209,6 +215,39 @@ export default function SessionProvider({ children }: { children: React.ReactNod
     [notify]
   );
 
+  const [updatingProfilePicture, setUpdatingProfilePicture] = useState(false);
+  // Self-service photo set/change/remove from "my profile" (any role,
+  // any time post-onboarding) distinct from completeOnboarding: that
+  // one also sets the username (required, onboarding-only); this one
+  // always resends the CURRENT username unchanged, since PATCH
+  // /api/auth/me requires it on every call regardless of what else is
+  // being changed (see that route's own comment on why).
+  const updateProfilePicture = useCallback(
+    async (profilePictureUrl: string | null) => {
+      if (!user) return { success: false, error: "Not signed in." };
+      setUpdatingProfilePicture(true);
+      try {
+        const res = await fetch("/api/auth/me", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: user.username, profilePictureUrl }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to update your profile picture.");
+        setUser((prev) => (prev ? { ...prev, profilePictureUrl: data.user.profilePictureUrl } : prev));
+        notify("success", profilePictureUrl ? "Profile picture updated." : "Profile picture removed.");
+        return { success: true };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Something went wrong.";
+        notify("error", message);
+        return { success: false, error: message };
+      } finally {
+        setUpdatingProfilePicture(false);
+      }
+    },
+    [user, notify]
+  );
+
   // Whether the Supplier dashboard is even reachable depends on the
   // server-verified role from GET /api/auth/me (user.role), not a
   // client-side flag anyone could set from devtools.
@@ -223,6 +262,8 @@ export default function SessionProvider({ children }: { children: React.ReactNod
       needsOnboarding,
       completingOnboarding,
       completeOnboarding,
+      updatingProfilePicture,
+      updateProfilePicture,
       canBeSupplier,
       orders,
       setOrders,
@@ -242,6 +283,8 @@ export default function SessionProvider({ children }: { children: React.ReactNod
       needsOnboarding,
       completingOnboarding,
       completeOnboarding,
+      updatingProfilePicture,
+      updateProfilePicture,
       canBeSupplier,
       orders,
       loadingOrders,

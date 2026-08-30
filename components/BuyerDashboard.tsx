@@ -46,6 +46,7 @@ interface SupplierListing {
   business_name: string;
   business_location: string;
   what_they_sell: string;
+  profile_picture_url: string | null;
   rating_average: number | null;
   rating_count: number;
   completed_order_count: number;
@@ -110,9 +111,26 @@ function SupplierCard({
   return (
     <Card className="flex flex-col gap-3 p-5">
       <div className="flex items-start justify-between gap-2">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-text">
-          <Store size={18} />
-        </div>
+        <button
+          type="button"
+          onClick={() => onViewProfile(supplier)}
+          aria-label={`View ${supplier.business_name}'s profile`}
+          className="shrink-0 rounded-lg"
+        >
+          {supplier.profile_picture_url ? (
+            // eslint-disable-next-line @next/next/no-img-element -- a
+            // Cloudinary URL, not a local Next.js image asset.
+            <img
+              src={supplier.profile_picture_url}
+              alt=""
+              className="h-10 w-10 rounded-lg border border-border object-cover"
+            />
+          ) : (
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft text-accent-text">
+              <Store size={18} />
+            </div>
+          )}
+        </button>
         <SupplierTierBadge tier={supplier.tier} className="!text-[10px]" />
       </div>
       <div>
@@ -453,6 +471,7 @@ export default function BuyerDashboard() {
       business_name: listing.supplier_business_name || "Supplier",
       business_location: listing.supplier_business_location || "",
       what_they_sell: "",
+      profile_picture_url: null,
       rating_average: null,
       rating_count: 0,
       completed_order_count: 0,

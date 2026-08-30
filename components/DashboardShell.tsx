@@ -18,6 +18,7 @@ import { useBodyScrollLock } from "./ui/useBodyScrollLock";
 import ThemeToggle from "./ui/ThemeToggle";
 import PushSoftPrompt from "./PushSoftPrompt";
 import IncomingCallBanner from "./IncomingCallBanner";
+import MyProfileModal from "./MyProfileModal";
 import type { AppUser } from "../lib/types";
 
 export interface NavItem {
@@ -59,8 +60,10 @@ function SidebarContent({
   user,
   onSignOut,
   signingOut,
+  onOpenProfile,
   onNavigate,
 }: Pick<DashboardShellProps, "switchLinks" | "navItems" | "user" | "onSignOut" | "signingOut"> & {
+  onOpenProfile: () => void;
   onNavigate?: () => void;
 }) {
   return (
@@ -133,7 +136,12 @@ function SidebarContent({
           </Link>
         ))}
 
-        <div className="flex items-center gap-2.5 px-1 pt-2">
+        <button
+          type="button"
+          onClick={onOpenProfile}
+          aria-label="View my profile"
+          className="flex items-center gap-2.5 rounded-md px-1 pt-2 text-left transition-colors duration-base ease-base hover:bg-white/5"
+        >
           {user.profilePictureUrl ? (
             // eslint-disable-next-line @next/next/no-img-element -- a
             // Cloudinary URL, not a local Next.js image asset.
@@ -152,7 +160,7 @@ function SidebarContent({
             </div>
             <div className="truncate font-body text-xs text-nav-text-muted">{user.identity}</div>
           </div>
-        </div>
+        </button>
 
         <button
           type="button"
@@ -199,6 +207,8 @@ export default function DashboardShell({
     setPushPromptOpen(true);
   }, []);
 
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+
   return (
     <div className="min-h-screen bg-bg font-body md:flex">
       {/* Desktop sidebar, persistent, full height */}
@@ -210,6 +220,7 @@ export default function DashboardShell({
             user={user}
             onSignOut={onSignOut}
             signingOut={signingOut}
+            onOpenProfile={() => setProfileModalOpen(true)}
           />
         </div>
       </aside>
@@ -256,6 +267,10 @@ export default function DashboardShell({
               user={user}
               onSignOut={onSignOut}
               signingOut={signingOut}
+              onOpenProfile={() => {
+                setProfileModalOpen(true);
+                setMobileNavOpen(false);
+              }}
               onNavigate={() => setMobileNavOpen(false)}
             />
           </div>
@@ -286,6 +301,7 @@ export default function DashboardShell({
         reason="You're signed in."
       />
       <IncomingCallBanner role={user.role} />
+      {profileModalOpen && <MyProfileModal onClose={() => setProfileModalOpen(false)} />}
     </div>
   );
 }
