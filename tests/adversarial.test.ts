@@ -115,7 +115,14 @@ async function fundedOrderAwaitingApproval(supabase: ReturnType<typeof asSupabas
   const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000_00 });
   await fundOrder(supabase, order.id, 1);
   await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
-  await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+  // Both parties must independently corroborate the call (see
+  // lib/callVerification.ts) since the corroboration fix: reporting from
+  // the buyer alone now earns zero credit, which would make
+  // confirmCallCode below throw VerificationCallIncompleteError instead
+  // of the IDOR tests below reaching their actual, intended rejection.
+  // +3s absorbs the few ms of jitter between the two sequential calls.
+  await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS + 3);
+  await recordVerificationCallProgress(supabase, order.id, 2, MIN_VERIFICATION_CALL_SECONDS + 3);
   await confirmCallCode(supabase, order.id, 1);
   return { order, provider };
 }

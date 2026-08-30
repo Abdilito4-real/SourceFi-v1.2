@@ -209,6 +209,23 @@ export default function OrderDetailsModal({
   const [showApproveConfirm, setShowApproveConfirm] = useState(false);
   const [fundError, setFundError] = useState<FinancialError | null>(null);
   const [approveError, setApproveError] = useState<FinancialError | null>(null);
+  // Same persistent-not-just-a-toast treatment as fund/approve above, for
+  // the two call-flow failures a UX audit found silently falling back to
+  // a plain toast: a failed segment report (seconds genuinely at risk of
+  // being lost, e.g. a connection drop right as the call ends) and a
+  // failed code-confirmation attempt. `callSegmentError` carries the
+  // seconds that failed to save so Retry re-sends the SAME report rather
+  // than losing track of them.
+  const [callSegmentError, setCallSegmentError] = useState<(FinancialError & { seconds: number }) | null>(null);
+  const [codeConfirmError, setCodeConfirmError] = useState<FinancialError | null>(null);
+  // The CURRENT in-progress segment's live elapsed seconds (JitsiMeetRoom's
+  // own ticking timer), separate from verificationCallSeconds (the
+  // server-confirmed total, which only advances once a segment finishes
+  // reporting). Shown ADDED to the confirmed total below so the "X / 5:00"
+  // badge is one real live counter instead of sitting frozen for the
+  // entire first call — a UX audit of this flow found the confirmed total
+  // and the in-panel timer were two numbers that never agreed.
+  const [liveSegmentSeconds, setLiveSegmentSeconds] = useState(0);
   const [showCall, setShowCall] = useState(false);
   // Arriving via a "Join call" push notification (?call=1) shouldn't
   // silently activate the camera/mic and start the verification timer
@@ -330,9 +347,15 @@ export default function OrderDetailsModal({
 
   // Deliberately separate from runAction: reporting a completed call
   // segment shouldn't toggle the shared `acting` state (which disables
-  // unrelated buttons) or show a toast every time, it happens silently
-  // in the background as segments end, sometimes more than once per
-  // session if the call drops and reconnects.
+  // unrelated buttons), it happens silently in the background as
+  // segments end, sometimes more than once per session if the call drops
+  // and reconnects. A FAILURE here, though, gets the same persistent
+  // ErrorPanel treatment as a failed fund/approve, not a toast: a UX
+  // audit of this flow found that a dropped connection right as a
+  // segment ends previously just flashed a toast with no retry and no
+  // indication of how many seconds were about to be lost — the recorded
+  // seconds passed in here are exactly that amount, kept in state so
+  // Retry can re-send the same report.
   const reportCallSegment = async (seconds: number) => {
     try {
       const res = await fetch(`/api/orders/${orderId}/call-progress`, {
@@ -342,9 +365,15 @@ export default function OrderDetailsModal({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to record call progress.");
+      setCallSegmentError(null);
       await load();
     } catch (err) {
-      showNotification("error", err instanceof Error ? err.message : "Failed to record call progress.");
+      setCallSegmentError({
+        seconds,
+        title: `Couldn't record ${formatCallDuration(seconds)} of your call`,
+        detail: err instanceof Error ? err.message : "Failed to record call progress.",
+        fundPosition: "Nothing else about your order changed — only this segment's time wasn't saved yet.",
+      });
     }
   };
 
@@ -358,9 +387,14 @@ export default function OrderDetailsModal({
       const res = await fetch(`/api/orders/${orderId}/call-code-confirm`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to confirm the order code match.");
+      setCodeConfirmError(null);
       await load();
     } catch (err) {
-      showNotification("error", err instanceof Error ? err.message : "Failed to confirm the order code match.");
+      setCodeConfirmError({
+        title: "Couldn't confirm the code match",
+        detail: err instanceof Error ? err.message : "Failed to confirm the order code match.",
+        fundPosition: "Your funds are still held in escrow, nothing has been released.",
+      });
     } finally {
       setConfirmingCode(false);
     }
@@ -609,20 +643,46 @@ export default function OrderDetailsModal({
   // Shared by the supplier's plain call panel and the buyer's step 1
   // below (components/ui/Stepper.tsx) — one call room, two different
   // wrappers around it, not two different widgets.
+  // Composite live counter: confirmed total + whatever the current
+  // segment has racked up so far, capped for display only at 5:00 once
+  // the requirement is visibly met (the confirmed total is what actually
+  // gates the next step, this is display-only so it never falsely
+  // unlocks anything early).
+  const displaySeconds = verificationCallSeconds + (showCall ? liveSegmentSeconds : 0);
+
   const callWidget = (
     <div>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         {!showCall && (
-          <Button variant="secondary" onClick={() => setShowCall(true)}>
+          <Button variant="secondary" onClick={() => setShowCall(true)} disabled={!online}>
             <Video size={15} /> {verificationCallSeconds > 0 ? "Continue" : "Start"} live verification call
           </Button>
         )}
         <span className={`text-xs font-semibold ${callRequirementMet ? "text-success-text" : "text-text-secondary"}`}>
           {callRequirementMet
             ? `✓ ${formatCallDuration(verificationCallSeconds)} verified, requirement met`
-            : `${formatCallDuration(verificationCallSeconds)} / 5:00 verified`}
+            : `${formatCallDuration(displaySeconds)} / 5:00 verified`}
         </span>
       </div>
+      {!showCall && !online && (
+        <p className="mb-2 text-xs text-text-tertiary">You're offline. Reconnect to start the call.</p>
+      )}
+      {isSupplier && !callRequirementMet && (
+        <p className="mb-2 text-xs text-text-tertiary">
+          Once the call requirement is met, show order code {order.order_code} on camera so your buyer can confirm it matched.
+        </p>
+      )}
+      {callSegmentError && (
+        <div className="mb-2">
+          <ErrorPanel
+            title={callSegmentError.title}
+            detail={callSegmentError.detail}
+            fundPosition={callSegmentError.fundPosition}
+            onRetry={() => reportCallSegment(callSegmentError.seconds)}
+            onDismiss={() => setCallSegmentError(null)}
+          />
+        </div>
+      )}
       {showCall && (
         <div>
           <div className="mb-2 flex items-center justify-between">
@@ -645,6 +705,7 @@ export default function OrderDetailsModal({
               onSegmentComplete={reportCallSegment}
               onJoined={() => reportCallPresence(true)}
               onLeft={() => reportCallPresence(false)}
+              onLiveTick={setLiveSegmentSeconds}
               callConfig={detail.callConfig}
             />
           ) : (
@@ -680,11 +741,25 @@ export default function OrderDetailsModal({
       summary: !callDone ? "Unlocks once the call requirement above is met." : undefined,
       content:
         callDone && !codeConfirmed ? (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2 text-xs text-warning-text">
-            <span>Ask your supplier to show order code {order.order_code} on camera, then confirm it matched.</span>
-            <Button size="sm" onClick={confirmCallCodeMatch} disabled={confirmingCode}>
-              {confirmingCode ? "Confirming…" : "Confirm code match"}
-            </Button>
+          <div>
+            {codeConfirmError && (
+              <div className="mb-2">
+                <ErrorPanel
+                  title={codeConfirmError.title}
+                  detail={codeConfirmError.detail}
+                  fundPosition={codeConfirmError.fundPosition}
+                  onRetry={confirmCallCodeMatch}
+                  retrying={confirmingCode}
+                  onDismiss={() => setCodeConfirmError(null)}
+                />
+              </div>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2 text-xs text-warning-text">
+              <span>Ask your supplier to show order code {order.order_code} on camera, then confirm it matched.</span>
+              <Button size="sm" onClick={confirmCallCodeMatch} disabled={confirmingCode}>
+                {confirmingCode ? "Confirming…" : "Confirm code match"}
+              </Button>
+            </div>
           </div>
         ) : codeDone ? (
           <div className="rounded-lg border border-success bg-success-soft px-3 py-2 text-xs text-success-text">

@@ -78,7 +78,11 @@ describe("buildJaasCallConfig", () => {
     });
     expect(protectedHeader.kid).toBe("vpaas-magic-key-id");
     expect(protectedHeader.alg).toBe("RS256");
-    expect(payload.room).toBe("*");
+    // Scoped to THIS specific room, not a "*" wildcard: a security audit
+    // of the verification-call flow flagged the wildcard as granting
+    // moderator access to every room on the tenant if this token ever
+    // leaked, not just the one it was minted for.
+    expect(payload.room).toBe("room-123");
     const context = payload.context as { user: { id: string; name: string; moderator: boolean } };
     expect(context.user).toEqual({ id: "42", name: "SourceFi Buyer", moderator: true });
   });

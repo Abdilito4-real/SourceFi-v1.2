@@ -505,13 +505,82 @@ have route-level rate-limit tests either, only `lib/rateLimit.ts`
 itself does). 261 total, `tsc --noEmit` clean, full production build
 clean.
 
+## Live verification call closed out, the same way payments were
+
+Same three-audit treatment (integration completeness, security,
+feedback/UX) applied to the live verification call this time, not
+payments. The security audit's headline finding: the call could be
+faked end-to-end. `recordVerificationCallProgress` trusted a client-
+reported duration from either party alone with zero corroboration the
+other party was ever connected, and `confirmCallCode` was fully
+decoupled from any call evidence — a single dishonest party (or a
+colluding buyer+supplier pair) could clear the entire pre-approval
+verification gate with two direct API calls, no real call required.
+
+- **Security, the core fix**: `verification_call_seconds` is no longer
+  a bare running total bumped by whichever party reports first. New
+  migration `0025_call_segments.sql` stores each party's own reported
+  join-to-leave segments; new `lib/callVerification.ts`
+  (`computeOverlapSeconds`) recomputes the credited duration as the
+  actual overlap between the buyer's segments and the supplier's
+  segments on every report. A lone party spamming fabricated segments
+  now earns zero credit unless the other party independently reports
+  overlapping time too. `confirmCallCode` now also requires the
+  corroborated threshold be met first, closing the "attestable the
+  instant an order is funded, no call ever happened" gap. Doesn't
+  defend against two colluding accounts fabricating matching fake
+  segments together — the same residual risk `confirmCallCode`'s own
+  comment already documented — that needs real server-side call
+  attestation (a Jitsi/JaaS webhook), out of scope here.
+- **Security, smaller gaps**: all three call routes
+  (`call-progress`/`call-presence`/`call-code-confirm`) were completely
+  unthrottled; added the same dual per-IP/per-account quota pattern
+  every termination route already has. `admin/orders/[id]/retry-release`
+  returned the unredacted private call room id to admin, the one place
+  that invariant (only the two real parties ever see it) was broken.
+  The JaaS video JWT was minted with a `room: "*"` wildcard instead of
+  the specific order's room, so a leaked token would've granted
+  moderator access to every room on the tenant. All three call
+  functions now also share one `LIVE_CALL_ELIGIBLE_STATUSES` check
+  (funded/fulfilling/proof_submitted), closing the gap where call time
+  could be padded on an order that wasn't even funded yet.
+- **Feedback/UX**: the on-screen "reopen this order to try again"
+  advice after a failed video load was actually broken — a leftover
+  `<script>` tag meant a remount without a full page reload silently
+  produced a permanently blank panel with no error shown, now fixed.
+  Failed call-progress/call-code-confirm reports moved from a bare
+  toast to the same persistent `ErrorPanel` (with Retry) fund/approve
+  failures already get. Added a proactive camera/mic permission-denial
+  warning (the Permissions API, independent of Jitsi's own undocumented
+  internal events), a single live counter against the 5-minute
+  threshold instead of two numbers that didn't agree, a supplier-side
+  prompt to show the order code on camera (previously buyer-only copy),
+  and an offline-state warning on the Start Call button matching
+  Fund/Approve's existing pattern.
+- **Integration cleanup**: removed one dead unused constant
+  (`JitsiMeetRoom.tsx`'s `SCRIPT_SRC`), and the service worker's
+  `notificationclick` handler now explicitly branches on `event.action`
+  instead of ignoring it — the dedicated "Join call" button worked
+  today only because the deep link happened to already encode it, not
+  because the handler treated it any differently from a plain tap.
+  `resolveDispute`'s supplier-ruling path still bypasses both call
+  gates entirely, unchanged: a genuine, documented, admin-only,
+  audit-logged exception, not a defect.
+
+17 new tests: `tests/callVerification.test.ts`'s direct coverage of the
+overlap math (including the exact "one party alone" attack scenario as
+a named test), plus `tests/orderService.test.ts`/`tests/adversarial.test.ts`
+updated throughout for the new two-party corroboration model. 278
+total, `tsc --noEmit` clean, full production build clean.
+
 ## Current test coverage
 
-232 tests across 19 files (`npm test`): authorization boundaries, the
+278 tests across 24 files (`npm test`): authorization boundaries, the
 order state machine, the ledger, the full order service lifecycle
-(wallet-first funding included), every termination flow, the buyer
-wallet balance/debit/credit primitives (including the real Yellow Card
-top-up provider), the adversarial suite, Supabase-backed rate limiting,
-the real Circle and Yellow Card integrations (webhook/idempotency logic
-for all four legs now — funding, release, settlement, and wallet
-top-up), and the RLS pilot's JWT minting.
+(wallet-first funding included), the live verification call's
+cross-party corroboration, every termination flow, the buyer wallet
+balance/debit/credit primitives (including the real Yellow Card top-up
+provider), the adversarial suite, Supabase-backed rate limiting, the
+real Circle and Yellow Card integrations (webhook/idempotency logic for
+all four legs now — funding, release, settlement, and wallet top-up),
+and the RLS pilot's JWT minting.

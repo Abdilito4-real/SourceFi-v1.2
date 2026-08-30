@@ -55,7 +55,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       details: { newStatus: order.status },
       request,
     });
-    return Response.json({ success: true, order });
+    // Redact the private call room id before it reaches admin, same
+    // invariant app/api/orders/route.ts and app/api/orders/[id]/route.ts
+    // already enforce: only the two real parties (buyer/supplier) ever
+    // see the real room id, an admin included, since knowing it is
+    // enough to join the underlying meet.jit.si room directly when JaaS
+    // isn't configured (see components/JitsiMeetRoom.tsx's header
+    // comment on why the room id itself is the privacy boundary).
+    return Response.json({ success: true, order: { ...order, verification_call_room_id: null } });
   } catch (err) {
     await recordFailure(limitKey);
     if (err instanceof OrderNotFoundError) return Response.json({ error: err.message }, { status: 404 });

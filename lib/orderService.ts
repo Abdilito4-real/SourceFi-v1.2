@@ -30,6 +30,7 @@ import type { PaymentBoundary, PaymentStatusEvent, FundingResult } from "./payme
 import { getWalletBalance, debitWalletForOrder, creditWalletForRefund, wasOrderFundedFromWallet, InsufficientWalletBalanceError } from "./walletService";
 import type { CancellationCategory, DisputeCategory, DisputeRuling, DisputeType, OrderRow, OrderStatus, UserRow } from "./types";
 import { notifyUser, notifyAdmins } from "./notifications/dispatch";
+import { computeOverlapSeconds } from "./callVerification";
 
 // Buyer wallet balance (migration 0020): fundOrder() below is wallet-first
 // from this point on, re-exported here so route code
@@ -885,6 +886,15 @@ export async function submitDeliveryProof(
 
 export const MIN_VERIFICATION_CALL_SECONDS = 5 * 60;
 
+// Mirrors OrderDetailsModal.tsx's own LIVE_CALL_ELIGIBLE_STATUSES (kept
+// in sync by hand, same posture as every other client/server duplication
+// this codebase already has, e.g. is_supplier_currently_verified). Used
+// by every call-related function below so an order can't have its call
+// time/presence/code-confirmation touched before it's actually funded
+// (nothing real to verify yet) or after the call's whole purpose has
+// already passed.
+const LIVE_CALL_ELIGIBLE_STATUSES: readonly OrderStatus[] = ["funded", "fulfilling", "proof_submitted"];
+
 export class VerificationCallIncompleteError extends Error {
   constructor(secondsSoFar: number) {
     super(
@@ -914,12 +924,28 @@ export class CallCodeNotConfirmedError extends Error {
  * genuinely this order's live call rather than a pre-recorded loop or
  * a call about different goods. Order-level and one-way, like
  * verification_call_seconds: once set it stays set across a
- * withdraw/resubmit cycle, the underlying call already happened. */
+ * withdraw/resubmit cycle, the underlying call already happened.
+ *
+ * Requires the full corroborated call duration FIRST (same
+ * MIN_VERIFICATION_CALL_SECONDS gate approveOrder itself enforces): a
+ * buyer confirming the code the instant an order is funded, before any
+ * call happened at all, is exactly the "attestation fully decoupled
+ * from any call evidence" gap a security audit of this flow surfaced —
+ * requiring the corroborated time first ties this attestation to actual
+ * evidence a real two-party call took place (see
+ * recordVerificationCallProgress below for what "corroborated" means),
+ * not just an order being in the right status. The client already only
+ * shows the "Confirm code match" control once the call requirement is
+ * met (OrderDetailsModal.tsx's Stepper), this makes that the enforced
+ * rule, not just the suggested one. */
 export async function confirmCallCode(supabase: SupabaseClient, orderId: number, buyerUserId: number): Promise<OrderRow> {
   const order = await fetchOrder(supabase, orderId);
   if (order.buyer_id !== buyerUserId) throw new NotOrderOwnerError();
-  if (!["funded", "fulfilling", "proof_submitted"].includes(order.status)) {
+  if (!LIVE_CALL_ELIGIBLE_STATUSES.includes(order.status)) {
     throw new InvalidOrderTransitionError(order.status, "proof_submitted");
+  }
+  if ((order.verification_call_seconds ?? 0) < MIN_VERIFICATION_CALL_SECONDS) {
+    throw new VerificationCallIncompleteError(order.verification_call_seconds ?? 0);
   }
 
   const { error } = await supabase
@@ -933,11 +959,25 @@ export async function confirmCallCode(supabase: SupabaseClient, orderId: number,
 
 /** Adds one real call segment (join-to-leave, reported by the client
  * from Jitsi's own lifecycle events, never just "the panel was open")
- * to the order's running total. Either party to the order can report a
- * segment, whoever's Jitsi session ends first reports it, same total
- * either way. `secondsElapsed` is sanity-capped, not trusted blindly:
- * this is a workflow gate, not itself a money-movement action, but an
- * unbounded client-supplied number is still worth bounding. */
+ * and recomputes verification_call_seconds from scratch as the
+ * CORROBORATED overlap between the buyer's segments and the supplier's
+ * segments (lib/callVerification.ts's computeOverlapSeconds), not a
+ * bare running total bumped by whichever party reports first.
+ *
+ * This is the fix for the sharpest gap a security audit of this flow
+ * found: a bare "add secondsElapsed to a counter" design let either
+ * party alone satisfy the entire MIN_VERIFICATION_CALL_SECONDS
+ * requirement with one direct POST, zero corroboration that the other
+ * party was ever connected. Storing each party's own segments (see
+ * migration 0025_call_segments.sql) and crediting only the overlap means
+ * a lone party spamming fabricated segments earns ZERO credit unless the
+ * OTHER party independently reports overlapping time too — closing that
+ * hole without needing a server-authoritative call source (a Jitsi/JaaS
+ * webhook) this app doesn't have. It does not defend against two
+ * COLLUDING accounts fabricating matching fake segments together, the
+ * same residual risk confirmCallCode's own comment above already
+ * documents for the code-confirmation step; that would need real
+ * server-side call attestation, out of scope here. */
 export async function recordVerificationCallProgress(
   supabase: SupabaseClient,
   orderId: number,
@@ -954,13 +994,47 @@ export async function recordVerificationCallProgress(
   }
   if (!isBuyer && !isSupplier) throw new NotOrderOwnerError();
 
-  // A single reported segment capped at 2 hours, generous for a real
-  // call, not so unbounded that one malformed/malicious report could
-  // satisfy the whole requirement by itself.
-  const cappedSeconds = Math.max(0, Math.min(Math.round(secondsElapsed), 2 * 60 * 60));
-  const newTotal = (order.verification_call_seconds ?? 0) + cappedSeconds;
+  // Same statuses confirmCallCode restricts to (and the same "to" stand-
+  // in that function uses for the same reason: this doesn't itself
+  // transition order.status, there's no real target status to name): a
+  // call only makes sense once an order is actually funded, padding time
+  // on an order nobody's paid for yet has no legitimate use.
+  if (!LIVE_CALL_ELIGIBLE_STATUSES.includes(order.status)) {
+    throw new InvalidOrderTransitionError(order.status, "proof_submitted");
+  }
 
-  const { error } = await supabase.from("orders").update({ verification_call_seconds: newTotal }).eq("id", orderId);
+  // A single reported segment capped at 2 hours, generous for a real
+  // call, not so unbounded that one malformed report could claim an
+  // implausible segment length even before the cross-party overlap step
+  // below discounts anything unconfirmed by the other side.
+  const cappedSeconds = Math.max(0, Math.min(Math.round(secondsElapsed), 2 * 60 * 60));
+  if (cappedSeconds > 0) {
+    const endedAt = new Date();
+    const startedAt = new Date(endedAt.getTime() - cappedSeconds * 1000);
+    const { error: insertError } = await supabase.from("call_segments").insert({
+      order_id: orderId,
+      party: isBuyer ? "buyer" : "supplier",
+      started_at: startedAt.toISOString(),
+      ended_at: endedAt.toISOString(),
+    });
+    if (insertError) throw insertError;
+  }
+
+  const { data: segments, error: fetchError } = await supabase
+    .from("call_segments")
+    .select("party, started_at, ended_at")
+    .eq("order_id", orderId);
+  if (fetchError) throw fetchError;
+
+  const toInterval = (row: { started_at: string; ended_at: string }) => ({
+    startedAt: new Date(row.started_at).getTime(),
+    endedAt: new Date(row.ended_at).getTime(),
+  });
+  const buyerIntervals = (segments ?? []).filter((s) => s.party === "buyer").map(toInterval);
+  const supplierIntervals = (segments ?? []).filter((s) => s.party === "supplier").map(toInterval);
+  const corroboratedSeconds = computeOverlapSeconds(buyerIntervals, supplierIntervals);
+
+  const { error } = await supabase.from("orders").update({ verification_call_seconds: corroboratedSeconds }).eq("id", orderId);
   if (error) throw error;
 
   return fetchOrder(supabase, orderId);
@@ -984,6 +1058,15 @@ export async function setCallPresence(supabase: SupabaseClient, orderId: number,
     isSupplier = Boolean(profile && profile.id === order.supplier_id);
   }
   if (!isBuyer && !isSupplier) throw new NotOrderOwnerError();
+  // Same eligibility window as recordVerificationCallProgress/
+  // confirmCallCode (a security audit flagged this function as the one
+  // call-related endpoint with no order-status check at all): presence
+  // toggling on an order that isn't even funded yet, or one that's long
+  // past approval, has no legitimate use and is exactly the kind of
+  // padding/notification-spam surface worth closing off.
+  if (!LIVE_CALL_ELIGIBLE_STATUSES.includes(order.status)) {
+    throw new InvalidOrderTransitionError(order.status, "proof_submitted");
+  }
 
   const column = isBuyer ? "buyer_call_active_since" : "supplier_call_active_since";
   const wasAlreadyActive = Boolean(isBuyer ? order.buyer_call_active_since : order.supplier_call_active_since);
