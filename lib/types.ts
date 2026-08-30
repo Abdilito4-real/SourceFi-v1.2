@@ -168,6 +168,10 @@ export interface UserRow {
    * rejected by requireSession(), regardless of its own signature/expiry.
    * Stamped on logout (all devices) and on suspendSupplier. */
   session_valid_after?: string | null;
+  /** Migration 0022. Nullable — existing accounts have none, only
+   * required going forward at onboarding. See
+   * components/ui/ImageUploadField.tsx / lib/uploadValidation.ts. */
+  profile_picture_url?: string | null;
 }
 
 /** Client-side authenticated-user shape held in App.tsx state, distinct
@@ -181,6 +185,7 @@ export interface AppUser {
   username: string | null;
   walletAddress: string | null;
   role: Role;
+  profilePictureUrl: string | null;
 }
 
 /** Payload of our own first-party session cookie (see lib/session.ts)
@@ -296,11 +301,13 @@ export interface SupplierVerificationApplicationRow {
   user_id: number;
   status: ApplicationStatus;
   business_name: string;
+  phone: string | null;
   cac_registration_number: string | null;
   tax_id_number: string | null;
   business_location: string;
   what_they_sell: string;
   supporting_document_url: string | null;
+  supporting_document_type: string | null;
   reviewed_by: number | null;
   reviewed_at: string | null;
   review_notes: string | null;
@@ -381,7 +388,12 @@ export interface OrderRow {
 }
 
 export type PaymentLeg = "funding" | "release" | "settlement" | "refund";
-export type PaymentProvider = "yellow_card" | "circle";
+// "wallet" (migration 0020): a wallet-funded order's funding/refund
+// confirmation fires through the exact same handlePaymentStatusEvent
+// consumer (lib/orderService.ts) as a real provider event, just
+// synchronous instead of async — see lib/walletService.ts's module
+// comment.
+export type PaymentProvider = "yellow_card" | "circle" | "wallet";
 
 /** The fine-grained async trail for both the funding leg (NGN -> USDC ->
  * escrow) and the release leg (approval -> transfer -> confirmation)
@@ -436,6 +448,32 @@ export interface LedgerEntryRow {
   direction: "debit" | "credit";
   amount_minor: number;
   currency: "NGN" | "USDC";
+  created_at: string;
+}
+
+/** One buyer's platform balance (migration 0020). Not part of the
+ * ledger_entries double-entry system on purpose, see that migration's
+ * header comment — money only enters ledger_entries once it actually
+ * funds a specific order. */
+export interface BuyerWalletRow {
+  user_id: number;
+  balance_minor: number;
+  currency: "NGN";
+  updated_at: string;
+}
+
+export type WalletTransactionType = "topup" | "order_funding" | "refund_to_wallet";
+
+/** Append-only wallet audit trail, migration 0020. order_id is null for
+ * a topup, set for order_funding/refund_to_wallet. */
+export interface WalletTransactionRow {
+  id: number;
+  user_id: number;
+  type: WalletTransactionType;
+  amount_minor: number;
+  order_id: number | null;
+  provider_reference: string | null;
+  status: "processing" | "confirmed" | "failed";
   created_at: string;
 }
 

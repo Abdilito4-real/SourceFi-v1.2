@@ -11,7 +11,7 @@
 // file upload endpoint anywhere in this app, every "photo"/"receipt" is
 // a plain URL string).
 import { describe, it, expect } from "vitest";
-import { FakeSupabase, asSupabaseClient } from "./testUtils/fakeSupabase";
+import { FakeSupabase, asSupabaseClient, wireWalletRpcs } from "./testUtils/fakeSupabase";
 import {
   createOrder,
   fundOrder,
@@ -67,13 +67,15 @@ function freshFakeSupabase() {
       orders_since_verification: 0,
     },
   ]);
-  // Real Yellow Card integration: fundOrder now gates on this (migration
-  // 0018_buyer_kyc.sql), seeded for both buyers so no fundOrder call in
-  // this file needs to know about it individually.
-  fake.seed("buyer_kyc_profiles", [
-    { user_id: 1, first_name: "Test", last_name: "Buyer", phone: "+2348000000000", date_of_birth: "1990-01-01", id_type: "nin", id_number: "00000000000", address: "1 Test Street, Lagos", country: "NG" },
-    { user_id: 99, first_name: "Attacker", last_name: "Buyer", phone: "+2348000000001", date_of_birth: "1990-01-01", id_type: "nin", id_number: "00000000001", address: "1 Attacker Street, Lagos", country: "NG" },
+  // fundOrder is wallet-first (migration 0020): a generous default
+  // balance for both buyers so no fundOrder call in this file needs to
+  // know about it individually, same posture buyer_kyc_profiles used to
+  // have here before KYC moved to gate wallet top-up instead of funding.
+  fake.seed("buyer_wallets", [
+    { user_id: 1, balance_minor: 10_000_000_00, currency: "NGN" },
+    { user_id: 99, balance_minor: 10_000_000_00, currency: "NGN" },
   ]);
+  wireWalletRpcs(fake);
   fake.setRpc("is_supplier_currently_verified", (args) => {
     const supplier = fake.getRows("supplier_profiles").find((s) => s.id === args.p_supplier_id);
     if (!supplier) return false;
@@ -104,15 +106,23 @@ function synchronousProvider(supabase: ReturnType<typeof asSupabaseClient>) {
 
 /** Funds an order and drives it all the way to proof_submitted with the
  * verification call requirement satisfied, the shared setup most of the
- * IDOR tests below need before they can even attempt the attack. */
+ * IDOR tests below need before they can even attempt the attack.
+ * fundOrder is wallet-first (migration 0020) and resolves fully
+ * synchronously, no waitForConfirmation() needed the way a real
+ * provider round-trip would require. */
 async function fundedOrderAwaitingApproval(supabase: ReturnType<typeof asSupabaseClient>) {
-  const { provider, waitForConfirmation } = synchronousProvider(supabase);
+  const { provider } = synchronousProvider(supabase);
   const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000_00 });
-  const confirmed = waitForConfirmation();
-  await fundOrder(supabase, provider, order.id, 1);
-  await confirmed;
+  await fundOrder(supabase, order.id, 1);
   await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
-  await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+  // Both parties must independently corroborate the call (see
+  // lib/callVerification.ts) since the corroboration fix: reporting from
+  // the buyer alone now earns zero credit, which would make
+  // confirmCallCode below throw VerificationCallIncompleteError instead
+  // of the IDOR tests below reaching their actual, intended rejection.
+  // +3s absorbs the few ms of jitter between the two sequential calls.
+  await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS + 3);
+  await recordVerificationCallProgress(supabase, order.id, 2, MIN_VERIFICATION_CALL_SECONDS + 3);
   await confirmCallCode(supabase, order.id, 1);
   return { order, provider };
 }
@@ -135,11 +145,8 @@ describe("IDOR: every order-mutating function, attacked with an unrelated accoun
   it("reportEarlyIssue: an unrelated buyer cannot dispute someone else's order", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
     await expect(reportEarlyIssue(supabase, order.id, 99, { category: "other", description: null })).rejects.toThrow(NotOrderOwnerError);
   });
 
@@ -167,11 +174,8 @@ describe("IDOR: every order-mutating function, attacked with an unrelated accoun
   it("recordVerificationCallProgress: a user with no relationship to the order at all cannot report call time", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
     // 99 is neither the buyer nor the supplier's own user id, nor
     // attacker-supplier's profile (id 98) matches order.supplier_id (1).
     await expect(recordVerificationCallProgress(supabase, order.id, 99, 300)).rejects.toThrow(NotOrderOwnerError);
@@ -184,11 +188,8 @@ describe("IDOR: every order-mutating function, attacked with an unrelated accoun
   it("submitDeliveryProof: a competitor supplier cannot submit proof against an order they weren't assigned", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
     // user_id 98 owns supplier_profiles id 98, not id 1 (this order's real supplier).
     await expect(
       submitDeliveryProof(supabase, order.id, 98, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null })
@@ -225,14 +226,14 @@ describe("Amount tampering", () => {
   });
 
   it("fundOrder/approveOrder/cancelFundedOrder take no amount parameter at all: there is nothing in their signature for a tampered request body to even reach", async () => {
-    // Structural, not behavioral: fundOrder(supabase, provider, orderId,
-    // buyerId) and approveOrder(supabase, provider, orderId, buyerId) both
-    // re-read order.amount_minor from the DB row inside orderService.ts
-    // neither accepts a caller-supplied amount to override it with. This
-    // test exists as an explicit, permanent assertion of that contract
-    // (fails loudly if a future edit ever adds an amount parameter to
-    // either) rather than leaving it implicit.
-    expect(fundOrder.length).toBe(4);
+    // Structural, not behavioral: fundOrder(supabase, orderId, buyerId)
+    // and approveOrder(supabase, provider, orderId, buyerId) both re-read
+    // order.amount_minor from the DB row inside orderService.ts, neither
+    // accepts a caller-supplied amount to override it with. This test
+    // exists as an explicit, permanent assertion of that contract (fails
+    // loudly if a future edit ever adds an amount parameter to either)
+    // rather than leaving it implicit.
+    expect(fundOrder.length).toBe(3);
     expect(approveOrder.length).toBe(4);
   });
 });
@@ -313,11 +314,8 @@ describe("XSS / SQL injection payloads in every free-text field", () => {
   it("a dispute description containing script tags and a SQL payload is stored verbatim as inert text, never executed or unescaped", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     await reportEarlyIssue(supabase, order.id, 1, { category: "other", description: COMBINED_PAYLOAD });
 
@@ -347,11 +345,8 @@ describe("XSS / SQL injection payloads in every free-text field", () => {
   it("delivery-proof notes containing the same payload round-trip unmodified", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000_00 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: COMBINED_PAYLOAD });
     const proof = fake.getRows("delivery_proofs").find((p) => p.order_id === order.id)!;

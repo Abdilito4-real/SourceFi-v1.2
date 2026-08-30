@@ -1,23 +1,32 @@
 // lib/circleEscrowProvider.ts
 //
-// A REAL PaymentBoundary implementation for the escrow-release leg only
-//, the buyer's "Accept delivery" click actually moves USDC out of the
-// Circle developer-controlled escrow wallet to the supplier's on-file
-// wallet address, via Circle's real API. This is the one leg that can be
-// made genuinely real today: funding and settlement are NGN legs that
-// depend on Yellow Card, which has no credentials configured anywhere in
-// this project, those stay delegated to StubPaymentProvider (simulated)
-// until that integration exists. See lib/paymentProvider.ts for how this
-// is selected: only when CIRCLE_API_KEY / CIRCLE_ENTITY_SECRET /
-// ESCROW_WALLET_ID are all actually set, never silently.
+// A REAL PaymentBoundary implementation for the escrow-release leg —
+// the buyer's "Accept delivery" click moves real USDC out of the Circle
+// developer-controlled escrow wallet, via Circle's real API. See
+// lib/paymentProvider.ts for how this is selected: only when
+// CIRCLE_API_KEY / CIRCLE_ENTITY_SECRET / ESCROW_WALLET_ID are all
+// actually set, never silently.
+//
+// UPDATED, real settlement: the USDC no longer goes to the supplier's
+// own wallet. It goes to a one-time deposit address Yellow Card's real
+// Send API returns (lib/yellowCardProvider.ts's createSettlementSend),
+// which converts and pays the supplier's bank account on file
+// (supplier_payout_profiles, migration 0019) — confirmed against Yellow
+// Card's actual docs, not guessed, see createSettlementSend's own
+// header for the full reasoning and what's still genuinely unconfirmed.
+// This means a real release now genuinely requires Yellow Card to ALSO
+// be configured, a new coupling that didn't exist before (previously
+// Circle could be "real" independently of Yellow Card, since release
+// just needed supplier_profiles.wallet_address) — see the constructor's
+// yellowCardConfig param and initiateEscrowRelease's own guard.
 //
 // IMPORTANT, irreversibility: createTransaction() below sends real
 // on-chain value (real money on mainnet, worthless-but-real testnet
 // tokens on a testnet, this class has no way to tell which, and doesn't
 // try to guess). There is no "undo." Every safety check in
 // initiateEscrowRelease() that can fail loudly before that call (missing
-// wallet address, no USDC token found, insufficient balance) is there on
-// purpose, better a clear thrown error than an ambiguous on-chain
+// payout profile, no USDC token found, insufficient balance) is there
+// on purpose, better a clear thrown error than an ambiguous on-chain
 // failure.
 //
 // UPDATED, webhook + reconciliation now exist: the in-process poll
@@ -46,6 +55,7 @@ import { computeUsdcSplit } from "./orderService";
 import { uuidv5, SOURCEFI_UUID_NAMESPACE } from "./uuidv5";
 import { resolveCircleTransactionOutcome, type CircleTransactionOutcome } from "./circleTransactionOutcome";
 import { verifyCircleNotificationSignature } from "./circleWebhook";
+import { createSettlementSend, type YellowCardConfig } from "./yellowCardProvider";
 
 export interface CircleEscrowConfig {
   apiKey: string;
@@ -53,10 +63,24 @@ export interface CircleEscrowConfig {
   escrowWalletId: string;
 }
 
+/** No longer thrown by the real release path (that now reads
+ * supplier_payout_profiles via createSettlementSend, see
+ * lib/yellowCardProvider.ts's MissingSupplierPayoutProfileError) —
+ * supplier_profiles.wallet_address stops being read for real payouts.
+ * Class kept for any other caller/test still referencing it. */
 export class MissingSupplierWalletError extends Error {
   constructor(supplierId: number) {
     super(`Supplier ${supplierId} has no wallet_address on file. Cannot release USDC.`);
     this.name = "MissingSupplierWalletError";
+  }
+}
+
+export class MissingYellowCardConfigError extends Error {
+  constructor() {
+    super(
+      "Real escrow release now requires Yellow Card to also be configured (YELLOW_CARD_API_KEY/YELLOW_CARD_SECRET_KEY) — the settlement leg's deposit address comes from Yellow Card's Send API, not the supplier's own wallet anymore."
+    );
+    this.name = "MissingYellowCardConfigError";
   }
 }
 
@@ -97,15 +121,21 @@ export class CircleEscrowProvider implements PaymentBoundary {
   // (and on-chain rating, still stubbed) to the same simulated provider.
   private readonly delegate: StubPaymentProvider;
   private readonly notificationKeyCache = new Map<string, CachedNotificationKey>();
+  // Null when Yellow Card isn't configured — initiateEscrowRelease
+  // refuses loudly rather than falling back to the old direct-to-wallet
+  // behavior, see MissingYellowCardConfigError.
+  private readonly yellowCardConfig: YellowCardConfig | null;
 
   constructor(
     supabase: SupabaseClient,
     onStatusUpdate: (event: PaymentStatusEvent) => Promise<void> | void,
-    config: CircleEscrowConfig
+    config: CircleEscrowConfig,
+    yellowCardConfig: YellowCardConfig | null
   ) {
     this.supabase = supabase;
     this.onStatusUpdate = onStatusUpdate;
     this.config = config;
+    this.yellowCardConfig = yellowCardConfig;
     this.client = initiateDeveloperControlledWalletsClient({ apiKey: config.apiKey, entitySecret: config.entitySecret });
     this.delegate = new StubPaymentProvider(onStatusUpdate);
   }
@@ -139,13 +169,20 @@ export class CircleEscrowProvider implements PaymentBoundary {
     if (orderError) throw orderError;
     if (!order) throw new Error(`Order ${orderId} not found.`);
 
-    const { data: supplier, error: supplierError } = await this.supabase
-      .from("supplier_profiles")
-      .select("wallet_address")
-      .eq("id", order.supplier_id)
-      .maybeSingle();
-    if (supplierError) throw supplierError;
-    if (!supplier?.wallet_address) throw new MissingSupplierWalletError(order.supplier_id);
+    if (!this.yellowCardConfig) throw new MissingYellowCardConfigError();
+
+    // Real settlement: the destination for the USDC this function is
+    // about to send is a one-time deposit address Yellow Card's Send
+    // API returns, NOT supplier_profiles.wallet_address (see this
+    // file's header and lib/yellowCardProvider.ts's createSettlementSend
+    // for the full reasoning). Throws MissingSupplierPayoutProfileError
+    // if the supplier has no payout bank details on file — the real
+    // replacement for the old MissingSupplierWalletError check.
+    const settlementSend = await createSettlementSend(this.supabase, this.yellowCardConfig, {
+      orderId,
+      supplierProfileId: order.supplier_id,
+      ngnAmountMinor: order.amount_minor - order.platform_fee_minor,
+    });
 
     // Live NGN/USD rate (lib/fxRate.ts), resolved ONCE here and
     // persisted below immediately after Circle actually accepts the
@@ -206,7 +243,7 @@ export class CircleEscrowProvider implements PaymentBoundary {
 
     const response = await this.client.createTransaction({
       walletId: this.config.escrowWalletId,
-      destinationAddress: supplier.wallet_address,
+      destinationAddress: settlementSend.cryptoDepositAddress,
       tokenId: usdcBalance.token.id,
       amount: [amountMajor],
       fee: { type: "level", config: { feeLevel: "MEDIUM" } },
@@ -237,6 +274,24 @@ export class CircleEscrowProvider implements PaymentBoundary {
       // fallback), a reconciliation nuisance, not a lost transfer, so
       // this is logged loudly rather than thrown.
       console.error(`Failed to persist the USDC split for order ${orderId} after a successful release:`, persistError);
+    }
+
+    // What app/api/webhooks/yellowcard/route.ts resolves a settlement
+    // notification against later — same "insert right after
+    // acceptance" pattern the funding leg already uses (initiateOrderFunding,
+    // lib/yellowCardProvider.ts). handleSettlementConfirmed itself
+    // (lib/orderService.ts) only fires once THAT event arrives, this
+    // insert alone doesn't advance order status.
+    const { error: settlementEventError } = await this.supabase.from("payment_events").insert({
+      order_id: orderId,
+      leg: "settlement",
+      provider: "yellow_card",
+      provider_reference: settlementSend.sendReference,
+      event_type: "settlement_initiated",
+      provider_state: "processing",
+    });
+    if (settlementEventError) {
+      console.error(`Failed to record settlement_initiated payment_event for order ${orderId} (send ${settlementSend.sendReference}):`, settlementEventError);
     }
 
     void this.pollUntilConfirmed(orderId, releaseReference);

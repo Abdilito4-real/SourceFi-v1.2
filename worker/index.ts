@@ -90,6 +90,20 @@ self.addEventListener("push", (event: PushEvent) => {
 
 self.addEventListener("notificationclick", (event: NotificationEvent) => {
   event.notification.close();
+
+  // An integration audit flagged this handler as never branching on
+  // event.action at all, so the "Join call" action button (the only
+  // action any notification here defines, see the push handler above)
+  // was indistinguishable from a plain tap on the notification body.
+  // Today they genuinely lead to the same place either way (the deep
+  // link already bakes in `call=1` for that notification type, tap
+  // target doesn't change it), so this isn't a behavior fix -- but
+  // checking explicitly means a future action added without updating
+  // this handler fails safely (falls through to nothing) instead of
+  // silently being treated as "join" just because it's the only branch
+  // that exists.
+  if (event.action && event.action !== "join") return;
+
   const data = event.notification.data as { deepLink?: unknown } | undefined;
   const deepLink = typeof data?.deepLink === "string" && data.deepLink.startsWith("/") ? data.deepLink : "/";
 

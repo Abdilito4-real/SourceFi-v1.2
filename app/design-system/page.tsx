@@ -6,7 +6,7 @@
 // themes, checked here before it gets used in the buyer/sourcer
 // dashboards. Not linked from product nav; reachable at /design-system.
 import React, { useState } from "react";
-import { Package, ShieldAlert, Inbox } from "lucide-react";
+import { Package, ShieldAlert, Inbox, Coins, FileText, History } from "lucide-react";
 import ThemeToggle from "../../components/ui/ThemeToggle";
 import Button from "../../components/ui/Button";
 import { Label, HelperText, ErrorText, Input, Textarea } from "../../components/ui/Field";
@@ -18,11 +18,17 @@ import Modal from "../../components/ui/Modal";
 import ConfirmDialog from "../../components/ui/ConfirmDialog";
 import ErrorPanel from "../../components/ui/ErrorPanel";
 import TransactionProgress, { type TransactionStep } from "../../components/ui/TransactionProgress";
+import Stepper from "../../components/ui/Stepper";
 import { useToast } from "../../components/ui/Toast";
 import EmptyState from "../../components/ui/EmptyState";
 import Skeleton from "../../components/ui/Skeleton";
+import StatCard, { StatCardSkeleton } from "../../components/ui/StatCard";
+import SectionHeader from "../../components/ui/SectionHeader";
+import Tabs from "../../components/ui/Tabs";
+import CardListSkeleton from "../../components/ui/CardListSkeleton";
+import OrderCard from "../../components/OrderCard";
 import { formatMoney, TYPED_CONFIRMATION_THRESHOLD_MINOR } from "../../lib/money";
-import type { OrderStatus } from "../../lib/types";
+import type { OrderRow, OrderStatus } from "../../lib/types";
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
@@ -100,6 +106,41 @@ const SAMPLE_ROWS: SampleRow[] = [
   { id: "ORD-330214", material: "GFRP Reinforcing Bars", buyer: "@ph_contracts", status: "settled", fee: "80.00" },
 ];
 
+// Minimal fake OrderRows for the OrderCard demo below, only the fields
+// OrderCard actually reads carry meaningful values, the rest are inert
+// placeholders satisfying the type.
+function sampleOrder(overrides: Pick<OrderRow, "id" | "order_code" | "title" | "status" | "amount_minor" | "supplier_business_name">): OrderRow {
+  return {
+    buyer_id: 1,
+    supplier_id: 1,
+    material_id: null,
+    supplier_listing_id: null,
+    description: null,
+    quantity: null,
+    delivery_location: "Lekki, Lagos",
+    currency: "NGN",
+    platform_fee_minor: 0,
+    supplier_verified_at_order_time: null,
+    verification_call_seconds: 0,
+    call_code_confirmed_at: null,
+    verification_call_room_id: null,
+    buyer_call_active_since: null,
+    supplier_call_active_since: null,
+    release_usdc_total_minor: null,
+    release_usdc_platform_fee_minor: null,
+    release_ngn_per_usd: null,
+    created_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+const SAMPLE_ORDERS: OrderRow[] = [
+  sampleOrder({ id: 1, order_code: "482913", title: "500 units BubbleDeck Slabs", status: "funded", amount_minor: 4_500_000_00, supplier_business_name: "Lagos BuildCo" }),
+  sampleOrder({ id: 2, order_code: "118820", title: "40 bags LC3 Cement", status: "proof_submitted", amount_minor: 850_000_00, supplier_business_name: "Kano Materials Ltd" }),
+  sampleOrder({ id: 3, order_code: "905517", title: "1,200 Compressed Earth Blocks", status: "disputed", amount_minor: 1_200_000_00, supplier_business_name: "Abuja Dev Supplies" }),
+  sampleOrder({ id: 4, order_code: "330214", title: "60 GFRP Reinforcing Bars", status: "settled", amount_minor: 2_400_000_00, supplier_business_name: "PH Contracts Co" }),
+];
+
 export default function DesignSystemPreview() {
   const { notify, update } = useToast();
   const [modalOpen, setModalOpen] = useState(false);
@@ -111,6 +152,7 @@ export default function DesignSystemPreview() {
   const [txFailed, setTxFailed] = useState(false);
   const [showErrorPanel, setShowErrorPanel] = useState(true);
   const [retrying, setRetrying] = useState(false);
+  const [demoTab, setDemoTab] = useState("active");
   const bigAmount = formatMoney(TYPED_CONFIRMATION_THRESHOLD_MINOR + 50_000_00, "NGN");
 
   return (
@@ -204,6 +246,29 @@ export default function DesignSystemPreview() {
           </div>
         </Section>
 
+        <Section title="Tabs: segmented control">
+          <p className="mb-4 max-w-xl text-sm text-text-secondary">
+            Shared across BuyerDashboard, SupplierDashboard, and AdminDashboard's Active/History and status filters,
+            one place to fix the look instead of copy-pasted pill markup.
+          </p>
+          <Tabs
+            active={demoTab}
+            onChange={setDemoTab}
+            items={[
+              { key: "active", label: "Active (3)" },
+              {
+                key: "history",
+                label: (
+                  <span className="flex items-center gap-1.5">
+                    <History size={13} /> History
+                  </span>
+                ),
+              },
+              { key: "disputed", label: "disputed" },
+            ]}
+          />
+        </Section>
+
         <Section title="Toasts: transient, non-critical feedback only">
           <p className="mb-4 max-w-xl text-sm text-text-secondary">
             Success/info/loading auto-dismiss after 4s. Error and warning don't, the user dismisses them. Fire the
@@ -266,6 +331,43 @@ export default function DesignSystemPreview() {
             <Button size="sm" variant="danger" onClick={() => setTxFailed(true)}>
               Mark current step failed
             </Button>
+          </div>
+        </Section>
+
+        <Section title="Stepper: a linear, gated process">
+          <p className="mb-4 max-w-xl text-sm text-text-secondary">
+            For a multi-step flow where each step carries real, different, actionable content — distinct from
+            Transaction progress above, which is a fixed three-state indicator for one payment leg. Used in{" "}
+            <code className="font-mono text-accent-text">OrderDetailsModal</code>&rsquo;s delivery verification
+            (live call → confirm order code → accept delivery).
+          </p>
+          <div className="max-w-md rounded-lg border border-border bg-surface-sunken p-4">
+            <Stepper
+              steps={[
+                {
+                  key: "call",
+                  title: "Complete a 5-minute live verification call",
+                  status: "complete",
+                  content: <div className="text-xs text-success-text">✓ 5:12 verified, requirement met</div>,
+                },
+                {
+                  key: "code",
+                  title: "Confirm your supplier's order code on camera",
+                  status: "current",
+                  content: (
+                    <Button size="sm" variant="secondary">
+                      Confirm code match
+                    </Button>
+                  ),
+                },
+                {
+                  key: "accept",
+                  title: "Accept delivery",
+                  status: "upcoming",
+                  summary: "Unlocks once verification above is complete.",
+                },
+              ]}
+            />
           </div>
         </Section>
 
@@ -428,6 +530,53 @@ export default function DesignSystemPreview() {
           </div>
         </Section>
 
+        <Section title="Stat cards">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <StatCard label="Active orders" value={12} icon={<FileText size={16} />} />
+            <StatCard label="In escrow" value={formatMoney(4_500_000_00, "NGN")} icon={<Coins size={16} />} tone="accent" />
+            <StatCardSkeleton />
+          </div>
+        </Section>
+
+        <Section title="Section header">
+          <p className="mb-4 max-w-xl text-sm text-text-secondary">
+            The "&lt;h2&gt;Section title&lt;/h2&gt; ... View all" row every dashboard's overview list uses, one
+            place instead of three near-identical inline copies.
+          </p>
+          <SectionHeader
+            title="Recent orders"
+            count={4}
+            action={
+              <button type="button" className="text-sm font-semibold text-accent-text hover:underline">
+                View all
+              </button>
+            }
+          />
+          <SectionHeader
+            title="Nested subsection"
+            size="sm"
+            subtitle={
+              <>
+                <code className="font-mono text-accent-text">size=&quot;sm&quot;</code>, for a heading inside an
+                already-sectioned tab, e.g. the Ledger view.
+              </>
+            }
+          />
+        </Section>
+
+        <Section title="Order card">
+          <p className="mb-4 max-w-xl text-sm text-text-secondary">
+            The left edge carries the same status→tone mapping as the badge below it (
+            <code className="font-mono text-accent-text">ORDER_STATUS_TONE</code>), so a list reads status at a
+            glance without reading every badge.
+          </p>
+          <div className="grid gap-3">
+            {SAMPLE_ORDERS.map((o) => (
+              <OrderCard key={o.id} order={o} onOpen={() => {}} />
+            ))}
+          </div>
+        </Section>
+
         <Section title="Status badges">
           <div className="flex flex-wrap gap-2.5">
             {(Object.entries(ORDER_STATUS_TONE) as [OrderStatus, (typeof ORDER_STATUS_TONE)[OrderStatus]][]).map(([status, tone]) => (
@@ -471,6 +620,11 @@ export default function DesignSystemPreview() {
             <Skeleton className="h-4 w-1/2" />
             <Skeleton className="h-20 w-full" />
           </div>
+          <p className="mb-3 mt-8 max-w-xl text-sm text-text-secondary">
+            <code className="font-mono text-accent-text">CardListSkeleton</code> replaces the bare centered spinner
+            every dashboard used to show while an order/listing/application list is loading.
+          </p>
+          <CardListSkeleton rows={2} />
         </Section>
 
         <Section title="Empty state">

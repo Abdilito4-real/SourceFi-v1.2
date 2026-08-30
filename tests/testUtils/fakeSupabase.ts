@@ -15,7 +15,7 @@
 // .select(cols, {count, head}) (lib/notifications/dispatch.ts's rate
 // limit check), same "extend as real call patterns grow" posture the
 // header above already states.
-type Row = Record<string, unknown>;
+export type Row = Record<string, unknown>;
 
 class FakeTable {
   rows: Row[] = [];
@@ -199,6 +199,19 @@ export class FakeSupabase {
     return this.table(name).rows.map((r) => ({ ...r }));
   }
 
+  /** Live (not copied) reference to a table's rows, for setRpc handlers
+   * that need to atomically read-and-mutate current state synchronously.
+   * getRows() above returns copies, deliberately, for the common
+   * read-only case (e.g. is_supplier_currently_verified's mock); a
+   * FakeQueryBuilder .update() can't be used from inside a handler
+   * instead, since its actual row mutation only runs when something
+   * awaits/thens it, and setRpc's handler signature is synchronous.
+   * First real use: wireWalletRpcs below (migration 0020's wallet_credit/
+   * wallet_debit). */
+  getMutableRows(name: string): Row[] {
+    return this.table(name).rows;
+  }
+
   setRpc(name: string, handler: (args: Record<string, unknown>) => unknown): this {
     this.rpcHandlers.set(name, handler);
     return this;
@@ -218,6 +231,54 @@ export class FakeSupabase {
     const handler = this.rpcHandlers.get(name);
     return { data: handler ? handler(args) : null, error: null };
   }
+}
+
+/** Wires wallet_credit/wallet_debit (migration 0020_buyer_wallet.sql)
+ * against this fake's OWN buyer_wallets rows (via getMutableRows, so a
+ * balance seeded with .seed("buyer_wallets", [...]) and a balance
+ * mutated by these RPCs stay the same single source of truth) — a plain
+ * JS mirror of the real Postgres functions' logic. Same honest
+ * limitation tests/rateLimit.test.ts's own RPC mocks state: this proves
+ * the call-shape contract and the application-level guard
+ * (InsufficientWalletBalanceError), not that the real functions'
+ * `select ... for update` row-locking is race-free under true
+ * concurrent connections — that guarantee comes from Postgres itself.
+ * wallet_debit signals insufficient balance by THROWING (matching the
+ * real function's `raise exception`), which is also the only way this
+ * fixture's own .rpc() can simulate an RPC failure at all, since it
+ * never sets {error} itself (see FakeSupabase.rpc() above) — a thrown
+ * handler exception is what propagates out of `await supabase.rpc(...)`
+ * as a real JS exception instead. Shared across every test file that
+ * exercises fundOrder/wallet flows (tests/walletService.test.ts,
+ * tests/orderService.test.ts, tests/adversarial.test.ts,
+ * tests/terminationFlows.test.ts) rather than four separate copies. */
+export function wireWalletRpcs(fake: FakeSupabase) {
+  function getOrCreateWalletRow(userId: number): Row {
+    const rows = fake.getMutableRows("buyer_wallets");
+    let row = rows.find((r) => r.user_id === userId);
+    if (!row) {
+      row = { user_id: userId, balance_minor: 0, currency: "NGN", updated_at: new Date().toISOString() };
+      rows.push(row);
+    }
+    return row;
+  }
+
+  fake.setRpc("wallet_credit", (args) => {
+    const row = getOrCreateWalletRow(args.p_user_id as number);
+    row.balance_minor = (row.balance_minor as number) + (args.p_amount_minor as number);
+    return row.balance_minor;
+  });
+
+  fake.setRpc("wallet_debit", (args) => {
+    const row = getOrCreateWalletRow(args.p_user_id as number);
+    const balance = row.balance_minor as number;
+    const amount = args.p_amount_minor as number;
+    if (balance < amount) {
+      throw new Error(`insufficient_wallet_balance: balance ${balance} is less than requested debit ${amount}`);
+    }
+    row.balance_minor = balance - amount;
+    return row.balance_minor;
+  });
 }
 
 /** Cast-to-SupabaseClient escape hatch, this fake deliberately doesn't

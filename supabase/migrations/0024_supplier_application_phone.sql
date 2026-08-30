@@ -1,0 +1,13 @@
+-- 0024_supplier_application_phone.sql
+--
+-- supplier_profiles.phone has existed since migration 0004 and has
+-- NEVER been populated by any code path — the verification application
+-- form that feeds it never had a phone field to collect one. This adds
+-- that missing column to supplier_verification_applications so
+-- app/api/supplier-verification/route.ts can actually collect it, and
+-- app/api/admin/supplier-verification/[id]/route.ts's approval copy
+-- (profilePatch) can carry it into supplier_profiles.phone at last.
+-- Nullable here too, same "no backfill for existing rows" posture as
+-- every other column added this session — required going forward is
+-- enforced at the API layer, not a NOT NULL constraint.
+alter table supplier_verification_applications add column if not exists phone text;

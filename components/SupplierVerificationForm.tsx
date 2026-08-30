@@ -12,26 +12,38 @@
 // through this one form.
 import React, { useState } from "react";
 import Button from "./ui/Button";
-import { Label, Input, Textarea } from "./ui/Field";
+import { Label, Input, Textarea, HelperText } from "./ui/Field";
+import ImageUploadField from "./ui/ImageUploadField";
+import Select from "./ui/Select";
+import { SUPPORTING_DOCUMENT_TYPES } from "../lib/supplierDocumentTypes";
 import { useToast } from "./ui/Toast";
 
 export default function SupplierVerificationForm({ onSubmitted }: { onSubmitted: () => void }) {
   const { notify } = useToast();
   const [businessName, setBusinessName] = useState("");
+  const [phone, setPhone] = useState("");
   const [businessLocation, setBusinessLocation] = useState("");
   const [whatTheySell, setWhatTheySell] = useState("");
   const [cacRegistrationNumber, setCacRegistrationNumber] = useState("");
   const [taxIdNumber, setTaxIdNumber] = useState("");
+  const [supportingDocumentType, setSupportingDocumentType] = useState(SUPPORTING_DOCUMENT_TYPES[0]!.value);
   const [supportingDocumentUrl, setSupportingDocumentUrl] = useState("");
   const [payoutBankName, setPayoutBankName] = useState("");
   const [payoutAccountNumber, setPayoutAccountNumber] = useState("");
   const [payoutAccountName, setPayoutAccountName] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  const [docTouched, setDocTouched] = useState(false);
+
   const valid =
     businessName.trim() &&
+    phone.trim() &&
     businessLocation.trim() &&
     whatTheySell.trim() &&
+    cacRegistrationNumber.trim() &&
+    taxIdNumber.trim() &&
+    supportingDocumentType.trim() &&
+    supportingDocumentUrl.trim() &&
     payoutBankName.trim() &&
     payoutAccountNumber.trim() &&
     payoutAccountName.trim();
@@ -46,10 +58,12 @@ export default function SupplierVerificationForm({ onSubmitted }: { onSubmitted:
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           businessName,
+          phone,
           businessLocation,
           whatTheySell,
           cacRegistrationNumber,
           taxIdNumber,
+          supportingDocumentType,
           supportingDocumentUrl,
           payoutBankName,
           payoutAccountNumber,
@@ -73,14 +87,19 @@ export default function SupplierVerificationForm({ onSubmitted }: { onSubmitted:
         <Label htmlFor="verif-business-name">Business name</Label>
         <Input id="verif-business-name" value={businessName} onChange={(e) => setBusinessName(e.target.value)} required />
       </div>
+      <div>
+        <Label htmlFor="verif-phone">Business phone number</Label>
+        <Input id="verif-phone" type="tel" placeholder="e.g. 0803 123 4567" value={phone} onChange={(e) => setPhone(e.target.value)} required />
+        <HelperText>How an admin reaches you if your application needs a follow-up.</HelperText>
+      </div>
       <div className="flex gap-3">
         <div className="flex-1">
-          <Label htmlFor="verif-cac">CAC registration number (optional)</Label>
-          <Input id="verif-cac" value={cacRegistrationNumber} onChange={(e) => setCacRegistrationNumber(e.target.value)} />
+          <Label htmlFor="verif-cac">CAC registration number</Label>
+          <Input id="verif-cac" value={cacRegistrationNumber} onChange={(e) => setCacRegistrationNumber(e.target.value)} required />
         </div>
         <div className="flex-1">
-          <Label htmlFor="verif-tax">Tax ID number (optional)</Label>
-          <Input id="verif-tax" value={taxIdNumber} onChange={(e) => setTaxIdNumber(e.target.value)} />
+          <Label htmlFor="verif-tax">Tax ID number</Label>
+          <Input id="verif-tax" value={taxIdNumber} onChange={(e) => setTaxIdNumber(e.target.value)} required />
         </div>
       </div>
       <div>
@@ -88,14 +107,27 @@ export default function SupplierVerificationForm({ onSubmitted }: { onSubmitted:
         <Input id="verif-location" value={businessLocation} onChange={(e) => setBusinessLocation(e.target.value)} required />
       </div>
       <div>
-        <Label htmlFor="verif-doc">Supporting document (optional)</Label>
-        <Input
-          id="verif-doc"
-          placeholder="Link to your CAC certificate, utility bill, etc."
-          value={supportingDocumentUrl}
-          onChange={(e) => setSupportingDocumentUrl(e.target.value)}
-        />
+        <Label htmlFor="verif-doc-type">Document type</Label>
+        <Select id="verif-doc-type" value={supportingDocumentType} onChange={(e) => setSupportingDocumentType(e.target.value)} required>
+          {SUPPORTING_DOCUMENT_TYPES.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
+        </Select>
       </div>
+      <ImageUploadField
+        label="Supporting document"
+        folder="verification_documents"
+        required
+        invalid={docTouched && !supportingDocumentUrl}
+        value={supportingDocumentUrl || null}
+        onChange={(url) => {
+          setDocTouched(true);
+          setSupportingDocumentUrl(url || "");
+        }}
+        helperText="A clear photo matching the document type chosen above — required."
+      />
       <div>
         <Label htmlFor="verif-sells">What do you produce or sell?</Label>
         <Textarea id="verif-sells" value={whatTheySell} onChange={(e) => setWhatTheySell(e.target.value)} required />

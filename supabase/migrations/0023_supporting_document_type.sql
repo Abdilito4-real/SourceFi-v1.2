@@ -1,0 +1,12 @@
+-- 0023_supporting_document_type.sql
+--
+-- A supplier now picks WHAT KIND of document they're uploading (CAC
+-- certificate, utility bill, passport, national ID, driver's license —
+-- see lib/supplierDocumentTypes.ts, the single source of truth both the
+-- client forms and app/api/supplier-verification/route.ts's validation
+-- read from) before uploading it, so an admin reviewing the application
+-- doesn't have to guess from the photo alone. Nullable: existing
+-- applications submitted before this column existed have no type on
+-- file, same "don't force a backfill for old rows" posture as every
+-- other optional-going-forward column added this session.
+alter table supplier_verification_applications add column if not exists supporting_document_type text;

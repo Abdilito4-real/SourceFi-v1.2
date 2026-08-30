@@ -10,6 +10,7 @@ import { abandonOrder, NotOrderOwnerError, OrderNotFoundError } from "../../../.
 import { InvalidOrderTransitionError } from "../../../../../lib/orderStateMachine";
 import { checkDualQuota } from "../../../../../lib/rateLimit";
 import { getClientIp } from "../../../../../lib/authz";
+import { dbErrorResponse } from "../../../../../lib/dbErrorResponse";
 import type { SupplierExitCategory } from "../../../../../lib/types";
 
 const VALID_CATEGORIES: SupplierExitCategory[] = ["cannot_fulfill", "schedule_conflict", "pricing_error", "other"];
@@ -41,6 +42,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (err instanceof OrderNotFoundError) return Response.json({ error: err.message }, { status: 404 });
     if (err instanceof NotOrderOwnerError) return Response.json({ error: err.message }, { status: 403 });
     if (err instanceof InvalidOrderTransitionError) return Response.json({ error: err.message }, { status: 409 });
-    return Response.json({ error: err instanceof Error ? err.message : "Failed to cancel this order." }, { status: 500 });
+    return dbErrorResponse(`abandon order ${orderId}`, err instanceof Error ? err : new Error(String(err)));
   }
 }

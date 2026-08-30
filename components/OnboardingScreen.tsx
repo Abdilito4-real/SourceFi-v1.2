@@ -18,18 +18,27 @@ import React, { useState } from "react";
 import { HardHat, Package, Store, Check, ArrowLeft } from "lucide-react";
 import Button from "./ui/Button";
 import { Label, Input, Textarea, ErrorText, HelperText } from "./ui/Field";
+import ImageUploadField from "./ui/ImageUploadField";
+import Select from "./ui/Select";
+import { SUPPORTING_DOCUMENT_TYPES } from "../lib/supplierDocumentTypes";
 import { cn } from "./ui/cn";
 
 export interface OnboardingForm {
   username: string;
   fullName: string;
+  profilePictureUrl: string;
   companyName: string;
+  companyPhone: string;
   primaryLocation: string;
   path: "buyer" | "supplier";
   cacRegistrationNumber: string;
   taxIdNumber: string;
   whatTheySell: string;
+  supportingDocumentType: string;
   supportingDocumentUrl: string;
+  payoutBankName: string;
+  payoutAccountNumber: string;
+  payoutAccountName: string;
 }
 
 export interface OnboardingScreenProps {
@@ -94,9 +103,15 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
   const totalSteps = isSupplierPath ? 3 : 2;
   const [step, setStep] = useState(0);
 
-  const step0Valid = form.username.trim().length >= 3;
+  const step0Valid = form.username.trim().length >= 3 && form.profilePictureUrl.trim().length > 0;
   const step1SupplierValid = form.companyName.trim() && form.primaryLocation.trim();
-  const finalStepValid = isSupplierPath ? form.whatTheySell.trim().length > 0 : true;
+  const finalStepValid = isSupplierPath
+    ? form.whatTheySell.trim().length > 0 &&
+      form.supportingDocumentUrl.trim().length > 0 &&
+      form.payoutBankName.trim().length > 0 &&
+      form.payoutAccountNumber.trim().length > 0 &&
+      form.payoutAccountName.trim().length > 0
+    : true;
 
   const goNext = () => setStep((s) => Math.min(totalSteps - 1, s + 1));
   const goBack = () => setStep((s) => Math.max(0, s - 1));
@@ -172,6 +187,14 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
                   onChange={(e) => setForm({ ...form, fullName: e.target.value })}
                 />
               </div>
+
+              <ImageUploadField
+                label="Profile picture"
+                folder="profile_pictures"
+                required
+                value={form.profilePictureUrl || null}
+                onChange={(url) => setForm({ ...form, profilePictureUrl: url || "" })}
+              />
             </>
           )}
 
@@ -195,14 +218,38 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
                   required
                 />
               </div>
+              <div>
+                <Label htmlFor="onboard-company-phone">Business phone number</Label>
+                <Input
+                  id="onboard-company-phone"
+                  type="tel"
+                  placeholder="e.g. 0803 123 4567"
+                  value={form.companyPhone}
+                  onChange={(e) => setForm({ ...form, companyPhone: e.target.value })}
+                  required
+                />
+                <HelperText>How an admin reaches you if your application needs a follow-up.</HelperText>
+              </div>
               <div className="flex gap-3">
                 <div className="flex-1">
-                  <Label htmlFor="onboard-cac">CAC number (optional)</Label>
-                  <Input id="onboard-cac" placeholder="e.g. RC1234567" value={form.cacRegistrationNumber} onChange={(e) => setForm({ ...form, cacRegistrationNumber: e.target.value })} />
+                  <Label htmlFor="onboard-cac">CAC number</Label>
+                  <Input
+                    id="onboard-cac"
+                    placeholder="e.g. RC1234567"
+                    value={form.cacRegistrationNumber}
+                    onChange={(e) => setForm({ ...form, cacRegistrationNumber: e.target.value })}
+                    required
+                  />
                 </div>
                 <div className="flex-1">
-                  <Label htmlFor="onboard-tax">Tax ID (optional)</Label>
-                  <Input id="onboard-tax" placeholder="e.g. TIN12345678" value={form.taxIdNumber} onChange={(e) => setForm({ ...form, taxIdNumber: e.target.value })} />
+                  <Label htmlFor="onboard-tax">Tax ID</Label>
+                  <Input
+                    id="onboard-tax"
+                    placeholder="e.g. TIN12345678"
+                    value={form.taxIdNumber}
+                    onChange={(e) => setForm({ ...form, taxIdNumber: e.target.value })}
+                    required
+                  />
                 </div>
               </div>
               <div>
@@ -226,14 +273,65 @@ export default function OnboardingScreen({ form, setForm, error, onSubmit, onSig
                 />
               </div>
               <div>
-                <Label htmlFor="onboard-doc">Supporting document (optional)</Label>
-                <Input
-                  id="onboard-doc"
-                  placeholder="Link to your CAC certificate, utility bill, etc."
-                  value={form.supportingDocumentUrl}
-                  onChange={(e) => setForm({ ...form, supportingDocumentUrl: e.target.value })}
-                />
-                <HelperText>A link (Google Drive, Dropbox, etc.), no file upload yet, so paste a shareable URL.</HelperText>
+                <Label htmlFor="onboard-doc-type">Document type</Label>
+                <Select
+                  id="onboard-doc-type"
+                  value={form.supportingDocumentType}
+                  onChange={(e) => setForm({ ...form, supportingDocumentType: e.target.value })}
+                  required
+                >
+                  {SUPPORTING_DOCUMENT_TYPES.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <ImageUploadField
+                label="Supporting document"
+                folder="verification_documents"
+                required
+                value={form.supportingDocumentUrl || null}
+                onChange={(url) => setForm({ ...form, supportingDocumentUrl: url || "" })}
+                helperText="A clear photo matching the document type chosen above."
+              />
+              <div className="border-t border-border pt-3.5">
+                <p className="mb-2.5 text-sm font-medium text-text-primary">Payout details</p>
+                <p className="mb-3 text-xs leading-relaxed text-text-secondary">
+                  The bank account you&rsquo;ll be paid into. Required &mdash; an application can&rsquo;t be reviewed without it.
+                </p>
+                <div className="flex flex-col gap-3">
+                  <div>
+                    <Label htmlFor="onboard-bank-name">Bank name</Label>
+                    <Input
+                      id="onboard-bank-name"
+                      placeholder="e.g. GTBank"
+                      value={form.payoutBankName}
+                      onChange={(e) => setForm({ ...form, payoutBankName: e.target.value })}
+                      required
+                    />
+                  </div>
+                  <div className="flex gap-3">
+                    <div className="flex-1">
+                      <Label htmlFor="onboard-account-number">Account number</Label>
+                      <Input
+                        id="onboard-account-number"
+                        value={form.payoutAccountNumber}
+                        onChange={(e) => setForm({ ...form, payoutAccountNumber: e.target.value })}
+                        required
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <Label htmlFor="onboard-account-name">Account holder name</Label>
+                      <Input
+                        id="onboard-account-name"
+                        value={form.payoutAccountName}
+                        onChange={(e) => setForm({ ...form, payoutAccountName: e.target.value })}
+                        required
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
               <p className="m-0 text-xs leading-relaxed text-text-tertiary">
                 An admin reviews this once, confirming your business, location, and what you sell.

@@ -16,16 +16,28 @@ export async function GET(request: Request) {
   const auth = await requireRole(["admin"]);
   if (auth instanceof Response) return auth;
 
-  const limitParam = Number(new URL(request.url).searchParams.get("limit"));
+  const params = new URL(request.url).searchParams;
+  const limitParam = Number(params.get("limit"));
   const limit = Number.isInteger(limitParam) && limitParam > 0 && limitParam <= 500 ? limitParam : 100;
+
+  // Optional time-range filter on the "Recent entries" list only, e.g.
+  // ?from=2026-08-01T00:00:00.000Z. Never applied to the balances query
+  // below, on purpose, those are explicitly all-time net figures, not a
+  // windowed view, narrowing "Recent entries" must not make them lie.
+  // Both ends are validated the same way (client-supplied, never trust
+  // it blindly): a non-date string is silently ignored rather than
+  // producing a confusing empty/broken query.
+  const fromParam = params.get("from");
+  const from = fromParam && !Number.isNaN(Date.parse(fromParam)) ? fromParam : null;
+  const toParam = params.get("to");
+  const to = toParam && !Number.isNaN(Date.parse(toParam)) ? toParam : null;
 
   const supabase = getSupabaseServerClient();
 
-  const { data: entries, error } = await supabase
-    .from("ledger_entries")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(limit);
+  let entriesQuery = supabase.from("ledger_entries").select("*").order("created_at", { ascending: false }).limit(limit);
+  if (from) entriesQuery = entriesQuery.gte("created_at", from);
+  if (to) entriesQuery = entriesQuery.lte("created_at", to);
+  const { data: entries, error } = await entriesQuery;
   if (error) return dbErrorResponse("GET admin/ledger entries", error);
 
   const orderIds = Array.from(new Set((entries || []).map((e) => e.order_id)));
