@@ -183,7 +183,18 @@ export default function SupplierDashboard() {
   const isSupplier = user?.role === "supplier";
 
   // Push notificationclick deep-links here as e.g. /supplier?order=482 or
-  // /supplier?section=verification.
+  // /supplier?section=verification, and so does IncomingCallBanner.tsx's
+  // in-app "Join" button (router.push to this same route with a fresh
+  // ?order=&call=1). The empty dependency array this used to have only
+  // ever ran once on mount, so "Join" did nothing when the dashboard was
+  // ALREADY mounted (a client-side navigation to the same route
+  // re-renders, it doesn't remount) — the real bug behind "the
+  // notification shows but Join doesn't work". Depending on searchParams
+  // itself instead means this genuinely re-runs on every query-string
+  // change, mount or not; onAutoJoinCallHandled resetting autoJoinCall
+  // back to false below (passed to OrderDetailsModal) is what makes a
+  // SECOND incoming call while still on this page correctly re-trigger
+  // the Answer prompt again too.
   useEffect(() => {
     const orderParam = searchParams.get("order");
     if (orderParam && Number.isInteger(Number(orderParam))) setSelectedOrderId(Number(orderParam));
@@ -192,8 +203,7 @@ export default function SupplierDashboard() {
     if (sectionParam === "overview" || sectionParam === "orders" || sectionParam === "listings" || sectionParam === "verification") {
       setSection(sectionParam);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [searchParams]);
 
   useEffect(() => {
     if (checkingSession) return;

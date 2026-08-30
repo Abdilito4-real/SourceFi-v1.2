@@ -346,9 +346,18 @@ export default function BuyerDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, isBuyer]);
 
-  // Push notificationclick deep-links here as e.g. /buyer?order=482
-  // open the right order/section on load instead of just landing on the
-  // overview and leaving the user to find it themselves.
+  // Push notificationclick deep-links here as e.g. /buyer?order=482, and
+  // so does IncomingCallBanner.tsx's in-app "Join" button (router.push to
+  // this same route with a fresh ?order=&call=1). The empty dependency
+  // array this used to have only ever ran once on mount, so "Join" did
+  // nothing when the dashboard was ALREADY mounted (a client-side
+  // navigation to the same route re-renders, it doesn't remount) — the
+  // real bug behind "the notification shows but Join doesn't work".
+  // Depending on searchParams itself instead means this genuinely re-
+  // runs on every query-string change, mount or not; onAutoJoinCallHandled
+  // resetting autoJoinCall back to false below (passed to
+  // OrderDetailsModal) is what makes a SECOND incoming call while still
+  // on this page correctly re-trigger the Answer prompt again too.
   useEffect(() => {
     const orderParam = searchParams.get("order");
     if (orderParam && Number.isInteger(Number(orderParam))) setSelectedOrderId(Number(orderParam));
@@ -357,8 +366,7 @@ export default function BuyerDashboard() {
     if (sectionParam === "overview" || sectionParam === "suppliers" || sectionParam === "orders" || sectionParam === "materials") {
       setSection(sectionParam);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [searchParams]);
 
   useEffect(() => {
     if (checkingSession) return;
