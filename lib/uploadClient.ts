@@ -31,7 +31,7 @@ export async function uploadImage(file: File, folder: string): Promise<UploadRes
     const body = await signRes.json().catch(() => null);
     throw new UploadError(body?.error || "Couldn't start the upload. Try again.");
   }
-  const { signature, timestamp, apiKey, cloudName } = await signRes.json();
+  const { signature, timestamp, apiKey, cloudName, allowedFormats } = await signRes.json();
 
   const formData = new FormData();
   formData.append("file", file);
@@ -39,6 +39,12 @@ export async function uploadImage(file: File, folder: string): Promise<UploadRes
   formData.append("timestamp", String(timestamp));
   formData.append("api_key", apiKey);
   formData.append("signature", signature);
+  // Must exactly match what the server signed (allowed_formats is part
+  // of the signed param set, see app/api/uploads/sign/route.ts) — this
+  // is what makes Cloudinary itself reject anything outside the raster
+  // photo formats server-side, not just a client-side content-type hint
+  // that a direct API request could ignore entirely.
+  formData.append("allowed_formats", allowedFormats);
 
   const uploadRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
     method: "POST",

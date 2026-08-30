@@ -6,7 +6,7 @@
 // against real(-ish) Supabase calls. This exercises it against
 // tests/testUtils/fakeSupabase.ts rather than relying solely on the
 // primitives' own unit tests being individually correct.
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { FakeSupabase, asSupabaseClient, wireWalletRpcs } from "./testUtils/fakeSupabase";
 import {
   createOrder,
@@ -22,6 +22,7 @@ import {
   CallCodeNotConfirmedError,
   computeUsdcSplit,
   setCallPresence,
+  applyJaasWebhookPresence,
   ensureCallRoomId,
   MIN_VERIFICATION_CALL_SECONDS,
   SupplierNotCurrentlyVerifiedError,
@@ -724,6 +725,114 @@ describe("mandatory live verification call before approval", () => {
 
     await expect(setCallPresence(supabase, order.id, 3, true)).rejects.toThrow(NotOrderOwnerError);
   });
+});
+
+describe("applyJaasWebhookPresence: the real, webhook-driven fix for the collusion gap client-reported corroboration alone can't close", () => {
+  const ORIGINAL_ENV = { ...process.env };
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  async function orderAtProofSubmitted(fake: FakeSupabase) {
+    const supabase = asSupabaseClient(fake);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
+    await fundOrder(supabase, order.id, 1);
+    await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
+    return order;
+  }
+
+  it("credits the overlap between a real JOINED/LEFT pair for each party, computed from JaaS's own event timestamps", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+
+    const t0 = new Date("2026-01-01T00:00:00Z").getTime();
+    await applyJaasWebhookPresence(supabase, order.id, "buyer", true, new Date(t0).toISOString());
+    await applyJaasWebhookPresence(supabase, order.id, "supplier", true, new Date(t0 + 5_000).toISOString()); // supplier joins 5s later
+    await applyJaasWebhookPresence(supabase, order.id, "buyer", false, new Date(t0 + 305_000).toISOString());
+    const afterSupplierLeft = await applyJaasWebhookPresenceAndFetch(
+      supabase,
+      order.id,
+      "supplier",
+      false,
+      new Date(t0 + 310_000).toISOString()
+    );
+    // Buyer: [0,305], supplier: [5,310] -> overlap [5,305] = 300s.
+    expect(afterSupplierLeft.verification_call_seconds).toBe(300);
+  });
+
+  it("a LEFT with nothing open (no matching JOINED, or already processed) is a safe no-op, not a fabricated segment", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+
+    // No JOINED ever recorded for either party: a no-op LEFT never even
+    // reaches the .update() call, so the column stays exactly as
+    // createOrder left it (unset in this fixture, `not null default 0`
+    // in real Postgres, see migration 0007) rather than being written
+    // as an explicit 0 — same distinction the app's own `?? 0` reads
+    // everywhere already account for.
+    await applyJaasWebhookPresence(supabase, order.id, "buyer", false, new Date().toISOString());
+    const orders = fake.getRows("orders");
+    expect(orders.find((o) => o.id === order.id)!.verification_call_seconds ?? 0).toBe(0);
+  });
+
+  it("a duplicate/retried LEFT webhook is idempotent: the segment is only credited once", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+
+    const t0 = new Date("2026-01-01T00:00:00Z").getTime();
+    await applyJaasWebhookPresence(supabase, order.id, "buyer", true, new Date(t0).toISOString());
+    await applyJaasWebhookPresence(supabase, order.id, "supplier", true, new Date(t0).toISOString());
+    await applyJaasWebhookPresence(supabase, order.id, "buyer", false, new Date(t0 + 300_000).toISOString());
+    const first = await applyJaasWebhookPresenceAndFetch(supabase, order.id, "supplier", false, new Date(t0 + 300_000).toISOString());
+    expect(first.verification_call_seconds).toBe(300);
+
+    // JaaS retries the exact same supplier LEFT event (network blip, no
+    // 2xx received the first time) — buyer_call_active_since/
+    // supplier_call_active_since is already null from the first pass, so
+    // this must NOT insert a second segment or double the total.
+    const retried = await applyJaasWebhookPresenceAndFetch(supabase, order.id, "supplier", false, new Date(t0 + 300_000).toISOString());
+    expect(retried.verification_call_seconds).toBe(300);
+    expect(fake.getRows("call_segments").filter((s) => s.order_id === order.id)).toHaveLength(2); // one per party, not three
+  });
+
+  it("recordVerificationCallProgress becomes a harmless no-op once JAAS_WEBHOOK_SECRET is set — it never inserts a client-reported segment", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+    process.env.JAAS_WEBHOOK_SECRET = "whsec_test";
+
+    const result = await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    expect(result.verification_call_seconds ?? 0).toBe(0); // early-returns the fetched order untouched, see the comment above
+    expect(fake.getRows("call_segments").filter((s) => s.order_id === order.id)).toHaveLength(0);
+  });
+
+  it("setCallPresence becomes a harmless no-op once JAAS_WEBHOOK_SECRET is set — it never writes buyer/supplier_call_active_since", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+    process.env.JAAS_WEBHOOK_SECRET = "whsec_test";
+
+    await setCallPresence(supabase, order.id, 1, true);
+    expect(fake.getRows("orders").find((o) => o.id === order.id)!.buyer_call_active_since).toBeFalsy();
+  });
+
+  /** applyJaasWebhookPresence returns void (route-driven), unlike
+   * recordVerificationCallProgress; these tests need the resulting
+   * order row, so this small wrapper calls it and re-fetches. */
+  async function applyJaasWebhookPresenceAndFetch(
+    supabase: ReturnType<typeof asSupabaseClient>,
+    orderId: number,
+    party: "buyer" | "supplier",
+    joined: boolean,
+    atIso: string
+  ) {
+    await applyJaasWebhookPresence(supabase, orderId, party, joined, atIso);
+    const { data } = await supabase.from("orders").select("*").eq("id", orderId).single();
+    return data as { verification_call_seconds: number };
+  }
 });
 
 describe("approveOrder: a real payment provider's initiateEscrowRelease can throw (CircleEscrowProvider can, the stub never does)", () => {

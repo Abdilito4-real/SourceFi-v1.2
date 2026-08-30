@@ -573,14 +573,66 @@ a named test), plus `tests/orderService.test.ts`/`tests/adversarial.test.ts`
 updated throughout for the new two-party corroboration model. 278
 total, `tsc --noEmit` clean, full production build clean.
 
+## Three follow-up fixes from a "what would you attack" pass
+
+Asked directly, honestly, what the sharpest remaining attack surface
+was after the payment and call-verification hardening passes. Three
+concrete answers, all three closed:
+
+- **The call-verification collusion gap, actually closed, not just
+  documented.** The cross-party corroboration from the previous pass
+  (`lib/callVerification.ts`) stops one dishonest party acting alone,
+  but explicitly couldn't stop two colluding accounts (or one attacker
+  controlling both a buyer and a supplier login) fabricating matching
+  fake segments together. Real fix needs a server-authoritative signal
+  neither client controls — confirmed 8x8 JaaS actually offers exactly
+  that (`developer.8x8.com/jaas/docs`'s Webhooks section:
+  `PARTICIPANT_JOINED`/`PARTICIPANT_LEFT` events, `data.id` documented
+  as "the participant's userId from the JWT payload" — the same numeric
+  userId `lib/jaasAuth.ts` already signs, no separate identity mapping
+  needed). New `lib/jaasWebhookAuth.ts` (signature scheme confirmed
+  against JaaS's own **published worked example**, reproduced
+  byte-for-byte in `tests/jaasWebhookAuth.test.ts` — unlike Yellow
+  Card's webhook side, this one is verified correct, not inferred) and
+  `app/api/webhooks/jaas/route.ts`. `lib/orderService.ts`'s new
+  `applyJaasWebhookPresence` becomes the sole source of `call_segments`
+  once `JAAS_WEBHOOK_SECRET` is set — `recordVerificationCallProgress`
+  and `setCallPresence` both become harmless no-ops for writing that
+  state in that mode, so a colluding pair genuinely can't write a fake
+  segment at all anymore, not just one the overlap math would discount.
+  Registration is manual (JaaS Console's Webhooks section), not an API
+  call, documented in `.env.local.example` and this route's own header.
+- **A full authorization audit of every route touching a table without
+  RLS**, the other structurally dangerous category named in that same
+  pass (only 11 tables have real Postgres-enforced RLS; everywhere
+  else, a missed check in the route layer is the only thing standing
+  between any signed-in user and any other user's data). Read through
+  every route by hand — admin gates, self-scoping via `auth.user.id`
+  never a client-supplied id, ownership checks before every mutation.
+  **Found nothing to fix.** An honest audit doesn't need to find
+  something to be worth doing; this one confirms the discipline holds,
+  including in the profile-viewing feature added earlier this session.
+- **Cloudinary uploads now reject SVG (and everything else that isn't
+  a raster photo format).** `app/api/uploads/sign/route.ts` signs
+  `allowed_formats: "jpg,jpeg,png,webp,heic,heif"` as part of the
+  Cloudinary signature (same signed-param pattern `folder`/`timestamp`
+  already used), `lib/uploadClient.ts` sends the matching value.
+  Cloudinary's `/image/upload` endpoint accepts SVG as a valid image
+  format by default despite it being able to carry an embedded
+  `<script>` — every profile photo, listing photo, and verification
+  document uploaded through this app now can't be one, closing that off
+  structurally rather than relying on every current and future render
+  site happening to stay `<img>`-only forever.
+
 ## Current test coverage
 
-278 tests across 24 files (`npm test`): authorization boundaries, the
+291 tests across 26 files (`npm test`): authorization boundaries, the
 order state machine, the ledger, the full order service lifecycle
 (wallet-first funding included), the live verification call's
-cross-party corroboration, every termination flow, the buyer wallet
-balance/debit/credit primitives (including the real Yellow Card top-up
-provider), the adversarial suite, Supabase-backed rate limiting, the
-real Circle and Yellow Card integrations (webhook/idempotency logic for
-all four legs now — funding, release, settlement, and wallet top-up),
-and the RLS pilot's JWT minting.
+cross-party corroboration AND its JaaS-webhook-authoritative mode, every
+termination flow, the buyer wallet balance/debit/credit primitives
+(including the real Yellow Card top-up provider), the adversarial
+suite, Supabase-backed rate limiting, the real Circle, Yellow Card, and
+JaaS webhook integrations (signature verification confirmed against a
+real published worked example for JaaS, idempotency logic for all four
+payment legs), and the RLS pilot's JWT minting.

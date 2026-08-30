@@ -31,6 +31,7 @@ import { getWalletBalance, debitWalletForOrder, creditWalletForRefund, wasOrderF
 import type { CancellationCategory, DisputeCategory, DisputeRuling, DisputeType, OrderRow, OrderStatus, UserRow } from "./types";
 import { notifyUser, notifyAdmins } from "./notifications/dispatch";
 import { computeOverlapSeconds } from "./callVerification";
+import { isJaasWebhookConfigured } from "./jaasWebhookAuth";
 
 // Buyer wallet balance (migration 0020): fundOrder() below is wallet-first
 // from this point on, re-exported here so route code
@@ -1003,6 +1004,17 @@ export async function recordVerificationCallProgress(
     throw new InvalidOrderTransitionError(order.status, "proof_submitted");
   }
 
+  // When 8x8 JaaS webhooks are configured, applyJaasWebhookPresence is
+  // the sole, authoritative source of call_segments (see its own
+  // comment for why: it's driven by JaaS's own signed events, not a
+  // client-trusted number). Accepting a client-reported segment ON TOP
+  // of that would reopen exactly the collusion gap the webhook exists
+  // to close, so this becomes a harmless read once that mode is active
+  // — still returns the current (webhook-computed) order state, so a
+  // caller mid-migration to JaaS doesn't see an error, just no further
+  // effect from its own report.
+  if (isJaasWebhookConfigured()) return order;
+
   // A single reported segment capped at 2 hours, generous for a real
   // call, not so unbounded that one malformed report could claim an
   // implausible segment length even before the cross-party overlap step
@@ -1040,6 +1052,46 @@ export async function recordVerificationCallProgress(
   return fetchOrder(supabase, orderId);
 }
 
+/** Shared by setCallPresence below and the JaaS webhook path
+ * (app/api/webhooks/jaas/route.ts): a fresh join (wasAlreadyActive
+ * false) pages the OTHER party with a critical, quiet-hours-bypassing
+ * "incoming call" notification, see migration 0012 and
+ * OrderDetailsModal.tsx for the receiving end. Extracted once so both
+ * sources of presence trigger the identical notification, not two
+ * copies that could drift. */
+function notifyCounterpartyCallStarted(supabase: SupabaseClient, order: OrderRow, joinedAsBuyer: boolean): void {
+  if (joinedAsBuyer) {
+    getSupplierUserId(supabase, order.supplier_id).then((supplierUserId) => {
+      if (supplierUserId == null) return;
+      void notifyUser(supabase, {
+        userId: supplierUserId,
+        category: "audit_status",
+        eventType: "verification_call_started",
+        resourceType: "order",
+        resourceId: order.id,
+        title: "Incoming verification call",
+        body: "Your buyer is on a live verification call for this order now.",
+        deepLink: `/supplier?order=${order.id}&call=1`,
+        tag: `call:${order.id}`,
+        critical: true,
+      });
+    });
+  } else {
+    void notifyUser(supabase, {
+      userId: order.buyer_id,
+      category: "audit_status",
+      eventType: "verification_call_started",
+      resourceType: "order",
+      resourceId: order.id,
+      title: "Incoming verification call",
+      body: "Your supplier is on a live verification call for this order now.",
+      deepLink: `/buyer?order=${order.id}&call=1`,
+      tag: `call:${order.id}`,
+      critical: true,
+    });
+  }
+}
+
 /** Reports "I just joined" / "I just left" the live call, immediately,
  * separate from recordVerificationCallProgress above (which only fires
  * once a segment ENDS, for the total-duration requirement). This is
@@ -1047,7 +1099,19 @@ export async function recordVerificationCallProgress(
  * needing to already be looking at the order, see migration 0012 and
  * OrderDetailsModal.tsx. A fresh join (was null, now active) also
  * notifies the other party; a heartbeat re-join (was already set)
- * doesn't page them again. */
+ * doesn't page them again.
+ *
+ * Client-reported, so it's a UX signal only (the incoming-call banner),
+ * never trusted for anything money-adjacent — when JaaS webhooks are
+ * configured (isJaasWebhookConfigured()), applyJaasWebhookPresence
+ * below is the one writing real, corroborated call_segments; this
+ * function no longer feeds verification_call_seconds AT ALL in that
+ * mode (see recordVerificationCallProgress's own early-return). Without
+ * a configured webhook, this is unchanged from before: the client-
+ * reported presence used only to gate reads is exactly what it always
+ * was, the corroborated-overlap defense recordVerificationCallProgress
+ * already provides is what actually protects verification_call_seconds
+ * in that fallback mode. */
 export async function setCallPresence(supabase: SupabaseClient, orderId: number, userId: number, active: boolean): Promise<void> {
   const order = await fetchOrder(supabase, orderId);
 
@@ -1068,6 +1132,21 @@ export async function setCallPresence(supabase: SupabaseClient, orderId: number,
     throw new InvalidOrderTransitionError(order.status, "proof_submitted");
   }
 
+  // Once JaaS webhooks are configured, applyJaasWebhookPresence owns
+  // buyer_call_active_since/supplier_call_active_since exclusively —
+  // letting this client-reported path also write it would race the
+  // authoritative webhook value: a client reporting `active:false`
+  // (honestly or not) between a real JOINED and the eventual real LEFT
+  // would clear the column early, and applyJaasWebhookPresence's own
+  // idempotency guard (activeSince already null) would then silently
+  // treat the real LEFT as already-processed, dropping that segment's
+  // credited time entirely. No-op instead: the incoming-call banner
+  // this function otherwise drives becomes purely webhook-timed in that
+  // mode (at most a couple seconds of webhook-delivery latency behind a
+  // client-reported one, arguably MORE honest UX, not less, since it
+  // now reflects a real join rather than just "the panel opened").
+  if (isJaasWebhookConfigured()) return;
+
   const column = isBuyer ? "buyer_call_active_since" : "supplier_call_active_since";
   const wasAlreadyActive = Boolean(isBuyer ? order.buyer_call_active_since : order.supplier_call_active_since);
   const { error } = await supabase
@@ -1076,47 +1155,91 @@ export async function setCallPresence(supabase: SupabaseClient, orderId: number,
     .eq("id", orderId);
   if (error) throw error;
 
-  if (active && !wasAlreadyActive) {
-    // critical: true here isn't "financially critical" like a release or
-    // refund, it's "time-sensitive the way an actual phone call is": a
-    // notification that arrives after quiet hours end is arriving after
-    // the call is long over, worthless by then. The deep link's `call=1`
-    // is what makes this feel like answering a call rather than reading
-    // about one, see BuyerDashboard.tsx/SupplierDashboard.tsx/
-    // OrderDetailsModal.tsx's autoJoinCall handling, and the service
-    // worker (worker/index.ts) renders this one with a "Join call"
-    // action button instead of the plain default notification.
-    if (isBuyer) {
-      getSupplierUserId(supabase, order.supplier_id).then((supplierUserId) => {
-        if (supplierUserId == null) return;
-        void notifyUser(supabase, {
-          userId: supplierUserId,
-          category: "audit_status",
-          eventType: "verification_call_started",
-          resourceType: "order",
-          resourceId: order.id,
-          title: "Incoming verification call",
-          body: "Your buyer is on a live verification call for this order now.",
-          deepLink: `/supplier?order=${order.id}&call=1`,
-          tag: `call:${order.id}`,
-          critical: true,
-        });
-      });
-    } else {
-      void notifyUser(supabase, {
-        userId: order.buyer_id,
-        category: "audit_status",
-        eventType: "verification_call_started",
-        resourceType: "order",
-        resourceId: order.id,
-        title: "Incoming verification call",
-        body: "Your supplier is on a live verification call for this order now.",
-        deepLink: `/buyer?order=${order.id}&call=1`,
-        tag: `call:${order.id}`,
-        critical: true,
-      });
-    }
+  if (active && !wasAlreadyActive) notifyCounterpartyCallStarted(supabase, order, isBuyer);
+}
+
+/** The real fix for the one gap the corroboration defense above
+ * explicitly documents as unclosed: two COLLUDING accounts (or one
+ * attacker controlling both a buyer and a supplier login) can still
+ * fabricate matching client-reported segments with no real call ever
+ * happening, since recordVerificationCallProgress only ever had client
+ * self-reports to corroborate against each other.
+ *
+ * This is called from app/api/webhooks/jaas/route.ts, itself driven by
+ * 8x8 JaaS's own signed PARTICIPANT_JOINED/PARTICIPANT_LEFT webhook
+ * events (confirmed against developer.8x8.com/jaas/docs/webhooks-events
+ * and webhooks-payload, `data.id` is documented as "the participant's
+ * userId from the JWT payload" — exactly the numeric userId
+ * lib/jaasAuth.ts already signs into that JWT, so no separate identity
+ * mapping is needed). A colluding pair can still fake being IN a real
+ * call together, but they can no longer fake HAVING one without
+ * actually connecting to 8x8's own infrastructure and having JaaS
+ * itself report it — that's a materially higher bar than forging an
+ * HTTP request to this app's own API.
+ *
+ * Reuses buyer_call_active_since/supplier_call_active_since as the
+ * "currently open segment's start time" (the same column
+ * setCallPresence already uses for the UX presence signal — when a real
+ * webhook drives this, that signal becomes genuinely authoritative
+ * too, not just a UX nicety), so `joined` writes it and `left` reads it
+ * back, converts it into a real call_segments row, and recomputes
+ * verification_call_seconds via the exact same computeOverlapSeconds
+ * recordVerificationCallProgress uses — one corroboration engine, two
+ * possible sources of truth feeding it. Naturally idempotent against a
+ * webhook retry: a `left` event finding the column already null (this
+ * exact left already processed once) is a no-op, not a double-counted
+ * segment. */
+export async function applyJaasWebhookPresence(
+  supabase: SupabaseClient,
+  orderId: number,
+  party: "buyer" | "supplier",
+  joined: boolean,
+  atIso: string
+): Promise<void> {
+  const order = await fetchOrder(supabase, orderId);
+  const column = party === "buyer" ? "buyer_call_active_since" : "supplier_call_active_since";
+  const activeSince = party === "buyer" ? order.buyer_call_active_since : order.supplier_call_active_since;
+
+  if (joined) {
+    const wasAlreadyActive = Boolean(activeSince);
+    const { error } = await supabase.from("orders").update({ [column]: atIso }).eq("id", orderId);
+    if (error) throw error;
+    if (!wasAlreadyActive) notifyCounterpartyCallStarted(supabase, order, party === "buyer");
+    return;
   }
+
+  // A LEFT with nothing open (already processed, or this order never
+  // saw a JOINED at all e.g. a webhook delivered out of order) — no
+  // segment to close, exactly the idempotency guard described above.
+  if (!activeSince) return;
+
+  const { error: insertError } = await supabase.from("call_segments").insert({
+    order_id: orderId,
+    party,
+    started_at: activeSince,
+    ended_at: atIso,
+  });
+  if (insertError) throw insertError;
+
+  const { data: segments, error: fetchError } = await supabase
+    .from("call_segments")
+    .select("party, started_at, ended_at")
+    .eq("order_id", orderId);
+  if (fetchError) throw fetchError;
+
+  const toInterval = (row: { started_at: string; ended_at: string }) => ({
+    startedAt: new Date(row.started_at).getTime(),
+    endedAt: new Date(row.ended_at).getTime(),
+  });
+  const buyerIntervals = (segments ?? []).filter((s) => s.party === "buyer").map(toInterval);
+  const supplierIntervals = (segments ?? []).filter((s) => s.party === "supplier").map(toInterval);
+  const corroboratedSeconds = computeOverlapSeconds(buyerIntervals, supplierIntervals);
+
+  const { error: updateError } = await supabase
+    .from("orders")
+    .update({ verification_call_seconds: corroboratedSeconds, [column]: null })
+    .eq("id", orderId);
+  if (updateError) throw updateError;
 }
 
 // ============================================================================

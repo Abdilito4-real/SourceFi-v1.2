@@ -21,6 +21,20 @@ function isAllowedFolder(value: unknown): value is AllowedFolder {
   return typeof value === "string" && (ALLOWED_FOLDERS as readonly string[]).includes(value);
 }
 
+// Raster photo formats only — no `svg`. The `/image/upload` endpoint
+// this signature is scoped to already rejects non-image files, but SVG
+// genuinely IS a valid image format to Cloudinary and, unlike every
+// other format here, can carry an embedded <script>. Every one of these
+// URLs ends up in this app's own trust surfaces (a supplier's profile
+// photo, a buyer's verification-call proof photos, an admin's
+// verification-document review) — restricting to formats that can't
+// carry executable content closes that off entirely, rather than
+// relying on "everywhere this app happens to render it today uses a
+// script-inert <img> tag" staying true forever. Signed here (like
+// `folder`/`timestamp`), lib/uploadClient.ts must send the identical
+// value or Cloudinary rejects the signature mismatch.
+const ALLOWED_IMAGE_FORMATS = "jpg,jpeg,png,webp,heic,heif";
+
 export async function POST(request: Request) {
   const auth = await requireSession();
   if (!auth) return Response.json({ error: "Not authenticated." }, { status: 401 });
@@ -41,11 +55,12 @@ export async function POST(request: Request) {
   cloudinary.config({ cloud_name: cloudName, api_key: apiKey, api_secret: apiSecret });
 
   const timestamp = Math.floor(Date.now() / 1000);
-  // Only these two params are part of what gets signed — the client
-  // can't add extra params (e.g. its own `folder`) to the actual upload
+  // Only these three params are part of what gets signed — the client
+  // can't add extra params (e.g. its own `folder`, or drop
+  // `allowed_formats` to sneak an SVG through) to the actual upload
   // request that weren't included here, Cloudinary rejects a mismatch
   // between the signed params and what's actually sent.
-  const signature = cloudinary.utils.api_sign_request({ folder, timestamp }, apiSecret);
+  const signature = cloudinary.utils.api_sign_request({ folder, timestamp, allowed_formats: ALLOWED_IMAGE_FORMATS }, apiSecret);
 
-  return Response.json({ signature, timestamp, apiKey, cloudName, folder });
+  return Response.json({ signature, timestamp, apiKey, cloudName, folder, allowedFormats: ALLOWED_IMAGE_FORMATS });
 }

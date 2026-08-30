@@ -85,6 +85,23 @@ withdrawal: Yellow Card's refund API can't give back an unspent
 who tops up more than they spend has no way to get the difference back
 today. See [docs/payment-integration.md](docs/payment-integration.md).
 
+**The live verification call's duration is corroborated between both
+parties by default, but only truly tamper-proof once JaaS webhooks are
+configured.** `lib/callVerification.ts` requires the buyer's and
+supplier's independently reported segments to actually overlap before
+any time counts (`lib/orderService.ts`'s `recordVerificationCallProgress`)
+— a single dishonest party can no longer fake the whole requirement
+alone. What that alone can't stop: two **colluding** accounts (or one
+attacker controlling both logins) fabricating matching fake segments
+with no real call ever happening. Closing that needs a server-
+authoritative signal instead of trusting either client — set
+`JAAS_WEBHOOK_SECRET` (see `.env.local.example`) once 8x8 JaaS is
+configured, and `app/api/webhooks/jaas/route.ts` takes over as the
+sole source of truth, driven by JaaS's own signed `PARTICIPANT_JOINED`/
+`PARTICIPANT_LEFT` events instead of client self-reports. Registration
+is a manual step in the JaaS Console (Webhooks section), not an API
+call — see that route's own header comment.
+
 **On-chain rating submission always returns `"submitted"`, never
 `"confirmed"`.** The contract/chain for this isn't decided yet.
 
@@ -135,9 +152,10 @@ if it's closed the gap upstream.
 
 - **Jitsi** for the live buyer/supplier verification call
 - **web-push** + Resend (email fallback) for notifications
-- **Vitest**, 261 tests across auth, the state machine, the ledger,
-  order lifecycle, termination flows, reconciliation sweeps, and an
-  adversarial attack suite
+- **Vitest**, 291 tests across auth, the state machine, the ledger,
+  order lifecycle, termination flows, reconciliation sweeps, the live
+  verification call's cross-party corroboration, and an adversarial
+  attack suite
 
 ## Auth & roles
 
