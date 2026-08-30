@@ -62,7 +62,7 @@ function isTrustedOrigin(request: NextRequest): boolean {
 // stronger authentication than Origin-checking could ever provide for a
 // non-browser caller. The cron route (app/api/cron/*) needs no such
 // exclusion, it's GET-only, outside UNSAFE_METHODS entirely.
-const CSRF_EXEMPT_PATHS = new Set(["/api/webhooks/circle", "/api/webhooks/yellowcard"]);
+const CSRF_EXEMPT_PATHS = new Set(["/api/webhooks/circle", "/api/webhooks/yellowcard", "/api/webhooks/jaas"]);
 
 export function middleware(request: NextRequest) {
   if (
