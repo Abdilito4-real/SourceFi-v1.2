@@ -17,8 +17,8 @@ const arcTestnet = {
     symbol: "USDC",
     decimals: 18, // Native gas uses 18 decimals per official docs.arc.io
   },
-  rpcUrls: {
-    default: { http: ["https://arc-testnet.drpc.org", "https://rpc.testnet.arc.network"] },
+    rpcUrls: {
+    default: { http: ["https://arc-testnet.g.alchemy.com/v2/alch_pC4WV8aQ0ewpqxtA9mnR1"] },
   },
   blockExplorers: {
     default: { name: "ArcScan", url: "https://testnet.arcscan.app" },

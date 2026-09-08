@@ -109,7 +109,7 @@ export function middleware(request: NextRequest) {
     // call. Scheme-only sources (no host) are the standard, documented
     // way to allow WebRTC media relay under CSP, since a call provider's
     // TURN fleet is typically many regional hosts, not one fixed domain.
-    "connect-src 'self' https://auth.privy.io wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org https://*.rpc.privy.systems https://explorer-api.walletconnect.com https://rpc.testnet.arc.network wss://meet.jit.si https://meet.jit.si wss://8x8.vc https://8x8.vc wss://*.8x8.vc https://*.8x8.vc stun: turn: turns:",
+    "connect-src 'self' https://auth.privy.io wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org https://*.rpc.privy.systems https://explorer-api.walletconnect.com https://rpc.testnet.arc.network https://arc-testnet.g.alchemy.com wss://meet.jit.si https://meet.jit.si wss://8x8.vc https://8x8.vc wss://*.8x8.vc https://*.8x8.vc stun: turn: turns:",
     "worker-src 'self'",
     "manifest-src 'self'",
     "upgrade-insecure-requests",
