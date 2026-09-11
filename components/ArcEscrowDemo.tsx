@@ -120,7 +120,7 @@ export default function ArcEscrowDemo() {
         abi: USDC_ERC20_ABI,
         functionName: "approve",
         args: [SOURCEFI_ESCROW_ADDRESS, amountBaseUnits],
-        gas: 100000n,
+        gas: BigInt(100000),
       });
       await publicClient.waitForTransactionReceipt({ hash: approveHash });
 
@@ -130,7 +130,7 @@ export default function ArcEscrowDemo() {
         abi: SOURCEFI_ESCROW_ABI,
         functionName: "fundOrder",
         args: [onChainId, supplierAddress as `0x${string}`, amountBaseUnits],
-        gas: 300000n,
+          gas: BigInt(300000),
       });
       await publicClient.waitForTransactionReceipt({ hash: fundHash });
       setStatus(`Funded! Tx: ${fundHash}`);
@@ -158,7 +158,7 @@ export default function ArcEscrowDemo() {
         abi: SOURCEFI_ESCROW_ABI,
         functionName: "confirmDelivery",
         args: [onChainId],
-        gas: 150000n,
+      gas: BigInt(150000),
       });
       await publicClient.waitForTransactionReceipt({ hash });
       setStatus(`Delivery confirmed, funds released! Tx: ${hash}`);
@@ -181,7 +181,7 @@ export default function ArcEscrowDemo() {
         abi: SOURCEFI_ESCROW_ABI,
         functionName: "raiseDispute",
         args: [onChainId, "ipfs://demo-evidence"],
-        gas: 150000n,
+                gas: BigInt(150000),
       });
       await publicClient.waitForTransactionReceipt({ hash });
       setStatus(`Dispute raised! Tx: ${hash}`);
