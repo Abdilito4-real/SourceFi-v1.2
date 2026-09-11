@@ -7,12 +7,12 @@
 // 0xd3a97B44C0D6DD006C29f71180938a5A4EE9B13D (see
 // github.com/Ubaidreak/sourcefi-arc-escrow for the contract + tests).
 // Uses Privy's embedded wallet (already wired app-wide via
-// components/Web3Providers.tsx) to sign transactions directly — the SAME
+// components/Web3Providers.tsx) to sign transactions directly -- the SAME
 // wallet/auth system the rest of this app already uses, just calling a
 // new contract.
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
-import { createWalletClient, createPublicClient, custom, http, keccak256, toHex, parseUnits } from "viem";
+import { createWalletClient, createPublicClient, custom, keccak256, toHex, parseUnits } from "viem";
 import {
   SOURCEFI_ESCROW_ADDRESS,
   SOURCEFI_ESCROW_ABI,
@@ -25,7 +25,7 @@ const arcTestnetChain = {
   id: 5042002,
   name: "Arc Testnet",
   nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
- rpcUrls: { default: { http: ["https://arc-testnet.g.alchemy.com/v2/alch_pC4WV8aQ0ewpqxtA9mnR1"] } },
+  rpcUrls: { default: { http: ["https://arc-testnet.g.alchemy.com/v2/alch_pC4WV8aQ0ewpqxtA9mnR1"] } },
 } as const;
 
 function toOnChainOrderId(demoOrderId: string): `0x${string}` {
@@ -33,13 +33,17 @@ function toOnChainOrderId(demoOrderId: string): `0x${string}` {
 }
 
 export default function ArcEscrowDemo() {
-  const { authenticated, login } = usePrivy();
+  const { authenticated, login, logout } = usePrivy();
   const { wallets } = useWallets();
   const [orderId, setOrderId] = useState("demo-1");
   const [supplierAddress, setSupplierAddress] = useState("");
   const [amount, setAmount] = useState("10");
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  const [usdcBalance, setUsdcBalance] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const walletAddress = wallets[0]?.address;
 
   async function getClients() {
     const wallet = wallets[0];
@@ -50,26 +54,73 @@ export default function ArcEscrowDemo() {
       transport: custom(provider),
       account: wallet.address as `0x${string}`,
     });
-   const publicClient = createPublicClient({
-  chain: arcTestnetChain,
-  transport: custom(provider),
-});
+    const publicClient = createPublicClient({
+      chain: arcTestnetChain,
+      transport: custom(provider),
+    });
     return { walletClient, publicClient, address: wallet.address as `0x${string}` };
   }
 
+  async function refreshBalance() {
+    if (!wallets[0]) return;
+    try {
+      const { publicClient, address } = await getClients();
+      const balance = await publicClient.readContract({
+        address: ARC_USDC_ADDRESS,
+        abi: USDC_ERC20_ABI,
+        functionName: "balanceOf",
+        args: [address],
+      });
+      setUsdcBalance((Number(balance) / 10 ** USDC_DECIMALS).toFixed(4));
+    } catch (err) {
+      console.error("Balance fetch failed:", err);
+      setUsdcBalance(null);
+    }
+  }
+
+  function copyAddress() {
+    if (!walletAddress) return;
+    navigator.clipboard.writeText(walletAddress);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  useEffect(() => {
+    if (authenticated && wallets[0]) {
+      refreshBalance();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authenticated, wallets.length]);
+
   async function handleFund() {
     setBusy(true);
-    setStatus("Approving USDC...");
+    setStatus("Checking balance...");
     try {
       const { walletClient, publicClient, address } = await getClients();
       const onChainId = toOnChainOrderId(orderId);
       const amountBaseUnits = parseUnits(amount, USDC_DECIMALS);
 
+      const currentBalance = await publicClient.readContract({
+        address: ARC_USDC_ADDRESS,
+        abi: USDC_ERC20_ABI,
+        functionName: "balanceOf",
+        args: [address],
+      });
+
+      if (currentBalance < amountBaseUnits) {
+        const have = (Number(currentBalance) / 10 ** USDC_DECIMALS).toFixed(4);
+        setStatus(`Insufficient balance: you have ${have} USDC but tried to fund ${amount} USDC. Get testnet USDC from faucet.circle.com.`);
+        setBusy(false);
+        return;
+      }
+
+      setStatus("Approving USDC...");
       const approveHash = await walletClient.writeContract({
         address: ARC_USDC_ADDRESS,
         abi: USDC_ERC20_ABI,
         functionName: "approve",
         args: [SOURCEFI_ESCROW_ADDRESS, amountBaseUnits],
+        gas: 100000n,
       });
       await publicClient.waitForTransactionReceipt({ hash: approveHash });
 
@@ -79,11 +130,18 @@ export default function ArcEscrowDemo() {
         abi: SOURCEFI_ESCROW_ABI,
         functionName: "fundOrder",
         args: [onChainId, supplierAddress as `0x${string}`, amountBaseUnits],
+        gas: 300000n,
       });
       await publicClient.waitForTransactionReceipt({ hash: fundHash });
       setStatus(`Funded! Tx: ${fundHash}`);
+      refreshBalance();
     } catch (e) {
-      setStatus(`Error: ${(e as Error).message}`);
+      const message = (e as Error).message;
+      if (message.includes("intrinsic gas too low") || message.includes("insufficient funds")) {
+        setStatus("Not enough native USDC for gas. Get testnet USDC from faucet.circle.com for this wallet.");
+      } else {
+        setStatus(`Error: ${message}`);
+      }
     } finally {
       setBusy(false);
     }
@@ -100,9 +158,11 @@ export default function ArcEscrowDemo() {
         abi: SOURCEFI_ESCROW_ABI,
         functionName: "confirmDelivery",
         args: [onChainId],
+        gas: 150000n,
       });
       await publicClient.waitForTransactionReceipt({ hash });
       setStatus(`Delivery confirmed, funds released! Tx: ${hash}`);
+      refreshBalance();
     } catch (e) {
       setStatus(`Error: ${(e as Error).message}`);
     } finally {
@@ -121,6 +181,7 @@ export default function ArcEscrowDemo() {
         abi: SOURCEFI_ESCROW_ABI,
         functionName: "raiseDispute",
         args: [onChainId, "ipfs://demo-evidence"],
+        gas: 150000n,
       });
       await publicClient.waitForTransactionReceipt({ hash });
       setStatus(`Dispute raised! Tx: ${hash}`);
@@ -144,6 +205,30 @@ export default function ArcEscrowDemo() {
   return (
     <div className="max-w-md space-y-4 rounded-xl border p-6">
       <h2 className="text-lg font-semibold">Arc Testnet Escrow Demo</h2>
+
+      <div className="rounded-lg bg-gray-50 p-3 text-sm">
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500">Your wallet:</span>
+          <div className="flex items-center gap-2">
+            <button onClick={copyAddress} className="font-mono text-xs text-blue-600 hover:underline">
+              {walletAddress?.slice(0, 6)}...{walletAddress?.slice(-4)} {copied ? "copied!" : "(copy)"}
+            </button>
+            <button onClick={logout} className="text-xs text-red-500 hover:underline">
+              disconnect
+            </button>
+          </div>
+        </div>
+        <div className="mt-1 flex items-center justify-between">
+          <span className="text-gray-500">USDC balance:</span>
+          <span className="font-mono">
+            {usdcBalance ?? "--"}{" "}
+            <button onClick={refreshBalance} className="ml-1 text-xs text-blue-600 hover:underline">
+              refresh
+            </button>
+          </span>
+        </div>
+      </div>
+
       <div className="space-y-2">
         <label className="block text-sm">Order ID</label>
         <input value={orderId} onChange={(e) => setOrderId(e.target.value)} className="w-full rounded border p-2" />
