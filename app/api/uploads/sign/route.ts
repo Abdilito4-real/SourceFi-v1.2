@@ -14,7 +14,7 @@ import { requireSession } from "../../../../lib/authz";
 // folder string — that's how someone could smuggle an unrelated upload
 // into a folder this app doesn't expect (or worse, an admin-only one, if
 // one is ever added later).
-const ALLOWED_FOLDERS = ["profile_pictures", "material_listings", "verification_documents"] as const;
+const ALLOWED_FOLDERS = ["profile_pictures", "material_listings", "verification_documents", "delivery_proofs"] as const;
 type AllowedFolder = (typeof ALLOWED_FOLDERS)[number];
 
 function isAllowedFolder(value: unknown): value is AllowedFolder {
