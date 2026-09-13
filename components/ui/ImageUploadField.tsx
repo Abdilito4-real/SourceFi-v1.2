@@ -33,9 +33,12 @@ export interface ImageUploadFieldProps {
    * this component's OWN upload failures render their own ErrorText
    * regardless of this. */
   invalid?: boolean;
+  /** When true, only the camera button is shown (no "Upload photo" gallery
+   * link). Use for delivery proofs where camera capture is mandatory. */
+  cameraOnly?: boolean;
 }
 
-export default function ImageUploadField({ label, folder, value, onChange, helperText, required, invalid }: ImageUploadFieldProps) {
+export default function ImageUploadField({ label, folder, value, onChange, helperText, required, invalid, cameraOnly }: ImageUploadFieldProps) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -109,15 +112,17 @@ export default function ImageUploadField({ label, folder, value, onChange, helpe
             >
               {uploading ? <Loader2 size={22} className="spin-icon" aria-hidden="true" /> : <Camera size={22} aria-hidden="true" />}
             </label>
-            <label
-              htmlFor={galleryInputId}
-              aria-disabled={uploading}
-              className={`text-xs font-medium text-accent-text underline-offset-2 hover:underline ${
-                uploading ? "pointer-events-none opacity-60" : "cursor-pointer"
-              }`}
-            >
-              Upload photo
-            </label>
+            {cameraOnly ? null : (
+              <label
+                htmlFor={galleryInputId}
+                aria-disabled={uploading}
+                className={`text-xs font-medium text-accent-text underline-offset-2 hover:underline ${
+                  uploading ? "pointer-events-none opacity-60" : "cursor-pointer"
+                }`}
+              >
+                Upload photo
+              </label>
+            )}
           </>
         )}
       </div>
@@ -134,19 +139,17 @@ export default function ImageUploadField({ label, folder, value, onChange, helpe
         onChange={(e) => handleFile(e.target.files?.[0])}
         className="sr-only"
       />
-      {/* Gallery input: deliberately no `capture` attribute, so this
-          opens the normal file/photo picker instead of forcing the
-          camera — the "Upload photo" text link's distinct behavior from
-          the camera button above. */}
-      <input
-        ref={galleryInputRef}
-        id={galleryInputId}
-        type="file"
-        accept="image/*"
-        disabled={uploading}
-        onChange={(e) => handleFile(e.target.files?.[0])}
-        className="sr-only"
-      />
+      {cameraOnly ? null : (
+        <input
+          ref={galleryInputRef}
+          id={galleryInputId}
+          type="file"
+          accept="image/*"
+          disabled={uploading}
+          onChange={(e) => handleFile(e.target.files?.[0])}
+          className="sr-only"
+        />
+      )}
 
       <HelperText>{helperText}</HelperText>
       <ErrorText>{error}</ErrorText>

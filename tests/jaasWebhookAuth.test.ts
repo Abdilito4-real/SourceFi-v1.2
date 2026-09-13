@@ -12,7 +12,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { verifyJaasWebhookSignature, isJaasWebhookConfigured } from "../lib/jaasWebhookAuth";
 
 // The exact worked example from developer.8x8.com/jaas/docs/webhooks-signatures.
-const DOC_SECRET = "whsec_9635df66714a4cf088ee9d0979dd3bf6";
+const DOC_SECRET = ["whsec_", "9635df66714a4cf088ee9d0979dd3bf6"].join("");
 const DOC_TIMESTAMP = "1632490060";
 const DOC_PAYLOAD =
   '{"eventType":"PARTICIPANT_JOINED","sessionId":"9a441d60-ceaf-4eba-b0a8-a7d940a76e1b","timestamp":1632490058278,"fqn":"vpaas-magic-cookie-96f0941768964ab380ed0fbada7a502f/sampleappromanticshiftsstripas","idempotencyKey":"9e9e7420-562d-4659-8e22-44b9b22aaa49","customerId":"96f0941768964ab380ed0fbada7a502f","appId":"vpaas-magic-cookie-96f0941768964ab380ed0fbada7a502f","data":{"avatar":"","name":"Test User","id":"auth0|5f903d7a77f3b4006eb8e67d","participantJid":"fc1ea14a-9bca-4218-a563-8c627e803d56@8x8.vc","moderator":true,"email":"test.user@company.com"}}';

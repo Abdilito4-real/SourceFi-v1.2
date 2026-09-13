@@ -21,6 +21,7 @@ import Button from "./ui/Button";
 import Badge from "./ui/Badge";
 import StatusBadge from "./ui/StatusBadge";
 import { Label, Input, Textarea } from "./ui/Field";
+import ImageUploadField from "./ui/ImageUploadField";
 import Select from "./ui/Select";
 import Skeleton from "./ui/Skeleton";
 import ConfirmDialog from "./ui/ConfirmDialog";
@@ -238,7 +239,6 @@ export default function OrderDetailsModal({
   const prevCounterpartyInCallRef = useRef(false);
   const online = useNetworkStatus();
   const [proofPhotoUrl, setProofPhotoUrl] = useState("");
-  const [proofReceiptUrl, setProofReceiptUrl] = useState("");
   const [proofNotes, setProofNotes] = useState("");
   const [ratingScore, setRatingScore] = useState(5);
   const [ratingComment, setRatingComment] = useState("");
@@ -1048,25 +1048,27 @@ export default function OrderDetailsModal({
       {isSupplier && (order.status === "funded" || order.status === "fulfilling") && (
         <div className="mt-5 flex flex-col gap-3 rounded-xl border border-border bg-surface-sunken p-4">
           <div className="text-xs font-semibold uppercase tracking-wide text-accent-text">Submit delivery proof</div>
-          <div>
-            <Label htmlFor="proof-photo">Photo URL</Label>
-            <Input id="proof-photo" placeholder="https://…" value={proofPhotoUrl} onChange={(e) => setProofPhotoUrl(e.target.value)} />
-          </div>
-          <div>
-            <Label htmlFor="proof-receipt">Receipt URL (optional)</Label>
-            <Input id="proof-receipt" placeholder="https://…" value={proofReceiptUrl} onChange={(e) => setProofReceiptUrl(e.target.value)} />
-          </div>
+          <ImageUploadField
+            label="Delivery photo"
+            folder="delivery_proofs"
+            required
+            invalid={!proofPhotoUrl.trim()}
+            value={proofPhotoUrl || null}
+            onChange={(url) => setProofPhotoUrl(url || "")}
+            helperText="Take a photo of the delivered materials — required."
+            cameraOnly
+          />
           <div>
             <Label htmlFor="proof-notes">Notes</Label>
             <Textarea id="proof-notes" value={proofNotes} onChange={(e) => setProofNotes(e.target.value)} placeholder="Delivered to site, spoke with foreman…" />
           </div>
           <Button
             loading={acting}
-            disabled={!proofPhotoUrl.trim() && !proofReceiptUrl.trim()}
+            disabled={!proofPhotoUrl.trim()}
             onClick={() =>
               runAction(
                 "/proof",
-                { photoUrls: proofPhotoUrl.trim() ? [proofPhotoUrl.trim()] : [], receiptUrl: proofReceiptUrl.trim() || null, notes: proofNotes.trim() || null },
+                { photoUrls: proofPhotoUrl.trim() ? [proofPhotoUrl.trim()] : [], notes: proofNotes.trim() || null },
                 "Delivery proof submitted."
               )
             }
