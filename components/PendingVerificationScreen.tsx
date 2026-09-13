@@ -16,9 +16,11 @@
 // already role='supplier' and keeps full dashboard access (existing
 // orders still need managing); only a first-time, not-yet-a-supplier-at-all
 // applicant sees this screen.
+import { useState } from "react";
 import Image from "next/image";
 import { Clock, LogOut } from "lucide-react";
 import type { SupplierVerificationApplicationRow } from "../lib/types";
+import PushSoftPrompt from "./PushSoftPrompt";
 
 export interface PendingVerificationScreenProps {
   application: SupplierVerificationApplicationRow;
@@ -27,6 +29,18 @@ export interface PendingVerificationScreenProps {
 }
 
 export default function PendingVerificationScreen({ application, onSignOut, signingOut }: PendingVerificationScreenProps) {
+  // This screen IS the first thing a first-time supplier applicant sees
+  // right after signing up, so it's the "right after sign up" moment for
+  // this path the same way RootGate's ?welcome=1 marker is for a buyer's
+  // — no navigation involved here to plumb a marker through, this
+  // component only ever renders on the genuine first landing (a return
+  // visit while still pending re-renders the SAME mount, not a fresh
+  // one, and PushSoftPrompt's own eligibility check — permission still
+  // "default", never soft-declined — means this is silently a no-op
+  // once they've decided one way or the other regardless). Tied directly
+  // to the one thing this screen already promises: "the moment it's
+  // approved."
+  const [pushPromptOpen, setPushPromptOpen] = useState(true);
   return (
     <div className="flex min-h-screen items-center justify-center bg-bg p-5">
       <div className="w-full max-w-[460px] rounded-2xl border border-border bg-surface-elevated p-9 text-center shadow-lg">
@@ -62,6 +76,11 @@ export default function PendingVerificationScreen({ application, onSignOut, sign
           <LogOut size={13} /> {signingOut ? "Signing out…" : "Sign out"}
         </button>
       </div>
+      <PushSoftPrompt
+        open={pushPromptOpen}
+        onClose={() => setPushPromptOpen(false)}
+        reason="Your application is under review."
+      />
     </div>
   );
 }

@@ -23,6 +23,13 @@
 // provider integration does NOT get to assume that, see
 // lib/circleEscrowProvider.ts's own webhook+reconciliation notes for how
 // Circle's release leg now handles this for real.
+//
+// Also composes the buyer wallet's top-up leg (WalletTopupProvider,
+// lib/walletService.ts) off the SAME Yellow Card credentials as the
+// funding/refund PaymentBoundary legs — a different interface (a top-up
+// isn't order-scoped), same env vars, same "upgrades the moment
+// credentials are set" pattern, so it lives here too rather than a
+// second, parallel composition file.
 import "server-only";
 import { getSupabaseServerClient } from "./supabaseServer";
 import { handlePaymentStatusEvent } from "./orderService";
@@ -36,7 +43,9 @@ import {
   type RatingSubmissionResult,
 } from "./paymentBoundary";
 import { CircleEscrowProvider } from "./circleEscrowProvider";
-import { YellowCardProvider, type YellowCardEnvironment } from "./yellowCardProvider";
+import { YellowCardProvider, type YellowCardEnvironment, type YellowCardConfig } from "./yellowCardProvider";
+import { YellowCardWalletTopupProvider } from "./yellowCardWalletTopupProvider";
+import { StubWalletTopupProvider, confirmWalletTopup, type WalletTopupProvider } from "./walletService";
 
 /** Routes each of the 4 PaymentBoundary methods independently to
  * whichever real provider is configured for THAT leg, falling back to
@@ -80,6 +89,13 @@ let circleSingleton: CircleEscrowProvider | null = null;
 // verifyWebhookSignature, registerWebhook) that aren't part of the
 // generic PaymentBoundary interface.
 let yellowCardSingleton: YellowCardProvider | null = null;
+// The wallet top-up leg (WalletTopupProvider), resolved (real or stub)
+// the same way boundarySingleton is for PaymentBoundary.
+let walletTopupBoundary: WalletTopupProvider | null = null;
+// Concrete instance, same reasoning as yellowCardSingleton above:
+// app/api/webhooks/yellowcard/route.ts needs checkAndReportTopupStatus,
+// which isn't part of the generic WalletTopupProvider interface.
+let yellowCardWalletTopupSingleton: YellowCardWalletTopupProvider | null = null;
 
 function buildOnStatusUpdate() {
   return async (event: PaymentStatusEvent) => {
@@ -100,6 +116,23 @@ function buildOnStatusUpdate() {
   };
 }
 
+// StubWalletTopupProvider's own confirmation path (a real one goes
+// through app/api/webhooks/yellowcard/route.ts instead, never this).
+// Mirrors buildOnStatusUpdate's exact shape: a fresh
+// getSupabaseServerClient() per call, log-and-swallow rather than
+// throw, same "don't let a background confirmation crash the process"
+// posture.
+function buildOnTopupConfirmed() {
+  return async (userId: number, amountMinor: number, reference: string) => {
+    try {
+      const supabase = getSupabaseServerClient();
+      await confirmWalletTopup(supabase, userId, amountMinor, reference);
+    } catch (err) {
+      console.error("Wallet top-up confirmation handling failed:", { userId, amountMinor, reference }, err);
+    }
+  };
+}
+
 function initSingletons(): void {
   if (boundarySingleton) return;
 
@@ -107,31 +140,62 @@ function initSingletons(): void {
   const supabase = getSupabaseServerClient();
   const stub = new StubPaymentProvider(onStatusUpdate);
 
+  // Built BEFORE Circle now: real escrow release needs this too (see
+  // below) — the settlement leg's deposit address, which decides WHERE
+  // the release's USDC actually goes, comes from Yellow Card's Send
+  // API, not from the supplier's own wallet anymore.
+  const yellowCardApiKey = process.env.YELLOW_CARD_API_KEY;
+  const yellowCardSecretKey = process.env.YELLOW_CARD_SECRET_KEY;
+  // Validated, not just cast: an unrecognized value (a typo like "Prod"
+  // or "production ") used to silently become `undefined` when indexed
+  // into yellowCardProvider.ts's API_HOSTS map, producing a confusing
+  // broken-fetch-URL failure deep in a request instead of a clear error
+  // right here at startup — the same "no silent guess" posture
+  // YELLOW_CARD_ESCROW_CRYPTO_NETWORK already has below.
+  const rawYellowCardEnvironment = process.env.YELLOW_CARD_ENVIRONMENT?.trim() || "sandbox";
+  if (rawYellowCardEnvironment !== "sandbox" && rawYellowCardEnvironment !== "production") {
+    throw new Error(
+      `YELLOW_CARD_ENVIRONMENT must be "sandbox" or "production", got "${rawYellowCardEnvironment}". ` +
+        `Never defaults to production — fix .env.local, see .env.local.example.`
+    );
+  }
+  const yellowCardEnvironment: YellowCardEnvironment = rawYellowCardEnvironment;
+  const yellowCardConfigured = Boolean(yellowCardApiKey && yellowCardSecretKey);
+  let yellowCardConfig: YellowCardConfig | null = null;
+  if (yellowCardConfigured) {
+    yellowCardConfig = {
+      apiKey: yellowCardApiKey!,
+      secretKey: yellowCardSecretKey!,
+      environment: yellowCardEnvironment,
+    };
+    yellowCardSingleton = new YellowCardProvider(supabase, onStatusUpdate, yellowCardConfig);
+    yellowCardWalletTopupSingleton = new YellowCardWalletTopupProvider(supabase, yellowCardConfig);
+  }
+  const fundingRefundProvider: PaymentBoundary = yellowCardSingleton ?? stub;
+  walletTopupBoundary = yellowCardWalletTopupSingleton ?? new StubWalletTopupProvider(buildOnTopupConfirmed());
+
   const circleApiKey = process.env.CIRCLE_API_KEY;
   const circleEntitySecret = process.env.CIRCLE_ENTITY_SECRET;
   const escrowWalletId = process.env.ESCROW_WALLET_ID;
   const circleConfigured = Boolean(circleApiKey && circleEntitySecret && escrowWalletId);
   if (circleConfigured) {
-    circleSingleton = new CircleEscrowProvider(supabase, onStatusUpdate, {
-      apiKey: circleApiKey!,
-      entitySecret: circleEntitySecret!,
-      escrowWalletId: escrowWalletId!,
-    });
+    // yellowCardConfig passed through even when null: a real release
+    // now genuinely needs it (the settlement send), CircleEscrowProvider
+    // itself refuses loudly at release time rather than this file
+    // silently deciding Circle "isn't real" just because Yellow Card
+    // isn't configured yet — see that file's own comment.
+    circleSingleton = new CircleEscrowProvider(
+      supabase,
+      onStatusUpdate,
+      {
+        apiKey: circleApiKey!,
+        entitySecret: circleEntitySecret!,
+        escrowWalletId: escrowWalletId!,
+      },
+      yellowCardConfig
+    );
   }
   const releaseProvider: PaymentBoundary = circleSingleton ?? stub;
-
-  const yellowCardApiKey = process.env.YELLOW_CARD_API_KEY;
-  const yellowCardSecretKey = process.env.YELLOW_CARD_SECRET_KEY;
-  const yellowCardEnvironment = (process.env.YELLOW_CARD_ENVIRONMENT || "sandbox") as YellowCardEnvironment;
-  const yellowCardConfigured = Boolean(yellowCardApiKey && yellowCardSecretKey);
-  if (yellowCardConfigured) {
-    yellowCardSingleton = new YellowCardProvider(supabase, onStatusUpdate, {
-      apiKey: yellowCardApiKey!,
-      secretKey: yellowCardSecretKey!,
-      environment: yellowCardEnvironment,
-    });
-  }
-  const fundingRefundProvider: PaymentBoundary = yellowCardSingleton ?? stub;
 
   // On-chain rating has no decided chain/contract yet (see
   // lib/paymentBoundary.ts's AUTO_REFUND_ELIGIBLE_DISPUTE_TYPES doc
@@ -161,4 +225,23 @@ export function getCircleEscrowProvider(): CircleEscrowProvider | null {
 export function getYellowCardProvider(): YellowCardProvider | null {
   initSingletons();
   return yellowCardSingleton;
+}
+
+/** The wallet top-up leg (real YellowCardWalletTopupProvider once
+ * YELLOW_CARD_API_KEY/YELLOW_CARD_SECRET_KEY are set, StubWalletTopupProvider
+ * otherwise) — app/api/wallet/topup/route.ts's one source for this,
+ * never `new StubWalletTopupProvider(...)` inline in a route. */
+export function getWalletTopupProvider(): WalletTopupProvider {
+  initSingletons();
+  return walletTopupBoundary!;
+}
+
+/** The concrete Yellow Card wallet top-up instance, or null if it isn't
+ * configured. Use this (not getWalletTopupProvider()) for
+ * checkAndReportTopupStatus, which isn't part of the generic
+ * WalletTopupProvider interface — app/api/webhooks/yellowcard/route.ts's
+ * one use for it. */
+export function getYellowCardWalletTopupProvider(): YellowCardWalletTopupProvider | null {
+  initSingletons();
+  return yellowCardWalletTopupSingleton;
 }

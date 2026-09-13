@@ -9,9 +9,10 @@
 // body doesn't carry a usable state. No network call happens in this
 // file, the SDK client constructs without one (confirmed locally), and
 // the fallback path stubs client.getTransaction directly.
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { FakeSupabase, asSupabaseClient } from "./testUtils/fakeSupabase";
-import { CircleEscrowProvider } from "../lib/circleEscrowProvider";
+import { CircleEscrowProvider, MissingYellowCardConfigError } from "../lib/circleEscrowProvider";
+import { MissingSupplierPayoutProfileError } from "../lib/yellowCardProvider";
 import type { PaymentStatusEvent } from "../lib/paymentBoundary";
 
 function makeProvider() {
@@ -19,11 +20,16 @@ function makeProvider() {
   const onStatusUpdate = vi.fn((event: PaymentStatusEvent) => {
     events.push(event);
   });
-  const provider = new CircleEscrowProvider(asSupabaseClient(new FakeSupabase()), onStatusUpdate, {
-    apiKey: "test-key",
-    entitySecret: "00".repeat(32),
-    escrowWalletId: "test-wallet",
-  });
+  const provider = new CircleEscrowProvider(
+    asSupabaseClient(new FakeSupabase()),
+    onStatusUpdate,
+    {
+      apiKey: "test-key",
+      entitySecret: "00".repeat(32),
+      escrowWalletId: "test-wallet",
+    },
+    null // this file only covers reportWebhookNotification/reportOutcome, not initiateEscrowRelease
+  );
   return { provider, events };
 }
 
@@ -99,5 +105,116 @@ describe("CircleEscrowProvider.reportWebhookNotification: falls back to a real r
     const reported = await provider.reportWebhookNotification(2, "txn-7", null);
     expect(reported).toBe(false);
     expect(fakeGetTransaction).toHaveBeenCalledWith({ id: "txn-7" });
+  });
+});
+
+const YC_CONFIG = { apiKey: "test-yc-key", secretKey: "test-yc-secret", environment: "sandbox" as const };
+
+/** initiateEscrowRelease's real network surface: the Circle SDK client
+ * (getWalletTokenBalance/createTransaction, stubbed directly by
+ * reaching past the private `client` field, same posture the fallback
+ * webhook test above already takes) and global fetch (fxRate.ts's live
+ * rate lookup AND createSettlementSend's real Yellow Card call,
+ * lib/yellowCardProvider.ts) — routed by URL so both are served from
+ * one stub. */
+function stubReleaseNetwork(provider: CircleEscrowProvider, opts: { sendId?: string; depositAddress?: string } = {}) {
+  const createTransaction = vi.fn().mockResolvedValue({ data: { id: "circle-txn-1" } });
+  const getWalletTokenBalance = vi.fn().mockResolvedValue({ data: { tokenBalances: [{ token: { symbol: "USDC", id: "usdc-token-id" }, amount: "1000000" }] } });
+  (provider as unknown as { client: { createTransaction: typeof createTransaction; getWalletTokenBalance: typeof getWalletTokenBalance } }).client = {
+    createTransaction,
+    getWalletTokenBalance,
+  } as never;
+
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("open.er-api.com")) {
+        return new Response(JSON.stringify({ rates: { NGN: 1600 } }), { status: 200 });
+      }
+      if (url.includes("/business/send")) {
+        return new Response(
+          JSON.stringify({ id: opts.sendId ?? "send-settlement-1", cryptoDepositAddress: opts.depositAddress ?? "0xYELLOWCARD_DEPOSIT" }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`Unexpected fetch() in this test: ${url} ${init?.method ?? ""}`);
+    })
+  );
+
+  return { createTransaction, getWalletTokenBalance };
+}
+
+function seedReleasableOrder(fake: FakeSupabase) {
+  fake.seed("orders", [{ id: 7, amount_minor: 500_000_00, platform_fee_minor: 20_000_00, supplier_id: 5 }]);
+  fake.seed("supplier_profiles", [{ id: 5, user_id: 20, wallet_address: "0xSUPPLIER_OWN_WALLET_SHOULD_NOT_BE_USED" }]);
+  fake.seed("supplier_payout_profiles", [
+    { user_id: 20, bank_name: "GTBank", account_number: "0123456789", account_name: "Lagos Cement Co", bank_network_id: "yc-network-1" },
+  ]);
+}
+
+describe("CircleEscrowProvider.initiateEscrowRelease: real settlement, not the supplier's own wallet", () => {
+  beforeEach(() => {
+    process.env.YELLOW_CARD_ESCROW_CRYPTO_NETWORK = "ETH";
+  });
+  afterEach(() => {
+    delete process.env.YELLOW_CARD_ESCROW_CRYPTO_NETWORK;
+  });
+
+  it("throws MissingYellowCardConfigError when constructed without Yellow Card config, never calls Circle", async () => {
+    const fake = new FakeSupabase();
+    seedReleasableOrder(fake);
+    const provider = new CircleEscrowProvider(
+      asSupabaseClient(fake),
+      vi.fn(),
+      { apiKey: "k", entitySecret: "00".repeat(32), escrowWalletId: "w" },
+      null
+    );
+    const { createTransaction } = stubReleaseNetwork(provider);
+
+    await expect(provider.initiateEscrowRelease(7)).rejects.toThrow(MissingYellowCardConfigError);
+    expect(createTransaction).not.toHaveBeenCalled();
+  });
+
+  it("throws MissingSupplierPayoutProfileError when the supplier has no payout bank details on file, never calls Circle", async () => {
+    const fake = new FakeSupabase();
+    fake.seed("orders", [{ id: 7, amount_minor: 500_000_00, platform_fee_minor: 20_000_00, supplier_id: 5 }]);
+    fake.seed("supplier_profiles", [{ id: 5, user_id: 20 }]);
+    // no supplier_payout_profiles row
+    const provider = new CircleEscrowProvider(
+      asSupabaseClient(fake),
+      vi.fn(),
+      { apiKey: "k", entitySecret: "00".repeat(32), escrowWalletId: "w" },
+      YC_CONFIG
+    );
+    const { createTransaction } = stubReleaseNetwork(provider);
+
+    await expect(provider.initiateEscrowRelease(7)).rejects.toThrow(MissingSupplierPayoutProfileError);
+    expect(createTransaction).not.toHaveBeenCalled();
+  });
+
+  it("sends the USDC to Yellow Card's returned deposit address, NOT the supplier's own wallet_address, and records the settlement payment_event", async () => {
+    const fake = new FakeSupabase();
+    seedReleasableOrder(fake);
+    const provider = new CircleEscrowProvider(
+      asSupabaseClient(fake),
+      vi.fn(),
+      { apiKey: "k", entitySecret: "00".repeat(32), escrowWalletId: "w" },
+      YC_CONFIG
+    );
+    const { createTransaction } = stubReleaseNetwork(provider, { sendId: "send-42", depositAddress: "0xREAL_DEPOSIT_ADDR" });
+
+    const result = await provider.initiateEscrowRelease(7);
+
+    expect(result.status).toBe("processing");
+    expect(createTransaction).toHaveBeenCalledTimes(1);
+    const call = createTransaction.mock.calls[0]![0] as { destinationAddress: string };
+    expect(call.destinationAddress).toBe("0xREAL_DEPOSIT_ADDR");
+    expect(call.destinationAddress).not.toBe("0xSUPPLIER_OWN_WALLET_SHOULD_NOT_BE_USED");
+
+    const settlementEvent = fake.getRows("payment_events").find((e) => e.leg === "settlement");
+    expect(settlementEvent).toBeTruthy();
+    expect(settlementEvent!.provider_reference).toBe("send-42");
+    expect(settlementEvent!.order_id).toBe(7);
   });
 });

@@ -11,7 +11,7 @@
 // anyway.
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { requireSession } from "../../../../lib/authz";
-import { computeSupplierTier, getCompletedOrderCounts, getSupplierRatingAggregates } from "../../../../lib/supplierTrust";
+import { computeSupplierTier, getCompletedOrderCounts, getSupplierProfilePictures, getSupplierRatingAggregates } from "../../../../lib/supplierTrust";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireSession();
@@ -25,7 +25,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 
   const { data: profile } = await supabase
     .from("supplier_profiles")
-    .select("id, business_name, business_location, what_they_sell, verification_status, verified_at, verification_expires_at, orders_since_verification")
+    .select("id, user_id, business_name, business_location, what_they_sell, verification_status, verified_at, verification_expires_at, orders_since_verification")
     .eq("id", supplierId)
     .is("deleted_at", null)
     .maybeSingle();
@@ -41,9 +41,10 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     return Response.json({ error: "Supplier not found." }, { status: 404 });
   }
 
-  const [ratingAggregates, completedOrderCounts] = await Promise.all([
+  const [ratingAggregates, completedOrderCounts, profilePictures] = await Promise.all([
     getSupplierRatingAggregates(supabase, [supplierId]),
     getCompletedOrderCounts(supabase, [supplierId]),
+    getSupplierProfilePictures(supabase, [profile]),
   ]);
   const rating = ratingAggregates.get(supplierId) ?? { average: null, count: 0 };
   const completedOrderCount = completedOrderCounts.get(supplierId) ?? 0;
@@ -54,6 +55,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       business_name: profile.business_name,
       business_location: profile.business_location,
       what_they_sell: profile.what_they_sell,
+      profile_picture_url: profilePictures.get(supplierId) ?? null,
       verified_at: profile.verified_at,
       rating_average: rating.average,
       rating_count: rating.count,

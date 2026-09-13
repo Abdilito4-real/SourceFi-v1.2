@@ -6,8 +6,8 @@
 // against real(-ish) Supabase calls. This exercises it against
 // tests/testUtils/fakeSupabase.ts rather than relying solely on the
 // primitives' own unit tests being individually correct.
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { FakeSupabase, asSupabaseClient } from "./testUtils/fakeSupabase";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { FakeSupabase, asSupabaseClient, wireWalletRpcs } from "./testUtils/fakeSupabase";
 import {
   createOrder,
   fundOrder,
@@ -22,10 +22,11 @@ import {
   CallCodeNotConfirmedError,
   computeUsdcSplit,
   setCallPresence,
+  applyJaasWebhookPresence,
   ensureCallRoomId,
   MIN_VERIFICATION_CALL_SECONDS,
   SupplierNotCurrentlyVerifiedError,
-  BuyerKycRequiredError,
+  InsufficientWalletBalanceError,
   NotOrderOwnerError,
   VerificationCallIncompleteError,
   InvalidOrderAmountError,
@@ -38,8 +39,15 @@ import { MIN_ORDER_AMOUNT_MINOR } from "../lib/money";
 const NOW = Date.now();
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
-function freshFakeSupabase(opts: { withBuyerKyc?: boolean } = {}) {
-  const { withBuyerKyc = true } = opts;
+function freshFakeSupabase(opts: { withWalletBalance?: number } = {}) {
+  // A generous default (₦100,000,000.00), not a precise number: fundOrder
+  // is wallet-first as of migration 0020, seeded by default so every
+  // existing fundOrder-touching test keeps passing without individually
+  // knowing about it — pass { withWalletBalance: 0 } for the dedicated
+  // insufficient-balance test instead. buyer_kyc_profiles is no longer
+  // seeded here at all: KYC now gates initiateWalletTopup, not fundOrder
+  // (see tests/walletService.test.ts for that gate's own test).
+  const { withWalletBalance = 10_000_000_00 } = opts;
   const fake = new FakeSupabase();
   fake.seed("users", [
     { id: 1, email: "buyer@example.com", role: "buyer" },
@@ -57,26 +65,10 @@ function freshFakeSupabase(opts: { withBuyerKyc?: boolean } = {}) {
       orders_since_verification: 0,
     },
   ]);
-  // Real Yellow Card integration: fundOrder now gates on this (migration
-  // 0018_buyer_kyc.sql), seeded by default so every existing
-  // fundOrder-touching test keeps passing without individually knowing
-  // about it — pass { withBuyerKyc: false } for the dedicated
-  // missing-KYC test instead.
-  if (withBuyerKyc) {
-    fake.seed("buyer_kyc_profiles", [
-      {
-        user_id: 1,
-        first_name: "Test",
-        last_name: "Buyer",
-        phone: "+2348000000000",
-        date_of_birth: "1990-01-01",
-        id_type: "nin",
-        id_number: "00000000000",
-        address: "1 Test Street, Lagos",
-        country: "NG",
-      },
-    ]);
+  if (withWalletBalance > 0) {
+    fake.seed("buyer_wallets", [{ user_id: 1, balance_minor: withWalletBalance, currency: "NGN" }]);
   }
+  wireWalletRpcs(fake);
   // Mirrors the real is_supplier_currently_verified() Postgres function
   // (migration 0004), evaluated against the fake's live table state so
   // it reflects whatever a test mutates mid-run.
@@ -116,6 +108,29 @@ function synchronousProvider(supabase: ReturnType<typeof asSupabaseClient>) {
 beforeEach(() => {
   vi.useRealTimers();
 });
+
+/** Both parties independently report the same corroborated window,
+ * satisfying recordVerificationCallProgress's cross-party overlap
+ * requirement (lib/callVerification.ts) — the realistic "buyer and
+ * supplier really were on the call together" case most tests below just
+ * need to clear this gate to test something else, same role
+ * `MIN_VERIFICATION_CALL_SECONDS` played before the corroboration fix.
+ * The +3s buffer over the threshold absorbs the few milliseconds of real
+ * wall-clock jitter between the two sequential calls (each segment's
+ * start is computed as "now minus duration" at the moment IT specifically
+ * is reported, so two reports a few ms apart don't overlap by quite the
+ * full duration either side claimed) — comfortably enough to still clear
+ * MIN_VERIFICATION_CALL_SECONDS even so. */
+async function satisfyCallRequirement(
+  supabase: ReturnType<typeof asSupabaseClient>,
+  orderId: number,
+  buyerUserId: number,
+  supplierUserId: number,
+  seconds = MIN_VERIFICATION_CALL_SECONDS + 3
+) {
+  await recordVerificationCallProgress(supabase, orderId, buyerUserId, seconds);
+  return recordVerificationCallProgress(supabase, orderId, supplierUserId, seconds);
+}
 
 describe("createOrder: the live verification gate", () => {
   it("creates an order against a currently-verified supplier", async () => {
@@ -179,10 +194,13 @@ describe("the full happy-path lifecycle: create -> fund -> proof -> approve -> s
     });
     expect(created.status).toBe("pending_payment");
 
-    let confirmed = waitForConfirmation();
-    const funded = await fundOrder(supabase, provider, created.id, 1);
-    expect(funded.order.status).toBe("payment_processing");
-    await confirmed;
+    // Wallet-first funding (migration 0020) is fully synchronous: by the
+    // time fundOrder returns, the debit AND the confirmation walk
+    // (payment_processing -> converting -> escrow_depositing -> funded)
+    // have already completed, no separate wait needed like the old
+    // provider-mediated path required.
+    const funded = await fundOrder(supabase, created.id, 1);
+    expect(funded.order.status).toBe("funded");
 
     const afterFunding = fake.getRows("orders").find((o) => o.id === created.id)!;
     expect(afterFunding.status).toBe("funded");
@@ -200,10 +218,10 @@ describe("the full happy-path lifecycle: create -> fund -> proof -> approve -> s
     // threshold (a separate test covers that directly); satisfy it here
     // so the rest of the happy path can proceed. Also the order-code
     // liveness confirmation, a second, independent gate.
-    await recordVerificationCallProgress(supabase, created.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await satisfyCallRequirement(supabase, created.id, 1, 2);
     await confirmCallCode(supabase, created.id, 1);
 
-    confirmed = waitForConfirmation();
+    let confirmed = waitForConfirmation();
     const approved = await approveOrder(supabase, provider, created.id, 1);
     expect(approved.status).toBe("release_submitted");
     await confirmed;
@@ -252,7 +270,7 @@ describe("fundOrder: ownership and re-verification at funding time", () => {
     const supabase = asSupabaseClient(fake);
     const { provider } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000 });
-    await expect(fundOrder(supabase, provider, order.id, 999)).rejects.toThrow(NotOrderOwnerError);
+    await expect(fundOrder(supabase, order.id, 999)).rejects.toThrow(NotOrderOwnerError);
   });
 
   it("rejects funding if the supplier's verification expired between order-creation and funding", async () => {
@@ -264,18 +282,32 @@ describe("fundOrder: ownership and re-verification at funding time", () => {
     // Verification expires AFTER the order was created but BEFORE funding.
     await supabase.from("supplier_profiles").update({ verification_expires_at: new Date(NOW - 1000).toISOString() }).eq("id", 1);
 
-    await expect(fundOrder(supabase, provider, order.id, 1)).rejects.toThrow(SupplierNotCurrentlyVerifiedError);
+    await expect(fundOrder(supabase, order.id, 1)).rejects.toThrow(SupplierNotCurrentlyVerifiedError);
   });
 
-  it("rejects funding when the buyer has no KYC profile on file (real Yellow Card integration)", async () => {
-    const fake = freshFakeSupabase({ withBuyerKyc: false });
+  it("rejects funding when the buyer's wallet balance doesn't cover the order (migration 0020, wallet-first funding)", async () => {
+    const fake = freshFakeSupabase({ withWalletBalance: 0 });
     const supabase = asSupabaseClient(fake);
-    const { provider } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000 });
-    await expect(fundOrder(supabase, provider, order.id, 1)).rejects.toThrow(BuyerKycRequiredError);
-    // Never even reached payment_processing, the order stays put.
+    const err = await fundOrder(supabase, order.id, 1).catch((e) => e);
+    expect(err).toBeInstanceOf(InsufficientWalletBalanceError);
+    expect((err as InsufficientWalletBalanceError).shortfallMinor).toBe(500_000);
+    // Never even reached payment_processing, the order stays put, and
+    // nothing was debited (there was nothing to debit).
     const { data: unchanged } = await supabase.from("orders").select("status").eq("id", order.id).maybeSingle();
     expect((unchanged as { status: string } | null)?.status).toBe("pending_payment");
+    const { data: wallet } = await supabase.from("buyer_wallets").select("balance_minor").eq("user_id", 1).maybeSingle();
+    expect((wallet as { balance_minor: number } | null)?.balance_minor ?? 0).toBe(0);
+  });
+
+  it("funds an order instantly from a sufficient wallet balance, debiting exactly the order amount", async () => {
+    const fake = freshFakeSupabase({ withWalletBalance: 750_000 });
+    const supabase = asSupabaseClient(fake);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 500_000 });
+    const { order: funded } = await fundOrder(supabase, order.id, 1);
+    expect(funded.status).toBe("funded");
+    const { data: wallet } = await supabase.from("buyer_wallets").select("balance_minor").eq("user_id", 1).maybeSingle();
+    expect((wallet as { balance_minor: number } | null)?.balance_minor).toBe(250_000);
   });
 });
 
@@ -286,9 +318,7 @@ describe("handlePaymentStatusEvent: idempotency", () => {
     const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 320_000_00 });
 
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     expect(fake.getRows("orders").find((o) => o.id === order.id)!.status).toBe("funded");
     expect(fake.getRows("ledger_entries").filter((e) => e.order_id === order.id)).toHaveLength(4);
@@ -319,9 +349,7 @@ describe("rejectProof -> disputed -> resolveDispute (pre-release refund path)", 
     const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 200_000_00 });
 
-    let confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
 
@@ -331,13 +359,20 @@ describe("rejectProof -> disputed -> resolveDispute (pre-release refund path)", 
     const dispute = fake.getRows("disputes").find((d) => d.order_id === order.id)!;
     expect(dispute.dispute_type).toBe("pre_approval_rejection");
 
-    confirmed = waitForConfirmation();
+    // The order was funded from the wallet, so resolveDispute's refund
+    // branch routes straight to the wallet-credit event path (migration
+    // 0020) — synchronous, no separate wait needed, same as fundOrder
+    // above.
     const result = await resolveDispute(supabase, provider, dispute.id as number, 3, "buyer", "Confirmed wrong grade delivered.");
     expect(result.autoActionTaken).toBe("refund_initiated");
-    await confirmed;
 
     const finalOrder = fake.getRows("orders").find((o) => o.id === order.id)!;
     expect(finalOrder.status).toBe("refunded");
+
+    // Credited back to the wallet, not lost: the buyer paid 200,000.00
+    // from the wallet to fund this order, and gets it all back.
+    const wallet = fake.getRows("buyer_wallets").find((w) => w.user_id === 1)!;
+    expect(wallet.balance_minor).toBe(10_000_000_00);
   });
 
   it("a supplier-ruled dispute proceeds through the normal release path instead", async () => {
@@ -346,15 +381,15 @@ describe("rejectProof -> disputed -> resolveDispute (pre-release refund path)", 
     const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 200_000_00 });
 
-    let confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
     const rejected = await rejectProof(supabase, order.id, 1, { category: "other", description: "buyer changed their mind" });
     const dispute = fake.getRows("disputes").find((d) => d.order_id === order.id)!;
 
-    confirmed = waitForConfirmation();
+    // This ruling still goes through the real release path (Circle stub),
+    // genuinely async, unlike the wallet-funding/refund paths above.
+    let confirmed = waitForConfirmation();
     const result = await resolveDispute(supabase, provider, dispute.id as number, 3, "supplier", "Proof was valid, releasing.");
     expect(result.autoActionTaken).toBe("release_initiated");
     await confirmed;
@@ -383,12 +418,10 @@ describe("rejectProof -> disputed -> resolveDispute (pre-release refund path)", 
   it("resolveDispute refuses to auto-refund a buyer-ruled dispute if the release already confirmed, even though that's unreachable through any live flow today", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
+    const { provider } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 200_000_00 });
 
-    let confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
 
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
     await rejectProof(supabase, order.id, 1, { category: "item_not_as_described", description: "Wrong grade" });
@@ -474,7 +507,6 @@ describe("createOrder: minimum order amount", () => {
 describe("mandatory live verification call before approval", () => {
   async function orderAtProofSubmitted(fake: FakeSupabase) {
     const supabase = asSupabaseClient(fake);
-    const { provider, waitForConfirmation } = synchronousProvider(supabase);
     // A realistic amount, not the trivial 1000 (NGN 10) other tests in
     // this file use, several tests below call approveOrder/resolveDispute
     // which (since the StubPaymentProvider fix) now chains a REAL
@@ -484,9 +516,7 @@ describe("mandatory live verification call before approval", () => {
     // this amount just needs to clear that floor, it's not sidestepping
     // anything anymore.
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
     return order;
   }
@@ -504,7 +534,25 @@ describe("mandatory live verification call before approval", () => {
     const supabase = asSupabaseClient(fake);
     const { provider } = synchronousProvider(supabase);
     const order = await orderAtProofSubmitted(fake);
+    // Overlap can never exceed either side's own reported duration (see
+    // computeOverlapSeconds), so both parties reporting exactly one
+    // second under the threshold guarantees the corroborated total stays
+    // under it too, no buffer needed for a "must stay below" assertion.
     await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS - 1);
+    await recordVerificationCallProgress(supabase, order.id, 2, MIN_VERIFICATION_CALL_SECONDS - 1);
+    await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(VerificationCallIncompleteError);
+  });
+
+  it("rejects approval when only ONE party reports call time, even a long one, no corroboration means no credit", async () => {
+    // The exact gap a security audit of this flow found and this test
+    // now pins down as fixed: a single party alone used to be able to
+    // satisfy the whole requirement with one report.
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const { provider } = synchronousProvider(supabase);
+    const order = await orderAtProofSubmitted(fake);
+    const afterBuyerAlone = await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    expect(afterBuyerAlone.verification_call_seconds).toBe(0);
     await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(VerificationCallIncompleteError);
   });
 
@@ -513,7 +561,7 @@ describe("mandatory live verification call before approval", () => {
     const supabase = asSupabaseClient(fake);
     const { provider } = synchronousProvider(supabase);
     const order = await orderAtProofSubmitted(fake);
-    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await satisfyCallRequirement(supabase, order.id, 1, 2);
     await confirmCallCode(supabase, order.id, 1);
     const approved = await approveOrder(supabase, provider, order.id, 1);
     expect(approved.status).toBe("release_submitted");
@@ -524,7 +572,7 @@ describe("mandatory live verification call before approval", () => {
     const supabase = asSupabaseClient(fake);
     const { provider } = synchronousProvider(supabase);
     const order = await orderAtProofSubmitted(fake);
-    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await satisfyCallRequirement(supabase, order.id, 1, 2);
     await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(CallCodeNotConfirmedError);
   });
 
@@ -532,47 +580,105 @@ describe("mandatory live verification call before approval", () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
     const order = await orderAtProofSubmitted(fake);
+    // Ownership is checked before the (new) call-time gate, so this
+    // rejects for the right reason even with zero call time recorded.
     await expect(confirmCallCode(supabase, order.id, 2)).rejects.toThrow(NotOrderOwnerError);
     await expect(confirmCallCode(supabase, order.id, 99)).rejects.toThrow(NotOrderOwnerError);
   });
 
-  it("accumulates across multiple reported segments (call dropped and rejoined)", async () => {
+  it("confirmCallCode rejects the buyer's own attestation until the corroborated call time actually clears the threshold", async () => {
+    // The other half of the same gap as "rejects approval when only ONE
+    // party reports": confirmCallCode used to be reachable the instant
+    // an order was funded, with no call ever having happened at all.
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+    await expect(confirmCallCode(supabase, order.id, 1)).rejects.toThrow(VerificationCallIncompleteError);
+
+    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    // Buyer alone still isn't enough, same corroboration rule as approval.
+    await expect(confirmCallCode(supabase, order.id, 1)).rejects.toThrow(VerificationCallIncompleteError);
+
+    await satisfyCallRequirement(supabase, order.id, 1, 2);
+    const confirmed = await confirmCallCode(supabase, order.id, 1);
+    expect(confirmed.call_code_confirmed_at).not.toBeNull();
+  });
+
+  it("accumulates across multiple genuinely disjoint segments reported by both parties (call dropped and rejoined)", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
     const { provider } = synchronousProvider(supabase);
     const order = await orderAtProofSubmitted(fake);
+
+    // Fake timers make each segment's reported window exact (no real
+    // wall-clock jitter between the buyer's and supplier's calls), and
+    // let a genuine gap be simulated between segments so the second
+    // segment doesn't just get merged into the first as one long
+    // overlapping report from the SAME party (see mergeIntervals).
+    vi.useFakeTimers();
+    const start = new Date("2026-01-01T00:00:00Z");
+    vi.setSystemTime(start);
+
+    // First segment: both parties on the call together for 120s.
     await recordVerificationCallProgress(supabase, order.id, 1, 120);
-    await recordVerificationCallProgress(supabase, order.id, 1, 90);
-    let current = await recordVerificationCallProgress(supabase, order.id, 1, 89);
-    expect(current.verification_call_seconds).toBe(299);
+    let current = await recordVerificationCallProgress(supabase, order.id, 2, 120);
+    expect(current.verification_call_seconds).toBe(120);
     await expect(approveOrder(supabase, provider, order.id, 1)).rejects.toThrow(VerificationCallIncompleteError);
 
-    current = await recordVerificationCallProgress(supabase, order.id, 1, 1);
-    expect(current.verification_call_seconds).toBe(300);
+    // The call drops. Ten minutes pass with nobody connected, then both
+    // reconnect and stay on for another 185s together, a genuinely
+    // separate, disjoint segment from the first.
+    vi.setSystemTime(new Date(start.getTime() + 10 * 60 * 1000));
+    await recordVerificationCallProgress(supabase, order.id, 1, 185);
+    current = await recordVerificationCallProgress(supabase, order.id, 2, 185);
+    expect(current.verification_call_seconds).toBe(120 + 185);
+
     await confirmCallCode(supabase, order.id, 1);
     const approved = await approveOrder(supabase, provider, order.id, 1);
     expect(approved.status).toBe("release_submitted");
   });
 
-  it("either the buyer or the assigned supplier can report a segment: nobody else can", async () => {
+  it("either the buyer or the assigned supplier can call this, but alone it earns zero credit; an unrelated user can't call it at all", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
     const order = await orderAtProofSubmitted(fake);
 
-    // The assigned supplier (user_id 2) reports it, not the buyer.
+    // The assigned supplier (user_id 2) reports it, not the buyer: this
+    // doesn't throw NotOrderOwnerError (they ARE a party to the order),
+    // but earns zero corroborated seconds alone, the buyer never having
+    // reported anything overlapping.
     const afterSupplierReport = await recordVerificationCallProgress(supabase, order.id, 2, MIN_VERIFICATION_CALL_SECONDS);
-    expect(afterSupplierReport.verification_call_seconds).toBe(MIN_VERIFICATION_CALL_SECONDS);
+    expect(afterSupplierReport.verification_call_seconds).toBe(0);
 
-    // An unrelated user (admin, id 3, not a party to this order) cannot.
+    // The buyer then reports the same window: now both parties have
+    // corroborated it, and it counts.
+    const afterBuyerReport = await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    expect(afterBuyerReport.verification_call_seconds).toBeGreaterThan(0);
+
+    // An unrelated user (admin, id 3, not a party to this order) can't
+    // call this at all, ownership is checked before anything else.
     await expect(recordVerificationCallProgress(supabase, order.id, 3, 60)).rejects.toThrow(NotOrderOwnerError);
   });
 
-  it("caps a single reported segment at 2 hours, rather than trusting an unbounded client-supplied number", async () => {
+  it("caps a single reported segment at 2 hours per party, rather than trusting an unbounded client-supplied number", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
     const order = await orderAtProofSubmitted(fake);
-    const result = await recordVerificationCallProgress(supabase, order.id, 1, 999_999);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    await recordVerificationCallProgress(supabase, order.id, 1, 999_999);
+    const result = await recordVerificationCallProgress(supabase, order.id, 2, 999_999);
+    // Both segments are capped at 2h before the overlap step, and (fake
+    // timers holding time still) reported at the identical instant, so
+    // the corroborated overlap is exactly the cap, not the raw number.
     expect(result.verification_call_seconds).toBe(2 * 60 * 60);
+  });
+
+  it("rejects recordVerificationCallProgress on an order that isn't funded yet, no padding time before there's anything to verify", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
+    await expect(recordVerificationCallProgress(supabase, order.id, 1, 60)).rejects.toThrow(InvalidOrderTransitionError);
   });
 
   it("a dispute resolved for the supplier bypasses this requirement entirely: it's an admin ruling, not the buyer's own approval", async () => {
@@ -621,6 +727,114 @@ describe("mandatory live verification call before approval", () => {
   });
 });
 
+describe("applyJaasWebhookPresence: the real, webhook-driven fix for the collusion gap client-reported corroboration alone can't close", () => {
+  const ORIGINAL_ENV = { ...process.env };
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  async function orderAtProofSubmitted(fake: FakeSupabase) {
+    const supabase = asSupabaseClient(fake);
+    const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
+    await fundOrder(supabase, order.id, 1);
+    await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
+    return order;
+  }
+
+  it("credits the overlap between a real JOINED/LEFT pair for each party, computed from JaaS's own event timestamps", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+
+    const t0 = new Date("2026-01-01T00:00:00Z").getTime();
+    await applyJaasWebhookPresence(supabase, order.id, "buyer", true, new Date(t0).toISOString());
+    await applyJaasWebhookPresence(supabase, order.id, "supplier", true, new Date(t0 + 5_000).toISOString()); // supplier joins 5s later
+    await applyJaasWebhookPresence(supabase, order.id, "buyer", false, new Date(t0 + 305_000).toISOString());
+    const afterSupplierLeft = await applyJaasWebhookPresenceAndFetch(
+      supabase,
+      order.id,
+      "supplier",
+      false,
+      new Date(t0 + 310_000).toISOString()
+    );
+    // Buyer: [0,305], supplier: [5,310] -> overlap [5,305] = 300s.
+    expect(afterSupplierLeft.verification_call_seconds).toBe(300);
+  });
+
+  it("a LEFT with nothing open (no matching JOINED, or already processed) is a safe no-op, not a fabricated segment", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+
+    // No JOINED ever recorded for either party: a no-op LEFT never even
+    // reaches the .update() call, so the column stays exactly as
+    // createOrder left it (unset in this fixture, `not null default 0`
+    // in real Postgres, see migration 0007) rather than being written
+    // as an explicit 0 — same distinction the app's own `?? 0` reads
+    // everywhere already account for.
+    await applyJaasWebhookPresence(supabase, order.id, "buyer", false, new Date().toISOString());
+    const orders = fake.getRows("orders");
+    expect(orders.find((o) => o.id === order.id)!.verification_call_seconds ?? 0).toBe(0);
+  });
+
+  it("a duplicate/retried LEFT webhook is idempotent: the segment is only credited once", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+
+    const t0 = new Date("2026-01-01T00:00:00Z").getTime();
+    await applyJaasWebhookPresence(supabase, order.id, "buyer", true, new Date(t0).toISOString());
+    await applyJaasWebhookPresence(supabase, order.id, "supplier", true, new Date(t0).toISOString());
+    await applyJaasWebhookPresence(supabase, order.id, "buyer", false, new Date(t0 + 300_000).toISOString());
+    const first = await applyJaasWebhookPresenceAndFetch(supabase, order.id, "supplier", false, new Date(t0 + 300_000).toISOString());
+    expect(first.verification_call_seconds).toBe(300);
+
+    // JaaS retries the exact same supplier LEFT event (network blip, no
+    // 2xx received the first time) — buyer_call_active_since/
+    // supplier_call_active_since is already null from the first pass, so
+    // this must NOT insert a second segment or double the total.
+    const retried = await applyJaasWebhookPresenceAndFetch(supabase, order.id, "supplier", false, new Date(t0 + 300_000).toISOString());
+    expect(retried.verification_call_seconds).toBe(300);
+    expect(fake.getRows("call_segments").filter((s) => s.order_id === order.id)).toHaveLength(2); // one per party, not three
+  });
+
+  it("recordVerificationCallProgress becomes a harmless no-op once JAAS_WEBHOOK_SECRET is set — it never inserts a client-reported segment", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+    process.env.JAAS_WEBHOOK_SECRET = "whsec_test";
+
+    const result = await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    expect(result.verification_call_seconds ?? 0).toBe(0); // early-returns the fetched order untouched, see the comment above
+    expect(fake.getRows("call_segments").filter((s) => s.order_id === order.id)).toHaveLength(0);
+  });
+
+  it("setCallPresence becomes a harmless no-op once JAAS_WEBHOOK_SECRET is set — it never writes buyer/supplier_call_active_since", async () => {
+    const fake = freshFakeSupabase();
+    const supabase = asSupabaseClient(fake);
+    const order = await orderAtProofSubmitted(fake);
+    process.env.JAAS_WEBHOOK_SECRET = "whsec_test";
+
+    await setCallPresence(supabase, order.id, 1, true);
+    expect(fake.getRows("orders").find((o) => o.id === order.id)!.buyer_call_active_since).toBeFalsy();
+  });
+
+  /** applyJaasWebhookPresence returns void (route-driven), unlike
+   * recordVerificationCallProgress; these tests need the resulting
+   * order row, so this small wrapper calls it and re-fetches. */
+  async function applyJaasWebhookPresenceAndFetch(
+    supabase: ReturnType<typeof asSupabaseClient>,
+    orderId: number,
+    party: "buyer" | "supplier",
+    joined: boolean,
+    atIso: string
+  ) {
+    await applyJaasWebhookPresence(supabase, orderId, party, joined, atIso);
+    const { data } = await supabase.from("orders").select("*").eq("id", orderId).single();
+    return data as { verification_call_seconds: number };
+  }
+});
+
 describe("approveOrder: a real payment provider's initiateEscrowRelease can throw (CircleEscrowProvider can, the stub never does)", () => {
   /** Release leg always fails, like a real CircleEscrowProvider would if
    * the supplier has no wallet_address or the escrow wallet has no USDC. */
@@ -638,13 +852,10 @@ describe("approveOrder: a real payment provider's initiateEscrowRelease can thro
   it("re-throws the failure and does NOT silently report success", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider: fundingProvider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, fundingProvider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
-    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await satisfyCallRequirement(supabase, order.id, 1, 2);
     await confirmCallCode(supabase, order.id, 1);
 
     await expect(approveOrder(supabase, alwaysFailingReleaseProvider(), order.id, 1)).rejects.toThrow(/wallet_address/);
@@ -653,13 +864,10 @@ describe("approveOrder: a real payment provider's initiateEscrowRelease can thro
   it("leaves the order at release_submitted (the only state that matches reality) and records a release_failed payment_event instead of losing the failure", async () => {
     const fake = freshFakeSupabase();
     const supabase = asSupabaseClient(fake);
-    const { provider: fundingProvider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
-    const confirmed = waitForConfirmation();
-    await fundOrder(supabase, fundingProvider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
-    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await satisfyCallRequirement(supabase, order.id, 1, 2);
     await confirmCallCode(supabase, order.id, 1);
 
     await expect(approveOrder(supabase, alwaysFailingReleaseProvider(), order.id, 1)).rejects.toThrow();
@@ -694,11 +902,9 @@ describe("a release's USDC split, once persisted, is what gets booked to the led
     const supabase = asSupabaseClient(fake);
     const { provider, waitForConfirmation } = synchronousProvider(supabase);
     const order = await createOrder(supabase, 1, { supplierId: 1, title: "x", deliveryLocation: "y", amountMinor: 1_000_000 });
-    let confirmed = waitForConfirmation();
-    await fundOrder(supabase, provider, order.id, 1);
-    await confirmed;
+    await fundOrder(supabase, order.id, 1);
     await submitDeliveryProof(supabase, order.id, 2, { photoUrls: ["p.jpg"], receiptUrl: null, notes: null });
-    await recordVerificationCallProgress(supabase, order.id, 1, MIN_VERIFICATION_CALL_SECONDS);
+    await satisfyCallRequirement(supabase, order.id, 1, 2);
     await confirmCallCode(supabase, order.id, 1);
 
     // Simulates what lib/circleEscrowProvider.ts persists immediately
@@ -717,7 +923,7 @@ describe("a release's USDC split, once persisted, is what gets booked to the led
     // below would reflect THIS rate, not the one actually used on-chain.
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ rates: { NGN: 99999 } }), { status: 200 })));
 
-    confirmed = waitForConfirmation();
+    const confirmed = waitForConfirmation();
     await approveOrder(supabase, provider, order.id, 1);
     await confirmed;
 

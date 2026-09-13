@@ -20,15 +20,17 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   if (!Number.isInteger(orderId)) return Response.json({ error: "Invalid order id." }, { status: 400 });
 
   const supabase = getSupabaseServerClient();
-  // Real RLS pilot (migration 0017_orders_rls_pilot.sql): buyer/supplier
-  // fetch this ONE row through a genuine `authenticated`-role client,
-  // see lib/supabaseUserClient.ts and app/api/orders/route.ts's own
-  // comment for the full reasoning. Every OTHER query below this one
-  // (users/supplier_profiles/payment_events/etc.) deliberately keeps
-  // using the plain service-role `supabase` client — this pilot only
-  // covers `orders` + a self-only `supplier_profiles` policy, those
-  // other tables have no `authenticated`-role policies yet and would
-  // return nothing if queried through readClient.
+  // Real RLS pilot (0017_orders_rls_pilot.sql, expanded by
+  // 0021_rls_expand_pilot.sql): buyer/supplier fetch this order and its
+  // order_id-scoped children (payment_events, delivery_proofs,
+  // disputes, ratings, below) through a genuine `authenticated`-role
+  // client, see lib/supabaseUserClient.ts and app/api/orders/route.ts's
+  // own comment for the full reasoning. `users`/`supplier_profiles`
+  // (for the OTHER party's public info) and `supplier_listings` stay on
+  // the plain service-role `supabase` client below — they're not
+  // self-only lookups (a buyer legitimately reads the supplier's row
+  // here, and vice versa), so an own-row RLS policy wouldn't fit them
+  // anyway.
   const readClient = auth.user.role === "admin" ? supabase : await getUserScopedOrFallbackClient(auth.user.id);
   const { data: order, error } = await readClient.from("orders").select("*").eq("id", orderId).maybeSingle();
   if (error) return dbErrorResponse(`GET orders/${orderId}`, error);
@@ -81,10 +83,15 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     await Promise.all([
       supabase.from("users").select("email").eq("id", order.buyer_id).maybeSingle(),
       supabase.from("supplier_profiles").select("business_name, verification_status").eq("id", order.supplier_id).maybeSingle(),
-      supabase.from("payment_events").select("*").eq("order_id", orderId).order("created_at", { ascending: true }),
-      supabase.from("delivery_proofs").select("*").eq("order_id", orderId).order("submitted_at", { ascending: false }),
-      supabase.from("disputes").select("*").eq("order_id", orderId).order("created_at", { ascending: false }),
-      supabase.from("ratings").select("*").eq("order_id", orderId).maybeSingle(),
+      // RLS pilot expansion (migration 0021_rls_expand_pilot.sql): these
+      // four are all order_id-scoped, visible to either party of THIS
+      // order, same readClient already computed above for the orders
+      // read itself (admin stays on the plain service-role `supabase`
+      // client via that same variable, unchanged).
+      readClient.from("payment_events").select("*").eq("order_id", orderId).order("created_at", { ascending: true }),
+      readClient.from("delivery_proofs").select("*").eq("order_id", orderId).order("submitted_at", { ascending: false }),
+      readClient.from("disputes").select("*").eq("order_id", orderId).order("created_at", { ascending: false }),
+      readClient.from("ratings").select("*").eq("order_id", orderId).maybeSingle(),
       // Only for the "total = unit price x quantity" breakdown shown on
       // the order detail screen, orders created without picking a
       // listing (freeform amount) just won't have one to join.

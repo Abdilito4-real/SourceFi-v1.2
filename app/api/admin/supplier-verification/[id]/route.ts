@@ -102,6 +102,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           }
         : {}),
       business_name: application.business_name,
+      phone: application.phone,
       cac_registration_number: application.cac_registration_number,
       tax_id_number: application.tax_id_number,
       business_location: application.business_location,

@@ -8,7 +8,7 @@
 // DELETE).
 import { getSupabaseServerClient } from "../../../../lib/supabaseServer";
 import { requireRole } from "../../../../lib/authz";
-import { isSafeHttpUrl } from "../../../../lib/safeUrl";
+import { isCloudinaryUrl } from "../../../../lib/uploadValidation";
 import { dbErrorResponse } from "../../../../lib/dbErrorResponse";
 
 async function loadOwnedListing(supabase: ReturnType<typeof getSupabaseServerClient>, listingId: number, userId: number) {
@@ -40,7 +40,16 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (typeof body?.unit === "string") patch.unit = body.unit.trim() || null;
   if (typeof body?.imageUrl === "string") {
     const trimmed = body.imageUrl.trim();
-    patch.image_url = trimmed && isSafeHttpUrl(trimmed) ? trimmed : null;
+    // Empty means "remove the photo" (ImageUploadField's Remove button),
+    // a deliberate no-photo state, unlike POST/create where a photo is
+    // required — editing an existing listing never re-requires one.
+    // A NON-empty value must be a real Cloudinary upload result, same
+    // enforcement as create: reject rather than silently drop it, since
+    // the UI only ever sends either "" or a genuine upload result now.
+    if (trimmed && !isCloudinaryUrl(trimmed)) {
+      return Response.json({ error: "Invalid image — upload one through the form, don't paste a URL." }, { status: 400 });
+    }
+    patch.image_url = trimmed || null;
   }
   if (typeof body?.active === "boolean") patch.active = body.active;
   if (body?.priceAmount !== undefined) {

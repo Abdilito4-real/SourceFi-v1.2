@@ -27,8 +27,18 @@ import { recordFundingConfirmed, recordEscrowRelease, recordSettlement, recordRe
 import { ORDER_PLATFORM_FEE_MINOR, MIN_ORDER_AMOUNT_MINOR, CANCELLATION_FEE_MINOR } from "./money";
 import { getNgnPerUsd } from "./fxRate";
 import type { PaymentBoundary, PaymentStatusEvent, FundingResult } from "./paymentBoundary";
+import { getWalletBalance, debitWalletForOrder, creditWalletForRefund, wasOrderFundedFromWallet, InsufficientWalletBalanceError } from "./walletService";
 import type { CancellationCategory, DisputeCategory, DisputeRuling, DisputeType, OrderRow, OrderStatus, UserRow } from "./types";
 import { notifyUser, notifyAdmins } from "./notifications/dispatch";
+import { computeOverlapSeconds } from "./callVerification";
+import { isJaasWebhookConfigured } from "./jaasWebhookAuth";
+
+// Buyer wallet balance (migration 0020): fundOrder() below is wallet-first
+// from this point on, re-exported here so route code
+// (app/api/orders/[id]/fund/route.ts) has one place to import every
+// error fundOrder can throw from, rather than reaching into
+// lib/walletService.ts directly for just this one.
+export { InsufficientWalletBalanceError };
 
 // ============================================================================
 // Termination flows (Prompt 3 of the feedback/notifications/security
@@ -426,20 +436,20 @@ export interface FundOrderResult {
   paymentInstructions: FundingResult["paymentInstructions"] | null;
 }
 
-export class BuyerKycRequiredError extends Error {
-  constructor() {
-    super("Complete your buyer verification before funding an order.");
-    this.name = "BuyerKycRequiredError";
-  }
-}
-
-/** Buyer clicks "Fund Order". Re-checks supplier verification live (not
- * just at order-creation time) and ownership, then hands off to the
- * payment boundary, this function never touches Yellow Card or Circle
- * itself, see lib/paymentBoundary.ts. */
+/** Buyer clicks "Fund Order". Wallet-first as of migration 0020: this no
+ * longer calls a payment provider at all, it requires the buyer's
+ * platform wallet balance to already cover the order and debits it
+ * atomically (lib/walletService.ts's debitWalletForOrder, backed by the
+ * wallet_debit RPC's row lock — never a check-then-act race). KYC is no
+ * longer checked here: it's now a gate on topping up the wallet in the
+ * first place (lib/walletService.ts's initiateWalletTopup), since that's
+ * the step that will eventually make a real external call needing it —
+ * by the time money is IN the wallet it already went through a KYC'd
+ * top-up, re-checking here would be redundant, not an extra layer of
+ * safety. Re-checks supplier verification live (not just at
+ * order-creation time) and ownership, same as before. */
 export async function fundOrder(
   supabase: SupabaseClient,
-  paymentProvider: PaymentBoundary,
   orderId: number,
   buyerId: number
 ): Promise<FundOrderResult> {
@@ -449,38 +459,49 @@ export async function fundOrder(
   const verified = await isSupplierCurrentlyVerified(supabase, order.supplier_id);
   if (!verified) throw new SupplierNotCurrentlyVerifiedError(order.supplier_id);
 
-  // Real Yellow Card integration: initiateOrderFunding's `recipient`
-  // object needs this on file (name/phone/dob/idType/idNumber/address),
-  // checked BEFORE the state transition below so a buyer without one
-  // gets a clear, specific error rather than the order silently moving
-  // to payment_processing and then failing inside the provider call.
-  // Checked here rather than only inside YellowCardProvider so the
-  // failure is a clean domain error, not a provider-level exception —
-  // the provider still re-checks too (defense in depth, same posture as
-  // everywhere else in this hardening pass).
-  const { data: kyc } = await supabase.from("buyer_kyc_profiles").select("id").eq("user_id", buyerId).maybeSingle();
-  if (!kyc) throw new BuyerKycRequiredError();
+  // Upfront, cheap read before touching order status at all: the common
+  // case (balance already insufficient) fails clean with the order left
+  // exactly at pending_payment, no wasted transition/rollback. This is
+  // an optimization, not the actual safety mechanism — debitWalletForOrder's
+  // atomic RPC below is what's still authoritative if a concurrent
+  // request changes the balance in between.
+  const { balanceMinor } = await getWalletBalance(supabase, buyerId);
+  if (balanceMinor < order.amount_minor) {
+    throw new InsufficientWalletBalanceError(order.amount_minor - balanceMinor);
+  }
 
   const moved = await tryTransition(supabase, orderId, order.status, "payment_processing");
   if (!moved) throw new InvalidOrderTransitionError(order.status, "payment_processing");
 
-  const result = await paymentProvider.initiateOrderFunding(orderId);
-
-  await supabase.from("payment_events").insert({
-    order_id: orderId,
-    leg: "funding",
-    provider: "yellow_card",
-    provider_reference: result.paymentReference,
-    event_type: result.status === "failed" ? "funding_failed" : "funding_initiated",
-    provider_state: result.status,
-  });
-
-  if (result.status === "failed") {
+  try {
+    await debitWalletForOrder(supabase, buyerId, orderId, order.amount_minor);
+  } catch (err) {
+    // Lost a race against another concurrent debit since the balance
+    // check above — genuinely rare, same "said processing, turned out to
+    // fail" shape the old provider-failure path below already handled,
+    // reusing the exact same legal transition rather than inventing a
+    // new one.
     await tryTransition(supabase, orderId, "payment_processing", "payment_failed");
+    throw err;
   }
 
+  // No async gap to wait out (the debit above already moved the money,
+  // atomically, inside this same request) — fire the confirmation
+  // straight through the existing event consumer instead of a separate
+  // "initiated" phase. See lib/walletService.ts's module comment: this
+  // reuses handleFundingConfirmed completely unchanged, provider:
+  // "wallet" is just a third event source alongside StubPaymentProvider
+  // and Yellow Card's real webhook.
+  await handlePaymentStatusEvent(supabase, {
+    orderId,
+    leg: "funding",
+    provider: "wallet",
+    providerReference: `wallet-fund-${orderId}`,
+    providerState: "confirmed",
+  });
+
   const updated = await fetchOrder(supabase, orderId);
-  return { order: updated, paymentReference: result.paymentReference, paymentInstructions: result.paymentInstructions ?? null };
+  return { order: updated, paymentReference: `wallet-fund-${orderId}`, paymentInstructions: null };
 }
 
 // ============================================================================
@@ -711,14 +732,34 @@ async function handleRefundConfirmed(supabase: SupabaseClient, event: PaymentSta
     .limit(1)
     .maybeSingle();
 
+  // Hoisted out of the if/else below (was computed inline, only in the
+  // fee-retaining branch) so the wallet-credit step further down can
+  // reuse the EXACT same figure the ledger just booked, whichever branch
+  // ran — no chance of the wallet ending up credited a different amount
+  // than what the ledger recorded as "the buyer's money again".
+  const ngnRefundMinor =
+    cancellation && cancellation.fee_charged_minor > 0
+      ? cancellation.refund_minor ?? order.amount_minor - cancellation.fee_charged_minor
+      : order.amount_minor;
+
   if (cancellation && cancellation.fee_charged_minor > 0) {
     const feeFraction = cancellation.fee_charged_minor / order.amount_minor;
     const usdcFeeMinor = Math.round(totalUsdcMinor * feeFraction);
     const usdcRefundMinor = totalUsdcMinor - usdcFeeMinor;
-    const ngnRefundMinor = cancellation.refund_minor ?? order.amount_minor - cancellation.fee_charged_minor;
     await recordPartialRefundWithFee(supabase, event.orderId, ngnRefundMinor, usdcRefundMinor, usdcFeeMinor);
   } else {
-    await recordRefundFromEscrow(supabase, event.orderId, order.amount_minor, totalUsdcMinor);
+    await recordRefundFromEscrow(supabase, event.orderId, ngnRefundMinor, totalUsdcMinor);
+  }
+
+  // If this order was funded from the buyer's wallet, the money coming
+  // back is platform-custody money returning to platform-custody
+  // balance, not a fresh external bank payout — credit it back to the
+  // wallet instead. This is also what sidesteps Yellow Card's
+  // full-receive-only refund limit entirely for a wallet-funded order:
+  // crediting a wallet has no such restriction. See
+  // lib/walletService.ts's module comment for the full reasoning.
+  if (await wasOrderFundedFromWallet(supabase, event.orderId)) {
+    await creditWalletForRefund(supabase, order.buyer_id, event.orderId, ngnRefundMinor);
   }
 
   // critical: true, a refund is as much "your money moved" as a release is.
@@ -732,6 +773,47 @@ async function handleRefundConfirmed(supabase: SupabaseClient, event: PaymentSta
     body: "Your refund has been processed. Tap to view.",
     deepLink: `/buyer?order=${order.id}`,
     critical: true,
+  });
+}
+
+/** Shared by every refund-initiating call site (resolveDispute's
+ * buyer-ruling branch, cancelFundedOrder, abandonOrder): if this order
+ * was funded from the buyer's wallet, there is no real Yellow Card
+ * receive to refund against — Yellow Card's refund API refunds one
+ * whole original receive, and a wallet-funded order was never funded
+ * via one, so calling paymentProvider.initiateRefund here would either
+ * hit its full-amount-only guard on a partial refund or try to refund a
+ * receive that plain doesn't exist. Route straight to the wallet-credit
+ * event path instead: synchronous, no external call, reuses
+ * handleRefundConfirmed completely unchanged (same "a third event
+ * source feeding the same consumer" shape fundOrder uses above).
+ * Otherwise, unchanged: call the real provider and log the initiation
+ * the same way every refund path always has. */
+async function initiateRefundForOrder(
+  supabase: SupabaseClient,
+  paymentProvider: PaymentBoundary,
+  orderId: number,
+  amountMinor: number
+): Promise<void> {
+  if (await wasOrderFundedFromWallet(supabase, orderId)) {
+    await handlePaymentStatusEvent(supabase, {
+      orderId,
+      leg: "refund",
+      provider: "wallet",
+      providerReference: `wallet-refund-${orderId}`,
+      providerState: "confirmed",
+    });
+    return;
+  }
+
+  const result = await paymentProvider.initiateRefund(orderId, amountMinor);
+  await supabase.from("payment_events").insert({
+    order_id: orderId,
+    leg: "refund",
+    provider: "yellow_card",
+    provider_reference: result.refundReference,
+    event_type: result.status === "failed" ? "refund_failed" : "refund_initiated",
+    provider_state: result.status,
   });
 }
 
@@ -805,6 +887,15 @@ export async function submitDeliveryProof(
 
 export const MIN_VERIFICATION_CALL_SECONDS = 5 * 60;
 
+// Mirrors OrderDetailsModal.tsx's own LIVE_CALL_ELIGIBLE_STATUSES (kept
+// in sync by hand, same posture as every other client/server duplication
+// this codebase already has, e.g. is_supplier_currently_verified). Used
+// by every call-related function below so an order can't have its call
+// time/presence/code-confirmation touched before it's actually funded
+// (nothing real to verify yet) or after the call's whole purpose has
+// already passed.
+const LIVE_CALL_ELIGIBLE_STATUSES: readonly OrderStatus[] = ["funded", "fulfilling", "proof_submitted"];
+
 export class VerificationCallIncompleteError extends Error {
   constructor(secondsSoFar: number) {
     super(
@@ -834,12 +925,28 @@ export class CallCodeNotConfirmedError extends Error {
  * genuinely this order's live call rather than a pre-recorded loop or
  * a call about different goods. Order-level and one-way, like
  * verification_call_seconds: once set it stays set across a
- * withdraw/resubmit cycle, the underlying call already happened. */
+ * withdraw/resubmit cycle, the underlying call already happened.
+ *
+ * Requires the full corroborated call duration FIRST (same
+ * MIN_VERIFICATION_CALL_SECONDS gate approveOrder itself enforces): a
+ * buyer confirming the code the instant an order is funded, before any
+ * call happened at all, is exactly the "attestation fully decoupled
+ * from any call evidence" gap a security audit of this flow surfaced —
+ * requiring the corroborated time first ties this attestation to actual
+ * evidence a real two-party call took place (see
+ * recordVerificationCallProgress below for what "corroborated" means),
+ * not just an order being in the right status. The client already only
+ * shows the "Confirm code match" control once the call requirement is
+ * met (OrderDetailsModal.tsx's Stepper), this makes that the enforced
+ * rule, not just the suggested one. */
 export async function confirmCallCode(supabase: SupabaseClient, orderId: number, buyerUserId: number): Promise<OrderRow> {
   const order = await fetchOrder(supabase, orderId);
   if (order.buyer_id !== buyerUserId) throw new NotOrderOwnerError();
-  if (!["funded", "fulfilling", "proof_submitted"].includes(order.status)) {
+  if (!LIVE_CALL_ELIGIBLE_STATUSES.includes(order.status)) {
     throw new InvalidOrderTransitionError(order.status, "proof_submitted");
+  }
+  if ((order.verification_call_seconds ?? 0) < MIN_VERIFICATION_CALL_SECONDS) {
+    throw new VerificationCallIncompleteError(order.verification_call_seconds ?? 0);
   }
 
   const { error } = await supabase
@@ -853,11 +960,25 @@ export async function confirmCallCode(supabase: SupabaseClient, orderId: number,
 
 /** Adds one real call segment (join-to-leave, reported by the client
  * from Jitsi's own lifecycle events, never just "the panel was open")
- * to the order's running total. Either party to the order can report a
- * segment, whoever's Jitsi session ends first reports it, same total
- * either way. `secondsElapsed` is sanity-capped, not trusted blindly:
- * this is a workflow gate, not itself a money-movement action, but an
- * unbounded client-supplied number is still worth bounding. */
+ * and recomputes verification_call_seconds from scratch as the
+ * CORROBORATED overlap between the buyer's segments and the supplier's
+ * segments (lib/callVerification.ts's computeOverlapSeconds), not a
+ * bare running total bumped by whichever party reports first.
+ *
+ * This is the fix for the sharpest gap a security audit of this flow
+ * found: a bare "add secondsElapsed to a counter" design let either
+ * party alone satisfy the entire MIN_VERIFICATION_CALL_SECONDS
+ * requirement with one direct POST, zero corroboration that the other
+ * party was ever connected. Storing each party's own segments (see
+ * migration 0025_call_segments.sql) and crediting only the overlap means
+ * a lone party spamming fabricated segments earns ZERO credit unless the
+ * OTHER party independently reports overlapping time too — closing that
+ * hole without needing a server-authoritative call source (a Jitsi/JaaS
+ * webhook) this app doesn't have. It does not defend against two
+ * COLLUDING accounts fabricating matching fake segments together, the
+ * same residual risk confirmCallCode's own comment above already
+ * documents for the code-confirmation step; that would need real
+ * server-side call attestation, out of scope here. */
 export async function recordVerificationCallProgress(
   supabase: SupabaseClient,
   orderId: number,
@@ -874,16 +995,101 @@ export async function recordVerificationCallProgress(
   }
   if (!isBuyer && !isSupplier) throw new NotOrderOwnerError();
 
-  // A single reported segment capped at 2 hours, generous for a real
-  // call, not so unbounded that one malformed/malicious report could
-  // satisfy the whole requirement by itself.
-  const cappedSeconds = Math.max(0, Math.min(Math.round(secondsElapsed), 2 * 60 * 60));
-  const newTotal = (order.verification_call_seconds ?? 0) + cappedSeconds;
+  // Same statuses confirmCallCode restricts to (and the same "to" stand-
+  // in that function uses for the same reason: this doesn't itself
+  // transition order.status, there's no real target status to name): a
+  // call only makes sense once an order is actually funded, padding time
+  // on an order nobody's paid for yet has no legitimate use.
+  if (!LIVE_CALL_ELIGIBLE_STATUSES.includes(order.status)) {
+    throw new InvalidOrderTransitionError(order.status, "proof_submitted");
+  }
 
-  const { error } = await supabase.from("orders").update({ verification_call_seconds: newTotal }).eq("id", orderId);
+  // When 8x8 JaaS webhooks are configured, applyJaasWebhookPresence is
+  // the sole, authoritative source of call_segments (see its own
+  // comment for why: it's driven by JaaS's own signed events, not a
+  // client-trusted number). Accepting a client-reported segment ON TOP
+  // of that would reopen exactly the collusion gap the webhook exists
+  // to close, so this becomes a harmless read once that mode is active
+  // — still returns the current (webhook-computed) order state, so a
+  // caller mid-migration to JaaS doesn't see an error, just no further
+  // effect from its own report.
+  if (isJaasWebhookConfigured()) return order;
+
+  // A single reported segment capped at 2 hours, generous for a real
+  // call, not so unbounded that one malformed report could claim an
+  // implausible segment length even before the cross-party overlap step
+  // below discounts anything unconfirmed by the other side.
+  const cappedSeconds = Math.max(0, Math.min(Math.round(secondsElapsed), 2 * 60 * 60));
+  if (cappedSeconds > 0) {
+    const endedAt = new Date();
+    const startedAt = new Date(endedAt.getTime() - cappedSeconds * 1000);
+    const { error: insertError } = await supabase.from("call_segments").insert({
+      order_id: orderId,
+      party: isBuyer ? "buyer" : "supplier",
+      started_at: startedAt.toISOString(),
+      ended_at: endedAt.toISOString(),
+    });
+    if (insertError) throw insertError;
+  }
+
+  const { data: segments, error: fetchError } = await supabase
+    .from("call_segments")
+    .select("party, started_at, ended_at")
+    .eq("order_id", orderId);
+  if (fetchError) throw fetchError;
+
+  const toInterval = (row: { started_at: string; ended_at: string }) => ({
+    startedAt: new Date(row.started_at).getTime(),
+    endedAt: new Date(row.ended_at).getTime(),
+  });
+  const buyerIntervals = (segments ?? []).filter((s) => s.party === "buyer").map(toInterval);
+  const supplierIntervals = (segments ?? []).filter((s) => s.party === "supplier").map(toInterval);
+  const corroboratedSeconds = computeOverlapSeconds(buyerIntervals, supplierIntervals);
+
+  const { error } = await supabase.from("orders").update({ verification_call_seconds: corroboratedSeconds }).eq("id", orderId);
   if (error) throw error;
 
   return fetchOrder(supabase, orderId);
+}
+
+/** Shared by setCallPresence below and the JaaS webhook path
+ * (app/api/webhooks/jaas/route.ts): a fresh join (wasAlreadyActive
+ * false) pages the OTHER party with a critical, quiet-hours-bypassing
+ * "incoming call" notification, see migration 0012 and
+ * OrderDetailsModal.tsx for the receiving end. Extracted once so both
+ * sources of presence trigger the identical notification, not two
+ * copies that could drift. */
+function notifyCounterpartyCallStarted(supabase: SupabaseClient, order: OrderRow, joinedAsBuyer: boolean): void {
+  if (joinedAsBuyer) {
+    getSupplierUserId(supabase, order.supplier_id).then((supplierUserId) => {
+      if (supplierUserId == null) return;
+      void notifyUser(supabase, {
+        userId: supplierUserId,
+        category: "audit_status",
+        eventType: "verification_call_started",
+        resourceType: "order",
+        resourceId: order.id,
+        title: "Incoming verification call",
+        body: "Your buyer is on a live verification call for this order now.",
+        deepLink: `/supplier?order=${order.id}&call=1`,
+        tag: `call:${order.id}`,
+        critical: true,
+      });
+    });
+  } else {
+    void notifyUser(supabase, {
+      userId: order.buyer_id,
+      category: "audit_status",
+      eventType: "verification_call_started",
+      resourceType: "order",
+      resourceId: order.id,
+      title: "Incoming verification call",
+      body: "Your supplier is on a live verification call for this order now.",
+      deepLink: `/buyer?order=${order.id}&call=1`,
+      tag: `call:${order.id}`,
+      critical: true,
+    });
+  }
 }
 
 /** Reports "I just joined" / "I just left" the live call, immediately,
@@ -893,7 +1099,19 @@ export async function recordVerificationCallProgress(
  * needing to already be looking at the order, see migration 0012 and
  * OrderDetailsModal.tsx. A fresh join (was null, now active) also
  * notifies the other party; a heartbeat re-join (was already set)
- * doesn't page them again. */
+ * doesn't page them again.
+ *
+ * Client-reported, so it's a UX signal only (the incoming-call banner),
+ * never trusted for anything money-adjacent — when JaaS webhooks are
+ * configured (isJaasWebhookConfigured()), applyJaasWebhookPresence
+ * below is the one writing real, corroborated call_segments; this
+ * function no longer feeds verification_call_seconds AT ALL in that
+ * mode (see recordVerificationCallProgress's own early-return). Without
+ * a configured webhook, this is unchanged from before: the client-
+ * reported presence used only to gate reads is exactly what it always
+ * was, the corroborated-overlap defense recordVerificationCallProgress
+ * already provides is what actually protects verification_call_seconds
+ * in that fallback mode. */
 export async function setCallPresence(supabase: SupabaseClient, orderId: number, userId: number, active: boolean): Promise<void> {
   const order = await fetchOrder(supabase, orderId);
 
@@ -904,6 +1122,30 @@ export async function setCallPresence(supabase: SupabaseClient, orderId: number,
     isSupplier = Boolean(profile && profile.id === order.supplier_id);
   }
   if (!isBuyer && !isSupplier) throw new NotOrderOwnerError();
+  // Same eligibility window as recordVerificationCallProgress/
+  // confirmCallCode (a security audit flagged this function as the one
+  // call-related endpoint with no order-status check at all): presence
+  // toggling on an order that isn't even funded yet, or one that's long
+  // past approval, has no legitimate use and is exactly the kind of
+  // padding/notification-spam surface worth closing off.
+  if (!LIVE_CALL_ELIGIBLE_STATUSES.includes(order.status)) {
+    throw new InvalidOrderTransitionError(order.status, "proof_submitted");
+  }
+
+  // Once JaaS webhooks are configured, applyJaasWebhookPresence owns
+  // buyer_call_active_since/supplier_call_active_since exclusively —
+  // letting this client-reported path also write it would race the
+  // authoritative webhook value: a client reporting `active:false`
+  // (honestly or not) between a real JOINED and the eventual real LEFT
+  // would clear the column early, and applyJaasWebhookPresence's own
+  // idempotency guard (activeSince already null) would then silently
+  // treat the real LEFT as already-processed, dropping that segment's
+  // credited time entirely. No-op instead: the incoming-call banner
+  // this function otherwise drives becomes purely webhook-timed in that
+  // mode (at most a couple seconds of webhook-delivery latency behind a
+  // client-reported one, arguably MORE honest UX, not less, since it
+  // now reflects a real join rather than just "the panel opened").
+  if (isJaasWebhookConfigured()) return;
 
   const column = isBuyer ? "buyer_call_active_since" : "supplier_call_active_since";
   const wasAlreadyActive = Boolean(isBuyer ? order.buyer_call_active_since : order.supplier_call_active_since);
@@ -913,47 +1155,91 @@ export async function setCallPresence(supabase: SupabaseClient, orderId: number,
     .eq("id", orderId);
   if (error) throw error;
 
-  if (active && !wasAlreadyActive) {
-    // critical: true here isn't "financially critical" like a release or
-    // refund, it's "time-sensitive the way an actual phone call is": a
-    // notification that arrives after quiet hours end is arriving after
-    // the call is long over, worthless by then. The deep link's `call=1`
-    // is what makes this feel like answering a call rather than reading
-    // about one, see BuyerDashboard.tsx/SupplierDashboard.tsx/
-    // OrderDetailsModal.tsx's autoJoinCall handling, and the service
-    // worker (worker/index.ts) renders this one with a "Join call"
-    // action button instead of the plain default notification.
-    if (isBuyer) {
-      getSupplierUserId(supabase, order.supplier_id).then((supplierUserId) => {
-        if (supplierUserId == null) return;
-        void notifyUser(supabase, {
-          userId: supplierUserId,
-          category: "audit_status",
-          eventType: "verification_call_started",
-          resourceType: "order",
-          resourceId: order.id,
-          title: "Incoming verification call",
-          body: "Your buyer is on a live verification call for this order now.",
-          deepLink: `/supplier?order=${order.id}&call=1`,
-          tag: `call:${order.id}`,
-          critical: true,
-        });
-      });
-    } else {
-      void notifyUser(supabase, {
-        userId: order.buyer_id,
-        category: "audit_status",
-        eventType: "verification_call_started",
-        resourceType: "order",
-        resourceId: order.id,
-        title: "Incoming verification call",
-        body: "Your supplier is on a live verification call for this order now.",
-        deepLink: `/buyer?order=${order.id}&call=1`,
-        tag: `call:${order.id}`,
-        critical: true,
-      });
-    }
+  if (active && !wasAlreadyActive) notifyCounterpartyCallStarted(supabase, order, isBuyer);
+}
+
+/** The real fix for the one gap the corroboration defense above
+ * explicitly documents as unclosed: two COLLUDING accounts (or one
+ * attacker controlling both a buyer and a supplier login) can still
+ * fabricate matching client-reported segments with no real call ever
+ * happening, since recordVerificationCallProgress only ever had client
+ * self-reports to corroborate against each other.
+ *
+ * This is called from app/api/webhooks/jaas/route.ts, itself driven by
+ * 8x8 JaaS's own signed PARTICIPANT_JOINED/PARTICIPANT_LEFT webhook
+ * events (confirmed against developer.8x8.com/jaas/docs/webhooks-events
+ * and webhooks-payload, `data.id` is documented as "the participant's
+ * userId from the JWT payload" — exactly the numeric userId
+ * lib/jaasAuth.ts already signs into that JWT, so no separate identity
+ * mapping is needed). A colluding pair can still fake being IN a real
+ * call together, but they can no longer fake HAVING one without
+ * actually connecting to 8x8's own infrastructure and having JaaS
+ * itself report it — that's a materially higher bar than forging an
+ * HTTP request to this app's own API.
+ *
+ * Reuses buyer_call_active_since/supplier_call_active_since as the
+ * "currently open segment's start time" (the same column
+ * setCallPresence already uses for the UX presence signal — when a real
+ * webhook drives this, that signal becomes genuinely authoritative
+ * too, not just a UX nicety), so `joined` writes it and `left` reads it
+ * back, converts it into a real call_segments row, and recomputes
+ * verification_call_seconds via the exact same computeOverlapSeconds
+ * recordVerificationCallProgress uses — one corroboration engine, two
+ * possible sources of truth feeding it. Naturally idempotent against a
+ * webhook retry: a `left` event finding the column already null (this
+ * exact left already processed once) is a no-op, not a double-counted
+ * segment. */
+export async function applyJaasWebhookPresence(
+  supabase: SupabaseClient,
+  orderId: number,
+  party: "buyer" | "supplier",
+  joined: boolean,
+  atIso: string
+): Promise<void> {
+  const order = await fetchOrder(supabase, orderId);
+  const column = party === "buyer" ? "buyer_call_active_since" : "supplier_call_active_since";
+  const activeSince = party === "buyer" ? order.buyer_call_active_since : order.supplier_call_active_since;
+
+  if (joined) {
+    const wasAlreadyActive = Boolean(activeSince);
+    const { error } = await supabase.from("orders").update({ [column]: atIso }).eq("id", orderId);
+    if (error) throw error;
+    if (!wasAlreadyActive) notifyCounterpartyCallStarted(supabase, order, party === "buyer");
+    return;
   }
+
+  // A LEFT with nothing open (already processed, or this order never
+  // saw a JOINED at all e.g. a webhook delivered out of order) — no
+  // segment to close, exactly the idempotency guard described above.
+  if (!activeSince) return;
+
+  const { error: insertError } = await supabase.from("call_segments").insert({
+    order_id: orderId,
+    party,
+    started_at: activeSince,
+    ended_at: atIso,
+  });
+  if (insertError) throw insertError;
+
+  const { data: segments, error: fetchError } = await supabase
+    .from("call_segments")
+    .select("party, started_at, ended_at")
+    .eq("order_id", orderId);
+  if (fetchError) throw fetchError;
+
+  const toInterval = (row: { started_at: string; ended_at: string }) => ({
+    startedAt: new Date(row.started_at).getTime(),
+    endedAt: new Date(row.ended_at).getTime(),
+  });
+  const buyerIntervals = (segments ?? []).filter((s) => s.party === "buyer").map(toInterval);
+  const supplierIntervals = (segments ?? []).filter((s) => s.party === "supplier").map(toInterval);
+  const corroboratedSeconds = computeOverlapSeconds(buyerIntervals, supplierIntervals);
+
+  const { error: updateError } = await supabase
+    .from("orders")
+    .update({ verification_call_seconds: corroboratedSeconds, [column]: null })
+    .eq("id", orderId);
+  if (updateError) throw updateError;
 }
 
 // ============================================================================
@@ -1313,15 +1599,7 @@ export async function resolveDispute(
 
       const moved = await tryTransition(supabase, order.id, "disputed", "refund_processing");
       if (moved) {
-        const result = await paymentProvider.initiateRefund(order.id, order.amount_minor);
-        await supabase.from("payment_events").insert({
-          order_id: order.id,
-          leg: "refund",
-          provider: "yellow_card",
-          provider_reference: result.refundReference,
-          event_type: result.status === "failed" ? "refund_failed" : "refund_initiated",
-          provider_state: result.status,
-        });
+        await initiateRefundForOrder(supabase, paymentProvider, order.id, order.amount_minor);
         autoActionTaken = "refund_initiated";
       }
     } else {
@@ -1540,15 +1818,7 @@ export async function cancelFundedOrder(
     refund_minor: refundMinor,
   });
 
-  const result = await paymentProvider.initiateRefund(orderId, refundMinor);
-  await supabase.from("payment_events").insert({
-    order_id: orderId,
-    leg: "refund",
-    provider: "yellow_card",
-    provider_reference: result.refundReference,
-    event_type: result.status === "failed" ? "refund_failed" : "refund_initiated",
-    provider_state: result.status,
-  });
+  await initiateRefundForOrder(supabase, paymentProvider, orderId, refundMinor);
 
   getSupplierUserId(supabase, order.supplier_id).then((supplierUserId) => {
     if (supplierUserId == null) return;
@@ -1606,15 +1876,7 @@ export async function abandonOrder(
     refund_minor: order.amount_minor,
   });
 
-  const result = await paymentProvider.initiateRefund(orderId, order.amount_minor);
-  await supabase.from("payment_events").insert({
-    order_id: orderId,
-    leg: "refund",
-    provider: "yellow_card",
-    provider_reference: result.refundReference,
-    event_type: result.status === "failed" ? "refund_failed" : "refund_initiated",
-    provider_state: result.status,
-  });
+  await initiateRefundForOrder(supabase, paymentProvider, orderId, order.amount_minor);
 
   // created_at set explicitly (not left to the column's DB-side default)
   //, the escalation check right below filters on it via .gte(), so it

@@ -1,0 +1,11 @@
+-- 0022_profile_picture.sql
+--
+-- New field, not a conversion of an existing one — no profile picture
+-- concept existed anywhere in this schema before. Nullable: existing
+-- accounts have none and aren't retroactively blocked from anything;
+-- it's only required going forward, at onboarding
+-- (components/OnboardingScreen.tsx step 0, both the buyer and supplier
+-- path), enforced in app/api/auth/me's PATCH handler using the same
+-- lib/uploadValidation.ts's isCloudinaryUrl check as material listing
+-- photos and verification documents.
+alter table users add column if not exists profile_picture_url text;

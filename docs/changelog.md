@@ -279,10 +279,360 @@ Nigeria bank-transfer receives, and every order must stay refundable).
 refund/idempotency guards), 194 total, `tsc --noEmit` clean, full
 production build clean.
 
+## Buyer pre-funded wallet balance
+
+Real behavior change to order funding, not an addition alongside it: a
+buyer now tops up a platform wallet balance ahead of time (visible on
+`/buyer`'s overview) and `fundOrder()` requires that balance to already
+cover an order before it'll fund it — instantly, no fresh bank-transfer
+request per order the way the old direct-to-Yellow-Card path worked.
+
+- **New**: `lib/walletService.ts` (balance reads, top-up, the atomic
+  debit that gates funding, credit-on-refund), migration
+  `0020_buyer_wallet.sql` (`buyer_wallets`/`wallet_transactions`, an
+  atomic `wallet_debit`/`wallet_credit` Postgres function pair following
+  `lib/rateLimit.ts`'s `select ... for update` row-locking precedent —
+  concurrent double-spend is impossible by construction, not by
+  discipline), `GET /api/wallet`, `POST /api/wallet/topup`,
+  `components/WalletTopupModal.tsx`.
+- **Reused, unchanged**: the entire ledger module and the order state
+  machine. Funding-from-wallet and refunding-a-wallet-funded-order both
+  reuse `lib/orderService.ts`'s existing `handleFundingConfirmed`/
+  `handleRefundConfirmed` event consumers unmodified — `provider:
+  "wallet"` is just a third, synchronous `PaymentStatusEvent` source
+  alongside the stub and Yellow Card's real webhook, not a parallel code
+  path.
+- **Deliberately still simulated**: the actual external top-up call
+  (`StubWalletTopupProvider`). Yellow Card's refund API refunds one
+  whole original receive, no amount parameter — there's no documented
+  way to give a buyer back an unspent *portion* of a top-up once some of
+  it's been spent across orders. Wiring real money in before that's
+  resolved risks it getting stuck with no legitimate way out. Same
+  "honestly scaffolded, wired later" posture this project already used
+  for Yellow Card itself. See
+  [payment-integration.md](payment-integration.md#buyer-wallet-migration-0020_buyer_walletsql).
+- KYC moved from gating `fundOrder` directly to gating
+  `initiateWalletTopup` instead — the step that will eventually make a
+  real external call needing it; funding an order from an already
+  KYC'd wallet never re-checks.
+
+12 new tests (`tests/walletService.test.ts`), plus the existing
+`fundOrder`/termination/adversarial suites rewritten (not just extended)
+to the new wallet-first model, 211 total, `tsc --noEmit` clean.
+
+## Real Yellow Card wallet top-up
+
+Closed the one deliberately-simulated piece the wallet feature above
+left open: `lib/yellowCardWalletTopupProvider.ts`'s
+`YellowCardWalletTopupProvider` calls Yellow Card's actual `POST
+/business/receive` (same resource `lib/yellowCardProvider.ts`'s
+order-funding leg already uses, just not tied to an order) the moment
+`YELLOW_CARD_API_KEY`/`YELLOW_CARD_SECRET_KEY` are set. User-confirmed
+design: **one-way**, real money in, no standalone withdrawal — Yellow
+Card's refund API still can't give back an unspent portion of a top-up,
+so that stays an accepted, explicit product limitation rather than a
+guessed-at workaround. Order-level refunds of a wallet-funded order are
+unaffected, they already credited the wallet back correctly.
+
+- `app/api/webhooks/yellowcard/route.ts` now resolves a notification
+  against `wallet_transactions` (a top-up) when it doesn't match any
+  order — one registered endpoint, same as before, covers both.
+- Idempotency uses a client-generated key
+  (`components/WalletTopupModal.tsx`, one per submit press) rather than
+  a DB-derived one — a top-up has no pre-existing identity the way an
+  order's `orderId` already does.
+- **Real bug found and fixed while wiring this in**: `confirmWalletTopup`
+  used to credit the wallet unconditionally on every call, which would
+  have double-credited on a redelivered webhook (this codebase's own
+  webhook handling already assumes at-least-once delivery). Fixed with
+  the same compare-and-swap discipline `handleFundingConfirmed` uses for
+  order status — only credit if the row's `processing -> confirmed`
+  update actually matched.
+- `WalletTopupModal.tsx` now shows real bank-transfer instructions and
+  polls the balance every few seconds while waiting, instead of assuming
+  a stub's instant confirmation.
+
+8 new tests (`tests/yellowCardWalletTopupProvider.test.ts`) plus one
+regression test locking in the double-credit fix, 220 total,
+`tsc --noEmit` clean. See
+[payment-integration.md](payment-integration.md#buyer-wallet-migration-0020_buyer_walletsql)
+for the full design and what's still explicitly out of scope
+(withdrawal).
+
+## Real settlement/payout leg (Yellow Card Send, direct settlement)
+
+Closed the last simulated leg: `escrow_released -> settlement_processing
+-> settled` already existed as real states with a real ledger function
+(`recordSettlement`) and a real confirmation handler
+(`handleSettlementConfirmed`), just never fed a real event — the stub
+auto-fired a fake confirmation the instant release confirmed, purely so
+orders didn't hang forever. Neither of those needed to change; the only
+real gap was WHERE the release's USDC went and who told the platform it
+was actually settled.
+
+**Confirmed against Yellow Card's actual docs, not guessed**: real
+crypto-to-bank settlement is their "Sell Digital Assets" direct-
+settlement flow — a Send request with `directSettlement: true` returns
+a one-time crypto deposit address instead of taking one, you send USDC
+there, they convert and pay the destination bank account. This meant
+`lib/circleEscrowProvider.ts`'s escrow release had to change WHERE it
+sends USDC, not just gain a step after it: `supplier_profiles.wallet_address`
+(the supplier's own crypto wallet) stops being read by the real payout
+path entirely, replaced by `lib/yellowCardProvider.ts`'s new
+`createSettlementSend`, which resolves the deposit address from the
+supplier's on-file bank details (`supplier_payout_profiles`, migration
+`0019_supplier_payout.sql` — collected months ago specifically for
+this, never wired until now). User-confirmed direction: one-way, the
+supplier never touches crypto, matches CLAUDE.md's "crypto rails stay
+invisible" rule.
+
+- **A real, new coupling**: escrow release now requires Yellow Card to
+  ALSO be configured, not just Circle (`MissingYellowCardConfigError`)
+  — the settlement leg's deposit address comes from Yellow Card's Send
+  API now, so Circle alone isn't enough for a real release anymore.
+- **New required env var**: `YELLOW_CARD_ESCROW_CRYPTO_NETWORK`, must
+  match whatever blockchain the Circle escrow wallet actually holds
+  USDC on — invisible from this codebase, no default, refuses to guess.
+- `app/api/webhooks/yellowcard/route.ts` gained a third resolution
+  branch (alongside funding/refund and wallet top-up): a
+  `leg='settlement'` `payment_events` lookup, then a real re-fetch —
+  doesn't gate on the notification's `event` field at all for this leg,
+  because Yellow Card's own docs admit they're mid-migration from
+  legacy webhook event names to v2 ones and the one guide page
+  describing this flow is stale relative to their current terminology.
+  See [payment-integration.md](payment-integration.md#real-settlement-supplier-payout-to-their-bank-account)
+  for the full, honestly-stated list of what's still unconfirmed.
+
+12 new tests (`tests/yellowCardProvider.test.ts`'s `createSettlementSend`/
+`checkAndReportSettlementStatus` coverage, `tests/circleEscrowProvider.test.ts`'s
+new proof that release sends to Yellow Card's deposit address and never
+the supplier's own wallet), 232 total, `tsc --noEmit` clean.
+
+## Two remaining dependency vulnerabilities, fixed
+
+`ws` and `serialize-javascript` were both high-severity, both nested
+3-6 `npm ls` levels deep inside Privy's own wallet-connector tree and
+next-pwa's `workbox-build` respectively — neither top-level package
+had a published version whose own dependency tree resolved to a
+patched copy, so bumping `@privy-io/react-auth`/`@ducanh2912/next-pwa`
+themselves wouldn't have helped. Fixed with a `package.json`
+`overrides` pin instead (`ws` >=8.21.0, `serialize-javascript`
+>=7.0.5), the same mechanism already used for the earlier `axios` fix.
+Verified with a full `npm run build`, not just a clean `npm audit`
+line — `serialize-javascript` is only reachable via the service-worker
+generation step (`workbox-build` → `@rollup/plugin-terser`), so
+`public/sw.js` actually regenerating is the real proof it works. 15
+moderate-severity advisories remain, all in the same Privy
+wallet-connector tree, no fix available short of a major Privy version
+bump — not attempted blind, see [security.md](security.md#dependency-vulnerabilities).
+
+## RLS pilot expanded to 9 more tables
+
+`0017_orders_rls_pilot.sql` proved the hard part (a per-request JWT
+switching the Postgres role to `authenticated` so RLS policies
+actually run, `lib/supabaseUserClient.ts`) on exactly 2 tables. This
+is the "bounded follow-up work" that same doc named:
+`payment_events`, `delivery_proofs`, `disputes`, `ratings` (order-
+scoped, mirroring `orders_select_own`'s own check),
+`notifications`, `notification_preferences`,
+`supplier_verification_applications` (self-scoped, new policies,
+migration `0021_rls_expand_pilot.sql`) — plus wiring
+`GET /api/wallet` and `GET /api/buyer-kyc/me` to actually use the
+authenticated-role client and exercise the self-only policies
+`buyer_kyc_profiles`/`buyer_wallets` already had since their own
+migrations (0018/0020) but never had a route reaching them. 11 tables
+now have an actively-exercised RLS policy; `wallet_transactions` and
+`supplier_payout_profiles` have the identical policy shape sitting
+ready but unwired (no route reads either back yet); everything else
+stays the same RLS-enabled-zero-policies default-deny backstop it
+always was. `SELECT`-only throughout, no write path touched — same
+posture as the original pilot, for the same reason. `tsc --noEmit` and
+the full test suite both clean (232 tests, unaffected — no test
+currently exercises these route handlers directly).
+
+## Payment section closed out — real credentials are genuinely the last thing
+
+Three independent audits (integration completeness, security, feedback/
+UX), each with file:line evidence, to answer honestly whether Yellow
+Card credentials are really the only remaining blocker. Answer: yes,
+with one caveat that can't be closed by writing more code. 14 concrete
+gaps found and closed:
+
+- **Security**: `wallet/topup` and `orders/[id]/fund` — the two routes
+  that actually move money — had zero rate limiting, unlike every
+  termination route. Added the same dual per-IP/per-account quota
+  pattern. Five money-moving routes (`fund`, `topup`, `cancel`,
+  `abandon`, `reject`) fell through to a raw `err.message` on an
+  unexpected failure instead of `dbErrorResponse()`; fixed.
+- **Feedback**: `resolveDispute` and `retry-release` — the two admin
+  actions moving real, unbounded amounts — were toast-only on failure
+  and never required typed confirmation regardless of size;
+  `retry-release`'s dialog didn't even show the amount. Supplier
+  "abandon" and buyer "reject delivery" had the same missing typed-
+  confirmation gap; reject's failures were also toast-only.
+  `WalletTopupModal`'s error state was a bare inline message, the one
+  wallet-adjacent surface not using `ErrorPanel`. All brought up to the
+  same standard `OrderDetailsModal`'s fund/cancel already met — no new
+  components, this was closing an inconsistency.
+- **Integration cleanup**: `YELLOW_CARD_ENVIRONMENT` is now validated
+  strictly (a typo used to silently break at the `API_HOSTS` lookup
+  instead of failing clearly at startup). Two stale "top-up stays
+  simulated" comments (predating `lib/yellowCardWalletTopupProvider.ts`)
+  fixed.
+- **New: `lib/yellowCardReconciliation.ts`** +
+  `app/api/cron/reconcile-yellowcard/route.ts`, mirroring
+  `lib/releaseReconciliation.ts`'s exact shape — a DB-driven sweep for
+  any order stuck at `refund_processing`/`settlement_processing`, or
+  any wallet top-up stuck `processing`, independent of Yellow Card's own
+  webhook retry. Funding itself is excluded on purpose: wallet-first
+  funding (migration 0020) always resolves synchronously, there's no
+  code path left that waits on a real Yellow Card funding receive.
+- **Re-checked against live docs** (docs.yellowcard.engineering): the
+  webhook signature scheme's source text was reconfirmed (same phrase
+  the existing implementation was already built from, still no worked
+  byte-example — the one thing that needs a live sandbox call, not more
+  reading, to fully confirm). Found something genuinely new, though:
+  the refund flow's documented status vocabulary
+  (`pending_refund`/`refunded`/`refund_failed`) exactly matches what
+  `lib/yellowCardProvider.ts`'s `checkAndReportReceiveStatus` already
+  checked for — upgraded from an inferred guess to a confirmed reading.
+
+11 new tests, all `lib/yellowCardReconciliation.ts`'s own direct
+coverage — the rate-limit/error-sanitization wiring needed none, no
+route handler in this app has ever been unit-tested directly (matching
+existing precedent: none of `reject`/`cancel`/`abandon`/`retry-release`
+have route-level rate-limit tests either, only `lib/rateLimit.ts`
+itself does). 261 total, `tsc --noEmit` clean, full production build
+clean.
+
+## Live verification call closed out, the same way payments were
+
+Same three-audit treatment (integration completeness, security,
+feedback/UX) applied to the live verification call this time, not
+payments. The security audit's headline finding: the call could be
+faked end-to-end. `recordVerificationCallProgress` trusted a client-
+reported duration from either party alone with zero corroboration the
+other party was ever connected, and `confirmCallCode` was fully
+decoupled from any call evidence — a single dishonest party (or a
+colluding buyer+supplier pair) could clear the entire pre-approval
+verification gate with two direct API calls, no real call required.
+
+- **Security, the core fix**: `verification_call_seconds` is no longer
+  a bare running total bumped by whichever party reports first. New
+  migration `0025_call_segments.sql` stores each party's own reported
+  join-to-leave segments; new `lib/callVerification.ts`
+  (`computeOverlapSeconds`) recomputes the credited duration as the
+  actual overlap between the buyer's segments and the supplier's
+  segments on every report. A lone party spamming fabricated segments
+  now earns zero credit unless the other party independently reports
+  overlapping time too. `confirmCallCode` now also requires the
+  corroborated threshold be met first, closing the "attestable the
+  instant an order is funded, no call ever happened" gap. Doesn't
+  defend against two colluding accounts fabricating matching fake
+  segments together — the same residual risk `confirmCallCode`'s own
+  comment already documented — that needs real server-side call
+  attestation (a Jitsi/JaaS webhook), out of scope here.
+- **Security, smaller gaps**: all three call routes
+  (`call-progress`/`call-presence`/`call-code-confirm`) were completely
+  unthrottled; added the same dual per-IP/per-account quota pattern
+  every termination route already has. `admin/orders/[id]/retry-release`
+  returned the unredacted private call room id to admin, the one place
+  that invariant (only the two real parties ever see it) was broken.
+  The JaaS video JWT was minted with a `room: "*"` wildcard instead of
+  the specific order's room, so a leaked token would've granted
+  moderator access to every room on the tenant. All three call
+  functions now also share one `LIVE_CALL_ELIGIBLE_STATUSES` check
+  (funded/fulfilling/proof_submitted), closing the gap where call time
+  could be padded on an order that wasn't even funded yet.
+- **Feedback/UX**: the on-screen "reopen this order to try again"
+  advice after a failed video load was actually broken — a leftover
+  `<script>` tag meant a remount without a full page reload silently
+  produced a permanently blank panel with no error shown, now fixed.
+  Failed call-progress/call-code-confirm reports moved from a bare
+  toast to the same persistent `ErrorPanel` (with Retry) fund/approve
+  failures already get. Added a proactive camera/mic permission-denial
+  warning (the Permissions API, independent of Jitsi's own undocumented
+  internal events), a single live counter against the 5-minute
+  threshold instead of two numbers that didn't agree, a supplier-side
+  prompt to show the order code on camera (previously buyer-only copy),
+  and an offline-state warning on the Start Call button matching
+  Fund/Approve's existing pattern.
+- **Integration cleanup**: removed one dead unused constant
+  (`JitsiMeetRoom.tsx`'s `SCRIPT_SRC`), and the service worker's
+  `notificationclick` handler now explicitly branches on `event.action`
+  instead of ignoring it — the dedicated "Join call" button worked
+  today only because the deep link happened to already encode it, not
+  because the handler treated it any differently from a plain tap.
+  `resolveDispute`'s supplier-ruling path still bypasses both call
+  gates entirely, unchanged: a genuine, documented, admin-only,
+  audit-logged exception, not a defect.
+
+17 new tests: `tests/callVerification.test.ts`'s direct coverage of the
+overlap math (including the exact "one party alone" attack scenario as
+a named test), plus `tests/orderService.test.ts`/`tests/adversarial.test.ts`
+updated throughout for the new two-party corroboration model. 278
+total, `tsc --noEmit` clean, full production build clean.
+
+## Three follow-up fixes from a "what would you attack" pass
+
+Asked directly, honestly, what the sharpest remaining attack surface
+was after the payment and call-verification hardening passes. Three
+concrete answers, all three closed:
+
+- **The call-verification collusion gap, actually closed, not just
+  documented.** The cross-party corroboration from the previous pass
+  (`lib/callVerification.ts`) stops one dishonest party acting alone,
+  but explicitly couldn't stop two colluding accounts (or one attacker
+  controlling both a buyer and a supplier login) fabricating matching
+  fake segments together. Real fix needs a server-authoritative signal
+  neither client controls — confirmed 8x8 JaaS actually offers exactly
+  that (`developer.8x8.com/jaas/docs`'s Webhooks section:
+  `PARTICIPANT_JOINED`/`PARTICIPANT_LEFT` events, `data.id` documented
+  as "the participant's userId from the JWT payload" — the same numeric
+  userId `lib/jaasAuth.ts` already signs, no separate identity mapping
+  needed). New `lib/jaasWebhookAuth.ts` (signature scheme confirmed
+  against JaaS's own **published worked example**, reproduced
+  byte-for-byte in `tests/jaasWebhookAuth.test.ts` — unlike Yellow
+  Card's webhook side, this one is verified correct, not inferred) and
+  `app/api/webhooks/jaas/route.ts`. `lib/orderService.ts`'s new
+  `applyJaasWebhookPresence` becomes the sole source of `call_segments`
+  once `JAAS_WEBHOOK_SECRET` is set — `recordVerificationCallProgress`
+  and `setCallPresence` both become harmless no-ops for writing that
+  state in that mode, so a colluding pair genuinely can't write a fake
+  segment at all anymore, not just one the overlap math would discount.
+  Registration is manual (JaaS Console's Webhooks section), not an API
+  call, documented in `.env.local.example` and this route's own header.
+- **A full authorization audit of every route touching a table without
+  RLS**, the other structurally dangerous category named in that same
+  pass (only 11 tables have real Postgres-enforced RLS; everywhere
+  else, a missed check in the route layer is the only thing standing
+  between any signed-in user and any other user's data). Read through
+  every route by hand — admin gates, self-scoping via `auth.user.id`
+  never a client-supplied id, ownership checks before every mutation.
+  **Found nothing to fix.** An honest audit doesn't need to find
+  something to be worth doing; this one confirms the discipline holds,
+  including in the profile-viewing feature added earlier this session.
+- **Cloudinary uploads now reject SVG (and everything else that isn't
+  a raster photo format).** `app/api/uploads/sign/route.ts` signs
+  `allowed_formats: "jpg,jpeg,png,webp,heic,heif"` as part of the
+  Cloudinary signature (same signed-param pattern `folder`/`timestamp`
+  already used), `lib/uploadClient.ts` sends the matching value.
+  Cloudinary's `/image/upload` endpoint accepts SVG as a valid image
+  format by default despite it being able to carry an embedded
+  `<script>` — every profile photo, listing photo, and verification
+  document uploaded through this app now can't be one, closing that off
+  structurally rather than relying on every current and future render
+  site happening to stay `<img>`-only forever.
+
 ## Current test coverage
 
-194 tests across 16 files (`npm test`): authorization boundaries, the
-order state machine, the ledger, the full order service lifecycle,
-every termination flow, the adversarial suite, Supabase-backed rate
-limiting, the real Circle and Yellow Card integrations (webhook/
-idempotency logic for both), and the RLS pilot's JWT minting.
+291 tests across 26 files (`npm test`): authorization boundaries, the
+order state machine, the ledger, the full order service lifecycle
+(wallet-first funding included), the live verification call's
+cross-party corroboration AND its JaaS-webhook-authoritative mode, every
+termination flow, the buyer wallet balance/debit/credit primitives
+(including the real Yellow Card top-up provider), the adversarial
+suite, Supabase-backed rate limiting, the real Circle, Yellow Card, and
+JaaS webhook integrations (signature verification confirmed against a
+real published worked example for JaaS, idempotency logic for all four
+payment legs), and the RLS pilot's JWT minting.

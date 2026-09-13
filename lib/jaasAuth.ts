@@ -49,7 +49,15 @@ export async function buildJaasCallConfig(roomId: string, userId: string, displa
         // rather than left to JaaS's own defaults.
         features: { livestreaming: false, recording: false, transcription: false, "outbound-call": false },
       },
-      room: "*",
+      // Scoped to THIS order's room only, not "*". A wildcard here would
+      // mean a leaked/replayed token (server logs, a browser network
+      // tab, any future bug that exposes a roomId to the wrong party)
+      // grants moderator access to every room on this tenant, not just
+      // the one it was actually minted for — the room id's own secrecy
+      // (see components/JitsiMeetRoom.tsx's header comment) would then
+      // be the ONLY thing enforcing per-order isolation, instead of a
+      // second, independent layer the token itself enforces.
+      room: roomId,
     })
       .setProtectedHeader({ alg: "RS256", kid: apiKeyId, typ: "JWT" })
       .setIssuer("chat")

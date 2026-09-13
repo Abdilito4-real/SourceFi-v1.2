@@ -11,7 +11,7 @@
 // re-verification gap.
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
 import { requireRole } from "../../../lib/authz";
-import { isSafeHttpUrl } from "../../../lib/safeUrl";
+import { isCloudinaryUrl } from "../../../lib/uploadValidation";
 import { dbErrorResponse } from "../../../lib/dbErrorResponse";
 
 async function resolveSupplierProfileId(supabase: ReturnType<typeof getSupabaseServerClient>, userId: number): Promise<number | null> {
@@ -52,7 +52,14 @@ export async function POST(request: Request) {
   const description = typeof body?.description === "string" ? body.description.trim() || null : null;
   const unit = typeof body?.unit === "string" ? body.unit.trim() || null : null;
   const rawImageUrl = typeof body?.imageUrl === "string" ? body.imageUrl.trim() : "";
-  const imageUrl = rawImageUrl && isSafeHttpUrl(rawImageUrl) ? rawImageUrl : null;
+  // Required on create — a listing without a photo isn't buyer-facing
+  // material. Must be a real result of this app's own upload flow
+  // (app/api/uploads/sign), not just any https URL a client could paste
+  // in directly, or "must upload" would only be a UI-layer suggestion.
+  if (!rawImageUrl || !isCloudinaryUrl(rawImageUrl)) {
+    return Response.json({ error: "A photo of the material is required — upload one, don't paste a URL." }, { status: 400 });
+  }
+  const imageUrl = rawImageUrl;
 
   if (!name) return Response.json({ error: "A name is required." }, { status: 400 });
 

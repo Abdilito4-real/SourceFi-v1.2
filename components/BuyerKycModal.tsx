@@ -2,11 +2,13 @@
 
 // components/BuyerKycModal.tsx
 //
-// Shown reactively when fundOrder fails with BuyerKycRequiredError
-// (see components/OrderDetailsModal.tsx's onKycRequired callback), not
-// on load — same "prompt only when actually needed" posture as
-// PushSoftPrompt. Real Yellow Card funding needs this data in its
-// `recipient` object (name/phone/dob/idType/idNumber/address), see
+// Shown reactively when a wallet top-up fails with BuyerKycRequiredError
+// (see components/WalletTopupModal.tsx's onKycRequired callback), not on
+// load — same "prompt only when actually needed" posture as
+// PushSoftPrompt. Moved here from gating fundOrder directly once order
+// funding became wallet-first (migration 0020): topping up is now the
+// step that will eventually make a real external Yellow Card call
+// needing this data (name/phone/dob/idType/idNumber/address), see
 // migration 0018_buyer_kyc.sql and lib/yellowCardProvider.ts.
 //
 // One-time, self-service, no admin review step, POST /api/buyer-kyc
@@ -65,7 +67,7 @@ export default function BuyerKycModal({ open, onClose, onSubmitted }: BuyerKycMo
   };
 
   return (
-    <Modal open={open} onClose={onClose} title="Verify your identity to fund this order" size="md">
+    <Modal open={open} onClose={onClose} title="Verify your identity to top up your wallet" size="md">
       <div className="flex flex-col gap-4">
         <p className="text-sm leading-relaxed text-text-secondary">
           Nigerian payment regulations require this before your first payment. It&rsquo;s a one-time step, you

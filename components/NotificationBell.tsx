@@ -138,7 +138,7 @@ export default function NotificationBell() {
           // off-screen. Fixed + viewport-relative below sm avoids that;
           // sm and up reverts to anchored-to-button, which is correct
           // once the header is a single flush-right row.
-          className="fixed inset-x-3 top-[4.5rem] z-[1100] max-h-[70vh] overflow-y-auto rounded-xl border border-border bg-surface-elevated shadow-lg sm:absolute sm:inset-x-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-96"
+          className="fixed inset-x-3 top-[4.5rem] z-[1100] max-h-[70dvh] overflow-y-auto overscroll-contain rounded-xl border border-border bg-surface-elevated shadow-lg sm:absolute sm:inset-x-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-96"
         >
           <div className="sticky top-0 flex items-center justify-between border-b border-border bg-surface-elevated px-4 py-3">
             <span className="font-display text-sm font-semibold text-text-primary">Notifications</span>

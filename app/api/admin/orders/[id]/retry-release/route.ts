@@ -14,7 +14,13 @@ import { requireRole, logAudit } from "../../../../../../lib/authz";
 import { checkRateLimit, recordFailure, recordSuccess, rateLimitKey } from "../../../../../../lib/rateLimit";
 import { getPaymentProvider } from "../../../../../../lib/paymentProvider";
 import { retryEscrowRelease, ReleaseNotRetryableError, OrderNotFoundError } from "../../../../../../lib/orderService";
-import { MissingSupplierWalletError, NoUsdcTokenOnEscrowWalletError, InsufficientEscrowBalanceError } from "../../../../../../lib/circleEscrowProvider";
+import {
+  MissingSupplierWalletError,
+  MissingYellowCardConfigError,
+  NoUsdcTokenOnEscrowWalletError,
+  InsufficientEscrowBalanceError,
+} from "../../../../../../lib/circleEscrowProvider";
+import { MissingSupplierPayoutProfileError } from "../../../../../../lib/yellowCardProvider";
 import { logInternalError } from "../../../../../../lib/errorReference";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -49,7 +55,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       details: { newStatus: order.status },
       request,
     });
-    return Response.json({ success: true, order });
+    // Redact the private call room id before it reaches admin, same
+    // invariant app/api/orders/route.ts and app/api/orders/[id]/route.ts
+    // already enforce: only the two real parties (buyer/supplier) ever
+    // see the real room id, an admin included, since knowing it is
+    // enough to join the underlying meet.jit.si room directly when JaaS
+    // isn't configured (see components/JitsiMeetRoom.tsx's header
+    // comment on why the room id itself is the privacy boundary).
+    return Response.json({ success: true, order: { ...order, verification_call_room_id: null } });
   } catch (err) {
     await recordFailure(limitKey);
     if (err instanceof OrderNotFoundError) return Response.json({ error: err.message }, { status: 404 });
@@ -58,6 +71,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     }
     if (
       err instanceof MissingSupplierWalletError ||
+      err instanceof MissingSupplierPayoutProfileError ||
+      err instanceof MissingYellowCardConfigError ||
       err instanceof NoUsdcTokenOnEscrowWalletError ||
       err instanceof InsufficientEscrowBalanceError
     ) {

@@ -17,6 +17,7 @@ interface TrustProfile {
   business_name: string;
   business_location: string;
   what_they_sell: string;
+  profile_picture_url: string | null;
   verified_at: string | null;
   rating_average: number | null;
   rating_count: number;
@@ -69,9 +70,19 @@ export default function SupplierTrustProfile({
       ) : (
         <div className="flex flex-col gap-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-text">
-              <Store size={22} />
-            </div>
+            {profile.profile_picture_url ? (
+              // eslint-disable-next-line @next/next/no-img-element -- a
+              // Cloudinary URL, not a local Next.js image asset.
+              <img
+                src={profile.profile_picture_url}
+                alt=""
+                className="h-12 w-12 shrink-0 rounded-xl border border-border object-cover"
+              />
+            ) : (
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-text">
+                <Store size={22} />
+              </div>
+            )}
             <div>
               <SupplierTierBadge tier={profile.tier} />
               <div className="mt-1 flex items-center gap-1 text-xs text-text-tertiary">

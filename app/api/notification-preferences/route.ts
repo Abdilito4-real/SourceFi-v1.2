@@ -6,6 +6,7 @@
 // hiding a toggle. No `security` field anywhere here, on purpose, that
 // category is not opt-out (migration 0009's comment).
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
+import { getUserScopedOrFallbackClient } from "../../../lib/supabaseUserClient";
 import { requireRole } from "../../../lib/authz";
 
 const TOGGLE_KEYS = ["job_availability", "escrow_payment", "audit_status", "disputes"] as const;
@@ -24,7 +25,10 @@ export async function GET() {
   const auth = await requireRole(["buyer", "supplier", "admin"]);
   if (auth instanceof Response) return auth;
 
-  const supabase = getSupabaseServerClient();
+  // RLS pilot expansion (0021_rls_expand_pilot.sql): self-only read,
+  // backed by notification_preferences_select_own. PATCH below stays
+  // on the service-role client — no write policy is part of this pass.
+  const supabase = await getUserScopedOrFallbackClient(auth.user.id);
   const { data } = await supabase.from("notification_preferences").select("*").eq("user_id", auth.user.id).maybeSingle();
 
   return Response.json({ preferences: data ? { ...DEFAULTS, ...data } : { user_id: auth.user.id, ...DEFAULTS } });

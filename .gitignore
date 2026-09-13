@@ -5,6 +5,11 @@ node_modules
 
 .vercel
 .env*
+# The template is meant to be checked in — README's own "Getting
+# Started" says `cp .env.local.example .env.local`, which only works
+# if this file actually ships with the repo. The broad .env* rule
+# above (real secrets) was catching it too.
+!.env.local.example
 
 # Generated at build time by @ducanh2912/next-pwa (workbox-webpack-plugin) —
 # regenerated on every `next build`, not source.

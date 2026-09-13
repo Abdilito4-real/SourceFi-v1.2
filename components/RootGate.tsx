@@ -7,7 +7,7 @@
 // the way and send you to your dashboard. Neither dashboard route
 // re-renders this; they each do their own light auth check for
 // direct/deep links (see BuyerDashboard.tsx / SourcerDashboard.tsx).
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { KeyRound, ShieldCheck, LayoutGrid, Check, type LucideIcon } from "lucide-react";
@@ -19,6 +19,7 @@ import OnboardingScreen, { type OnboardingForm } from "./OnboardingScreen";
 import OnboardingCarousel from "./OnboardingCarousel";
 import PendingVerificationScreen from "./PendingVerificationScreen";
 import type { SupplierVerificationApplicationRow } from "../lib/types";
+import { SUPPORTING_DOCUMENT_TYPES } from "../lib/supplierDocumentTypes";
 
 const INTRO_SEEN_KEY = "sourcefi_intro_seen";
 
@@ -91,13 +92,19 @@ export default function RootGate() {
   const [form, setForm] = useState<OnboardingForm>({
     username: "",
     fullName: "",
+    profilePictureUrl: "",
     companyName: "",
+    companyPhone: "",
     primaryLocation: "",
     path: "buyer",
     cacRegistrationNumber: "",
     taxIdNumber: "",
     whatTheySell: "",
+    supportingDocumentType: SUPPORTING_DOCUMENT_TYPES[0]!.value,
     supportingDocumentUrl: "",
+    payoutBankName: "",
+    payoutAccountNumber: "",
+    payoutAccountName: "",
   });
   const [error, setError] = useState("");
   // null while unknown (avoids a flash of the wrong screen before the
@@ -112,6 +119,31 @@ export default function RootGate() {
   // and isn't gated here at all, only checked for role==='buyer' below.
   const [pendingApplication, setPendingApplication] = useState<SupplierVerificationApplicationRow | null>(null);
   const [pendingApplicationChecked, setPendingApplicationChecked] = useState(false);
+  // Real race, not theoretical: completeOnboarding() resolving flips
+  // needsOnboarding -> readyForDashboard -> true on THIS render, which
+  // fires the pending-application-check effect below via its own GET
+  // /api/supplier-verification/me — concurrently with handleSubmit's own
+  // POST /api/supplier-verification a few lines further down the SAME
+  // function. The GET is a single read; the POST does a payout-profile
+  // upsert + an insert, so the GET routinely wins the race and finds
+  // nothing yet (the POST hasn't committed), locks in "not pending", and
+  // the redirect effect fires router.replace("/buyer") before the POST's
+  // own result — the actual pending application — ever lands. This ref
+  // (not state: must be readable synchronously inside the effect the
+  // instant it fires, not after a re-render) tells that effect to stand
+  // down and let handleSubmit's own POST be the sole source of truth
+  // whenever a submission is genuinely in flight.
+  const submittingApplicationRef = useRef(false);
+  // Set right when completeOnboarding() succeeds below, read by the
+  // redirect effect that follows: distinguishes "this /buyer redirect is
+  // happening because onboarding JUST finished" from "this /buyer
+  // redirect is just an already-onboarded returning user bouncing
+  // through / again" (which happens on every fresh app open, PWA
+  // start_url is "/"). Only the former should carry the one-time
+  // welcome push-notification prompt; a ref, not state, because it only
+  // needs to be read once, synchronously, by the effect that fires
+  // immediately after this same render.
+  const justOnboardedRef = useRef(false);
 
   useEffect(() => {
     try {
@@ -136,13 +168,19 @@ export default function RootGate() {
     if (!readyForDashboard) return;
     // Already resolved once (including the direct-from-submit path in
     // handleSubmit below, which sets both these synchronously right
-    // after a successful application POST), skip re-checking. Without
-    // this guard, this effect firing on the SAME render pass that
-    // needsOnboarding flips (readyForDashboard becoming true) can race
-    // the just-submitted application's own insert and briefly read back
-    // "no pending application yet", clobbering the correct value handleSubmit
-    // just set and causing a flash toward /buyer before self-correcting.
+    // after a successful application POST), skip re-checking.
     if (pendingApplicationChecked) return;
+    // A submission is genuinely in flight right now (handleSubmit set
+    // this ref synchronously before its own POST) — stand down entirely
+    // rather than race it. This isn't just a redundant check: the
+    // redirect effect below fires router.replace("/buyer") the instant
+    // pendingApplicationChecked flips true with a null application, and
+    // that's a REAL navigation, not a flag — by the time handleSubmit's
+    // own POST resolves with the correct (pending) application a moment
+    // later, the page has already left. Confirmed live: this exact race
+    // sent a first-time supplier applicant straight to /buyer with no
+    // application ever visibly submitted.
+    if (submittingApplicationRef.current) return;
     if (user?.role !== "buyer") {
       // Only a still-role='buyer' account can have a BLOCKING first-time
       // application, an already-'supplier' account's re-verification
@@ -182,7 +220,13 @@ export default function RootGate() {
     // and SupplierDashboard's switchLinks no longer offering the link at
     // all), this was the actual root cause, not just a stray nav link.
     const destination = user?.role === "admin" ? "/admin" : user?.role === "supplier" ? "/supplier" : "/buyer";
-    router.replace(destination);
+    // ?welcome=1 is the buyer dashboard's cue to offer the push-
+    // notification soft prompt as literally the first thing after sign
+    // up, instead of waiting for a later "value is obvious" moment
+    // (funding an order) some buyers might never reach quickly, or at
+    // all. Only added on the actual onboarding-just-completed redirect,
+    // never on a returning user's routine bounce through this same path.
+    router.replace(justOnboardedRef.current ? `${destination}?welcome=1` : destination);
   }, [readyForDashboard, pendingApplicationChecked, pendingApplication, user, router]);
 
   if (checkingSession || introSeen === null) {
@@ -213,16 +257,50 @@ export default function RootGate() {
       setError("Please choose a username of at least 3 characters.");
       return;
     }
-    if (form.path === "supplier" && !(form.companyName.trim() && form.primaryLocation.trim() && form.whatTheySell.trim())) {
-      setError("Business name, location, and what you sell are required for supplier verification.");
+    if (!form.profilePictureUrl.trim()) {
+      setError("A profile picture is required.");
+      return;
+    }
+    if (
+      form.path === "supplier" &&
+      !(form.companyName.trim() && form.companyPhone.trim() && form.primaryLocation.trim() && form.whatTheySell.trim())
+    ) {
+      setError("Business name, phone number, location, and what you sell are required for supplier verification.");
+      return;
+    }
+    if (form.path === "supplier" && !(form.cacRegistrationNumber.trim() && form.taxIdNumber.trim())) {
+      setError("CAC registration number and Tax ID are required for supplier verification.");
+      return;
+    }
+    if (
+      form.path === "supplier" &&
+      !(
+        form.supportingDocumentType.trim() &&
+        form.supportingDocumentUrl.trim() &&
+        form.payoutBankName.trim() &&
+        form.payoutAccountNumber.trim() &&
+        form.payoutAccountName.trim()
+      )
+    ) {
+      setError("A document type, its supporting photo, and your payout bank details are required — this is how you'll be paid.");
       return;
     }
 
-    const result = await completeOnboarding(form.username.trim());
+    // Set BEFORE completeOnboarding, not after: that call's own success
+    // is what flips needsOnboarding -> readyForDashboard -> true, which
+    // is exactly what fires the checking effect this ref exists to hold
+    // off — it has to already be true by the time that state update
+    // lands, not merely by the time this function gets around to its
+    // own POST a few lines later.
+    if (form.path === "supplier") submittingApplicationRef.current = true;
+
+    const result = await completeOnboarding(form.username.trim(), form.profilePictureUrl.trim());
     if (!result.success) {
+      submittingApplicationRef.current = false;
       setError(result.error || "Something went wrong.");
       return;
     }
+    justOnboardedRef.current = true;
 
     // The profile save always happens; the application is a second,
     // independent step on top of it, a failure here shouldn't undo the
@@ -235,23 +313,36 @@ export default function RootGate() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             businessName: form.companyName,
+            phone: form.companyPhone,
             businessLocation: form.primaryLocation,
             whatTheySell: form.whatTheySell,
             cacRegistrationNumber: form.cacRegistrationNumber,
             taxIdNumber: form.taxIdNumber,
+            supportingDocumentType: form.supportingDocumentType,
             supportingDocumentUrl: form.supportingDocumentUrl,
+            payoutBankName: form.payoutBankName,
+            payoutAccountNumber: form.payoutAccountNumber,
+            payoutAccountName: form.payoutAccountName,
           }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed to submit your application.");
         notify("success", "Verification application submitted. An admin will review it.");
         // Set directly from the response rather than waiting on the
-        // pending-application effect to refetch, avoids a flash of the
-        // redirect-to-/buyer race between this submit and that fetch.
+        // pending-application effect to refetch — this IS the correct
+        // value, no need to ask again.
         setPendingApplicationChecked(true);
         setPendingApplication(data.application);
       } catch (err) {
         notify("error", err instanceof Error ? err.message : "Failed to submit your application.");
+      } finally {
+        // Either outcome: no submission is in flight anymore. On
+        // success this is a no-op in practice (pendingApplicationChecked
+        // is already true, so the checking effect's own earlier guard
+        // stops it regardless) — on failure this is what lets that
+        // effect run its normal check on a later render instead of
+        // being held off forever.
+        submittingApplicationRef.current = false;
       }
     }
   };

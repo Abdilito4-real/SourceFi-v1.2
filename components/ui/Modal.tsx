@@ -9,6 +9,7 @@
 import React, { useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import { cn } from "./cn";
+import { useBodyScrollLock } from "./useBodyScrollLock";
 
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
@@ -30,6 +31,8 @@ export interface ModalProps {
 export default function Modal({ open, onClose, title, children, className = "", size = "md", dismissible = true }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLElement | null>(null);
+
+  useBodyScrollLock(open);
 
   useEffect(() => {
     if (!open) return;
@@ -81,7 +84,19 @@ export default function Modal({ open, onClose, title, children, className = "", 
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         className={cn(
-          "modal-content w-full rounded-xl border border-border bg-surface-elevated p-6 shadow-lg",
+          // max-h-[90dvh] (not 90vh — mobile browsers compute vh against
+          // the largest viewport, address-bar hidden, so a shorter
+          // "currently visible" viewport can clip content past the fold
+          // before the user realizes this panel scrolls at all) +
+          // overflow-y-auto is the DEFAULT for every Modal consumer, not
+          // an opt-in: BuyerKycModal (7 fields, gates the first wallet
+          // top-up) and WalletTopupModal previously had no scroll
+          // container of their own at all, so with the on-screen
+          // keyboard open their submit button could become physically
+          // unreachable. overscroll-contain stops a scroll gesture that
+          // reaches the panel's own top/bottom from chaining into a
+          // scroll of whatever's behind the (now scroll-locked) backdrop.
+          "modal-content w-full max-h-[90dvh] overflow-y-auto overscroll-contain rounded-xl border border-border bg-surface-elevated p-6 shadow-lg",
           sizes[size],
           className
         )}

@@ -47,7 +47,6 @@ interface JitsiMeetAPI {
 }
 
 const JITSI_DOMAIN = "meet.jit.si";
-const SCRIPT_SRC = `https://${JITSI_DOMAIN}/external_api.js`;
 
 function formatDuration(totalSeconds: number): string {
   const m = Math.floor(totalSeconds / 60);
@@ -80,18 +79,51 @@ export interface JitsiMeetRoomProps {
    * the total-duration bookkeeping onSegmentComplete handles. */
   onJoined?: () => void;
   onLeft?: () => void;
+  /** Fired every second while actually in-call with the live elapsed
+   * seconds of the CURRENT segment (0 once it ends), and once more with
+   * 0 right as it ends. Lets the caller show one true live counter
+   * against the 5-minute requirement (already-reported total +
+   * this) instead of two numbers that don't agree — the confirmed
+   * total only advances once a segment finishes reporting, so without
+   * this it sits frozen for the whole first call. */
+  onLiveTick?: (seconds: number) => void;
   /** From GET /api/orders/[id], see lib/jaasAuth.ts. Undefined/null uses
    * the free meet.jit.si join this component always had. */
   callConfig?: JaasCallConfig | null;
 }
 
-export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSegmentComplete, onJoined, onLeft, callConfig }: JitsiMeetRoomProps) {
+export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSegmentComplete, onJoined, onLeft, onLiveTick, callConfig }: JitsiMeetRoomProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<JitsiMeetAPI | null>(null);
   const joinedAtRef = useRef<number | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [inCall, setInCall] = useState(false);
   const [liveElapsed, setLiveElapsed] = useState(0);
+  const [permissionDenied, setPermissionDenied] = useState(false);
+
+  // Proactive camera/mic permission check, independent of Jitsi's own
+  // in-iframe UI (which is all a user sees today if access is blocked —
+  // no SourceFi-authored guidance at all, a real gap on a mid-range
+  // Android phone where a site's camera/mic permission was very likely
+  // already denied once before and the user doesn't know how to re-grant
+  // it from inside a WebView/PWA). The Permissions API's "camera"/
+  // "microphone" names aren't universally supported (notably Safari), so
+  // this fails silently rather than guessing at Jitsi's own undocumented,
+  // version-dependent internal error events — an enhancement, not
+  // something the call panel depends on to function.
+  useEffect(() => {
+    let cancelled = false;
+    if (!navigator.permissions?.query) return;
+    Promise.all([
+      navigator.permissions.query({ name: "camera" as PermissionName }).catch(() => null),
+      navigator.permissions.query({ name: "microphone" as PermissionName }).catch(() => null),
+    ]).then(([camera, mic]) => {
+      if (!cancelled && (camera?.state === "denied" || mic?.state === "denied")) setPermissionDenied(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -184,7 +216,22 @@ export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSeg
         document.body.appendChild(script);
       }
       script.addEventListener("load", init);
-      script.addEventListener("error", () => !cancelled && setLoadError(true));
+      script.addEventListener("error", () => {
+        if (!cancelled) setLoadError(true);
+        // A `<script>` tag only ever fires 'load'/'error' once; a freshly
+        // attached listener on an already-settled element never fires
+        // (DOM events don't replay). Left in place, the NEXT mount of this
+        // component (Hide -> Continue, or closing/reopening the order
+        // without a full page reload — a real path, this panel doesn't
+        // force one) would find this same dead element via the
+        // querySelector above, attach new listeners that will never fire,
+        // and silently render an empty panel forever with no error shown
+        // — exactly contradicting this component's own "reopen this order
+        // to try again" message below. Removing it here means the next
+        // mount finds nothing, creates a fresh `<script>`, and genuinely
+        // retries the network fetch.
+        script.remove();
+      });
     }
 
     return () => {
@@ -212,6 +259,14 @@ export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSeg
     return () => clearInterval(interval);
   }, [inCall]);
 
+  // Separate from the timer effect above so a fresh `onLiveTick`
+  // reference each render (a caller not wrapping it in useCallback)
+  // doesn't tear down/recreate the interval itself, only re-fires this.
+  useEffect(() => {
+    onLiveTick?.(liveElapsed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveElapsed]);
+
   // Re-stamps presence while actually in-call, so a crashed/killed tab
   // (which never fires videoConferenceLeft) still goes stale server-side
   // within HEARTBEAT_MS + the reader's own staleness window, instead of
@@ -231,6 +286,12 @@ export default function JitsiMeetRoom({ roomId, displayLabel, displayName, onSeg
           {inCall ? `In call: ${formatDuration(liveElapsed)}` : `Verification call: ${displayLabel}`}
         </span>
       </div>
+      {permissionDenied && !inCall && (
+        <div className="bg-warning-soft px-3 py-2 text-center text-[11.5px] text-warning-text">
+          Camera/microphone access is blocked for this site. Enable it in your browser's site settings, then
+          reload this page to join the call.
+        </div>
+      )}
       {loadError ? (
         <div className="flex flex-1 items-center justify-center px-4 text-center text-sm text-white/70">
           Couldn't load the video call. Check your connection and reopen this order to try again.

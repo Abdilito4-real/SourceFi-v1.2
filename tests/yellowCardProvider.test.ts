@@ -12,14 +12,16 @@
 // money-relevant surface worth testing directly; the exact request
 // body sent to Yellow Card is inspected too, since a wrong field name
 // there fails silently against a real API otherwise.
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { FakeSupabase, asSupabaseClient } from "./testUtils/fakeSupabase";
 import {
   YellowCardProvider,
   MissingBuyerKycError,
+  MissingSupplierPayoutProfileError,
   YellowCardPartialRefundUnsupportedError,
   NoFundingReferenceOnFileError,
   YellowCardApiError,
+  createSettlementSend,
 } from "../lib/yellowCardProvider";
 import type { PaymentStatusEvent } from "../lib/paymentBoundary";
 
@@ -210,5 +212,161 @@ describe("YellowCardProvider: legs it delegates (release, rating)", () => {
     const result = await provider.submitRatingOnChain(1, 5, 5, "Great supplier");
     expect(result.status).toBe("submitted");
     expect(result.txHash).toBeNull();
+  });
+});
+
+const YC_CONFIG = { apiKey: "test-api-key", secretKey: "test-secret-key", environment: "sandbox" as const };
+
+function seedSupplierWithPayout(fake: FakeSupabase, overrides: Partial<{ userId: number; profileId: number }> = {}) {
+  const userId = overrides.userId ?? 20;
+  const profileId = overrides.profileId ?? 5;
+  fake.seed("supplier_profiles", [{ id: profileId, user_id: userId }]);
+  fake.seed("supplier_payout_profiles", [
+    { user_id: userId, bank_name: "GTBank", account_number: "0123456789", account_name: "Lagos Cement Co", bank_network_id: "yc-network-1" },
+  ]);
+  return { userId, profileId };
+}
+
+describe("createSettlementSend: real supplier payout via Yellow Card's Send API", () => {
+  beforeEach(() => {
+    process.env.YELLOW_CARD_ESCROW_CRYPTO_NETWORK = "ETH";
+  });
+  afterEach(() => {
+    delete process.env.YELLOW_CARD_ESCROW_CRYPTO_NETWORK;
+  });
+
+  it("throws MissingSupplierPayoutProfileError when the supplier has no payout bank details on file, never calls the API", async () => {
+    const fake = new FakeSupabase();
+    fake.seed("supplier_profiles", [{ id: 5, user_id: 20 }]);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(
+      createSettlementSend(asSupabaseClient(fake), YC_CONFIG, { orderId: 1, supplierProfileId: 5, ngnAmountMinor: 500_000 })
+    ).rejects.toThrow(MissingSupplierPayoutProfileError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("throws when YELLOW_CARD_ESCROW_CRYPTO_NETWORK isn't set, never calls the API — refuses to guess the chain", async () => {
+    delete process.env.YELLOW_CARD_ESCROW_CRYPTO_NETWORK;
+    const fake = new FakeSupabase();
+    seedSupplierWithPayout(fake);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(
+      createSettlementSend(asSupabaseClient(fake), YC_CONFIG, { orderId: 1, supplierProfileId: 5, ngnAmountMinor: 500_000 })
+    ).rejects.toThrow(/YELLOW_CARD_ESCROW_CRYPTO_NETWORK/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("builds a directSettlement Send request from the supplier's payout profile and returns the deposit address", async () => {
+    const fake = new FakeSupabase();
+    seedSupplierWithPayout(fake);
+
+    let capturedBody: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        capturedBody = JSON.parse(init.body as string);
+        return new Response(JSON.stringify({ id: "send-abc123", cryptoDepositAddress: "0xDEPOSIT" }), { status: 200 });
+      })
+    );
+
+    const result = await createSettlementSend(asSupabaseClient(fake), YC_CONFIG, {
+      orderId: 7,
+      supplierProfileId: 5,
+      ngnAmountMinor: 500_000, // 5,000 naira
+    });
+
+    expect(result).toEqual({ sendReference: "send-abc123", cryptoDepositAddress: "0xDEPOSIT" });
+    expect(capturedBody).toMatchObject({
+      channelType: "bank",
+      country: "NG",
+      currency: "NGN",
+      localAmount: 5000,
+      directSettlement: true,
+      settlementInfo: { cryptoCurrency: "USDC", cryptoNetwork: "ETH" },
+      reason: "other",
+      destination: {
+        accountType: "bank",
+        accountBank: "GTBank",
+        accountName: "Lagos Cement Co",
+        accountNumber: "0123456789",
+        networkId: "yc-network-1",
+      },
+    });
+    expect(typeof (capturedBody as unknown as { sequenceId: string }).sequenceId).toBe("string");
+  });
+
+  it("the same order always gets the same sequenceId (idempotency), a different order gets a different one", async () => {
+    const fake = new FakeSupabase();
+    seedSupplierWithPayout(fake);
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(init.body as string));
+        return new Response(JSON.stringify({ id: "send-1", cryptoDepositAddress: "0xDEPOSIT" }), { status: 200 });
+      })
+    );
+
+    await createSettlementSend(asSupabaseClient(fake), YC_CONFIG, { orderId: 1, supplierProfileId: 5, ngnAmountMinor: 500_000 });
+    await createSettlementSend(asSupabaseClient(fake), YC_CONFIG, { orderId: 1, supplierProfileId: 5, ngnAmountMinor: 500_000 }); // a retry
+    await createSettlementSend(asSupabaseClient(fake), YC_CONFIG, { orderId: 2, supplierProfileId: 5, ngnAmountMinor: 500_000 });
+
+    const seqIds = bodies.map((b) => b.sequenceId);
+    expect(seqIds[0]).toBe(seqIds[1]);
+    expect(seqIds[0]).not.toBe(seqIds[2]);
+  });
+
+  it("throws if Yellow Card's response has no crypto deposit address in any expected field, doesn't fabricate one", async () => {
+    const fake = new FakeSupabase();
+    seedSupplierWithPayout(fake);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "send-no-address" }), { status: 200 })));
+
+    await expect(
+      createSettlementSend(asSupabaseClient(fake), YC_CONFIG, { orderId: 1, supplierProfileId: 5, ngnAmountMinor: 500_000 })
+    ).rejects.toThrow(/deposit address/);
+  });
+
+  it("throws YellowCardApiError on a non-OK response, doesn't fabricate a result", async () => {
+    const fake = new FakeSupabase();
+    seedSupplierWithPayout(fake);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ code: "INVALID_REQUEST" }), { status: 400 })));
+
+    await expect(
+      createSettlementSend(asSupabaseClient(fake), YC_CONFIG, { orderId: 1, supplierProfileId: 5, ngnAmountMinor: 500_000 })
+    ).rejects.toThrow(YellowCardApiError);
+  });
+});
+
+describe("YellowCardProvider.checkAndReportSettlementStatus", () => {
+  it("still pending: returns false, reports nothing", async () => {
+    const fake = new FakeSupabase();
+    const { provider, events } = makeProvider(fake);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "pending" }), { status: 200 })));
+
+    expect(await provider.checkAndReportSettlementStatus(7, "send-pending")).toBe(false);
+    expect(events).toHaveLength(0);
+  });
+
+  it("confirmed: reports a settlement leg event for handleSettlementConfirmed to pick up", async () => {
+    const fake = new FakeSupabase();
+    const { provider, events } = makeProvider(fake);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "complete" }), { status: 200 })));
+
+    expect(await provider.checkAndReportSettlementStatus(7, "send-ok")).toBe(true);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ orderId: 7, leg: "settlement", provider: "yellow_card", providerReference: "send-ok" });
+  });
+
+  it("failed: reports true (handled) but never calls onStatusUpdate, no fabricated success", async () => {
+    const fake = new FakeSupabase();
+    const { provider, events } = makeProvider(fake);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "failed" }), { status: 200 })));
+
+    expect(await provider.checkAndReportSettlementStatus(7, "send-failed")).toBe(true);
+    expect(events).toHaveLength(0);
   });
 });

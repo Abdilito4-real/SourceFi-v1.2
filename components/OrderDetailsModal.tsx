@@ -16,6 +16,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, Loader2, Clock, Star, AlertTriangle, Image as ImageIcon, Receipt, Video, History } from "lucide-react";
 import Modal from "./ui/Modal";
+import ReceiptModal from "./ReceiptModal";
 import Button from "./ui/Button";
 import Badge from "./ui/Badge";
 import StatusBadge from "./ui/StatusBadge";
@@ -25,8 +26,8 @@ import Skeleton from "./ui/Skeleton";
 import ConfirmDialog from "./ui/ConfirmDialog";
 import ErrorPanel from "./ui/ErrorPanel";
 import TransactionProgress, { type TransactionStep } from "./ui/TransactionProgress";
+import Stepper, { type StepperStep } from "./ui/Stepper";
 import JitsiMeetRoom from "./JitsiMeetRoom";
-import BuyerKycModal from "./BuyerKycModal";
 import { formatMoney, CANCELLATION_FEE_MINOR, TYPED_CONFIRMATION_THRESHOLD_MINOR } from "../lib/money";
 import { useNetworkStatus } from "../lib/useNetworkStatus";
 import { playIncomingCallChime } from "../lib/callSound";
@@ -80,6 +81,10 @@ const LIVE_CALL_ELIGIBLE_STATUSES = new Set(["funded", "fulfilling", "proof_subm
 // app/api/suppliers/route.ts and the is_supplier_currently_verified()
 // Postgres function, no codegen linking them.
 const MIN_VERIFICATION_CALL_SECONDS = 5 * 60;
+
+function formatCallDuration(totalSeconds: number): string {
+  return `${Math.floor(totalSeconds / 60)}:${(totalSeconds % 60).toString().padStart(2, "0")}`;
+}
 
 const DISPUTE_CATEGORIES: { value: DisputeCategory; label: string }[] = [
   { value: "item_not_as_described", label: "Item not as described" },
@@ -165,6 +170,11 @@ export interface OrderDetailsModalProps {
    * hooks in here, not on page load. Buyer-side only; nothing calls this
    * for a supplier/admin viewer. */
   onFunded?: () => void;
+  /** Fund order is wallet-first (migration 0020): fired when /fund comes
+   * back with insufficientBalance instead of a plain error, the caller
+   * shows WalletTopupModal prefilled with the shortfall rather than a
+   * dead-end error toast. Buyer-side only, same posture as onFunded. */
+  onInsufficientBalance?: (shortfallMinor: number) => void;
   /** Set when this modal was opened from a "Join call" push notification
    * (deep link's ?call=1, see lib/orderService.ts's setCallPresence and
    * worker/index.ts), auto-opens the call panel once the order loads
@@ -184,6 +194,7 @@ export default function OrderDetailsModal({
   onOrderChange,
   showNotification,
   onFunded,
+  onInsufficientBalance,
   autoJoinCall,
   onAutoJoinCallHandled,
 }: OrderDetailsModalProps) {
@@ -191,17 +202,30 @@ export default function OrderDetailsModal({
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
   const [showFundConfirm, setShowFundConfirm] = useState(false);
+  // "View receipt" after a successful transaction, either right after
+  // funding or once the order's genuinely settled — see
+  // lib/receiptService.ts / components/ReceiptModal.tsx.
+  const [receiptLeg, setReceiptLeg] = useState<"funding" | "settlement" | null>(null);
   const [showApproveConfirm, setShowApproveConfirm] = useState(false);
   const [fundError, setFundError] = useState<FinancialError | null>(null);
-  // Real Yellow Card integration: fundOrder can fail with "complete
-  // your KYC first" (BuyerKycRequiredError), shown as a form instead of
-  // a plain error toast, see components/BuyerKycModal.tsx. Bank-transfer
-  // funding returns account details the buyer needs to actually pay
-  // into, shown once and kept visible while the order sits at
-  // payment_processing.
-  const [showKycModal, setShowKycModal] = useState(false);
-  const [fundPaymentInstructions, setFundPaymentInstructions] = useState<{ bankName: string; accountNumber: string; accountName: string } | null>(null);
   const [approveError, setApproveError] = useState<FinancialError | null>(null);
+  // Same persistent-not-just-a-toast treatment as fund/approve above, for
+  // the two call-flow failures a UX audit found silently falling back to
+  // a plain toast: a failed segment report (seconds genuinely at risk of
+  // being lost, e.g. a connection drop right as the call ends) and a
+  // failed code-confirmation attempt. `callSegmentError` carries the
+  // seconds that failed to save so Retry re-sends the SAME report rather
+  // than losing track of them.
+  const [callSegmentError, setCallSegmentError] = useState<(FinancialError & { seconds: number }) | null>(null);
+  const [codeConfirmError, setCodeConfirmError] = useState<FinancialError | null>(null);
+  // The CURRENT in-progress segment's live elapsed seconds (JitsiMeetRoom's
+  // own ticking timer), separate from verificationCallSeconds (the
+  // server-confirmed total, which only advances once a segment finishes
+  // reporting). Shown ADDED to the confirmed total below so the "X / 5:00"
+  // badge is one real live counter instead of sitting frozen for the
+  // entire first call — a UX audit of this flow found the confirmed total
+  // and the in-panel timer were two numbers that never agreed.
+  const [liveSegmentSeconds, setLiveSegmentSeconds] = useState(0);
   const [showCall, setShowCall] = useState(false);
   // Arriving via a "Join call" push notification (?call=1) shouldn't
   // silently activate the camera/mic and start the verification timer
@@ -240,6 +264,7 @@ export default function OrderDetailsModal({
   const [rejectDescription, setRejectDescription] = useState("");
   const [rejectEvidenceUrl, setRejectEvidenceUrl] = useState("");
   const [showRejectConfirm, setShowRejectConfirm] = useState(false);
+  const [rejectError, setRejectError] = useState<FinancialError | null>(null);
   const [showWithdrawConfirm, setShowWithdrawConfirm] = useState(false);
   const [showTimeline, setShowTimeline] = useState(false);
   const [timelineEntries, setTimelineEntries] = useState<{ type: string; timestamp: string; summary: string }[] | null>(null);
@@ -322,9 +347,15 @@ export default function OrderDetailsModal({
 
   // Deliberately separate from runAction: reporting a completed call
   // segment shouldn't toggle the shared `acting` state (which disables
-  // unrelated buttons) or show a toast every time, it happens silently
-  // in the background as segments end, sometimes more than once per
-  // session if the call drops and reconnects.
+  // unrelated buttons), it happens silently in the background as
+  // segments end, sometimes more than once per session if the call drops
+  // and reconnects. A FAILURE here, though, gets the same persistent
+  // ErrorPanel treatment as a failed fund/approve, not a toast: a UX
+  // audit of this flow found that a dropped connection right as a
+  // segment ends previously just flashed a toast with no retry and no
+  // indication of how many seconds were about to be lost — the recorded
+  // seconds passed in here are exactly that amount, kept in state so
+  // Retry can re-send the same report.
   const reportCallSegment = async (seconds: number) => {
     try {
       const res = await fetch(`/api/orders/${orderId}/call-progress`, {
@@ -334,9 +365,15 @@ export default function OrderDetailsModal({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to record call progress.");
+      setCallSegmentError(null);
       await load();
     } catch (err) {
-      showNotification("error", err instanceof Error ? err.message : "Failed to record call progress.");
+      setCallSegmentError({
+        seconds,
+        title: `Couldn't record ${formatCallDuration(seconds)} of your call`,
+        detail: err instanceof Error ? err.message : "Failed to record call progress.",
+        fundPosition: "Nothing else about your order changed — only this segment's time wasn't saved yet.",
+      });
     }
   };
 
@@ -350,9 +387,14 @@ export default function OrderDetailsModal({
       const res = await fetch(`/api/orders/${orderId}/call-code-confirm`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to confirm the order code match.");
+      setCodeConfirmError(null);
       await load();
     } catch (err) {
-      showNotification("error", err instanceof Error ? err.message : "Failed to confirm the order code match.");
+      setCodeConfirmError({
+        title: "Couldn't confirm the code match",
+        detail: err instanceof Error ? err.message : "Failed to confirm the order code match.",
+        fundPosition: "Your funds are still held in escrow, nothing has been released.",
+      });
     } finally {
       setConfirmingCode(false);
     }
@@ -398,9 +440,22 @@ export default function OrderDetailsModal({
       setIncomingCallBannerOpen(true);
       playIncomingCallChime();
     }
+    // FALLING edge while THIS party is still actively on the call: the
+    // other party left (a clean hangup, closing the tab, or a crash —
+    // counterpartyInCall's own 45s staleness window already treats all
+    // three the same way, see its comment above) without this side ever
+    // finding out, leaving them alone in an empty room with no
+    // explanation. End it for them too — closing the panel unmounts
+    // JitsiMeetRoom, whose own cleanup (JitsiMeetRoom.tsx) still reports
+    // whatever segment was in progress before disposing, so no call time
+    // is lost by ending it this way instead of a manual Hide/hangup.
+    if (!counterpartyInCall && prevCounterpartyInCallRef.current && showCall) {
+      showNotification("info", `Your ${role === "buyer" ? "supplier" : "buyer"} left the call.`);
+      setShowCall(false);
+    }
     if (!counterpartyInCall) setIncomingCallBannerOpen(false);
     prevCounterpartyInCallRef.current = counterpartyInCall;
-  }, [counterpartyInCall, showCall]);
+  }, [counterpartyInCall, showCall, role, showNotification]);
 
   const runAction = async (path: string, body?: unknown, successMessage?: string) => {
     setActing(true);
@@ -433,7 +488,13 @@ export default function OrderDetailsModal({
   const runFinancialAction = async (
     path: string,
     body: unknown | undefined,
-    opts: { successMessage: string; fundPosition: string; setError: (e: FinancialError | null) => void; onKycRequired?: () => void }
+    opts: {
+      successMessage: string;
+      fundPosition: string;
+      setError: (e: FinancialError | null) => void;
+      onKycRequired?: () => void;
+      onInsufficientBalance?: (shortfallMinor: number) => void;
+    }
   ) => {
     opts.setError(null);
     setActing(true);
@@ -447,6 +508,10 @@ export default function OrderDetailsModal({
       if (!res.ok) {
         if (data.kycRequired && opts.onKycRequired) {
           opts.onKycRequired();
+          return false;
+        }
+        if (data.insufficientBalance && opts.onInsufficientBalance) {
+          opts.onInsufficientBalance(typeof data.shortfallMinor === "number" ? data.shortfallMinor : 0);
           return false;
         }
         opts.setError({
@@ -463,9 +528,6 @@ export default function OrderDetailsModal({
         await load();
         return true;
       }
-      // Harmless for every action except /fund, which is the only one
-      // that ever sets this on the response.
-      setFundPaymentInstructions(data.paymentInstructions ?? null);
       showNotification("success", opts.successMessage);
       await load();
       return true;
@@ -527,19 +589,27 @@ export default function OrderDetailsModal({
     }
   };
 
-  // Reject (flow 3, reinstated), freezes funds, opens a dispute. Not a
-  // financial action in the runFinancialAction sense (nothing settles
-  // here), so it reuses the plain runAction path like the other
-  // dispute-opening flows in this file.
+  // Reject (flow 3, reinstated), freezes real escrowed funds and opens a
+  // dispute — explicitly irreversible ("can't be undone once
+  // submitted", the ConfirmDialog body below). Originally reasoned as
+  // "not financial in the runFinancialAction sense since nothing
+  // settles here" and left on the plain toast-only runAction path, but
+  // freezing funds with no persistent failure feedback doesn't meet the
+  // same bar fund/cancel/abandon do in this same file — switched to
+  // runFinancialAction for parity.
   const runReject = async () => {
-    const ok = await runAction(
+    const ok = await runFinancialAction(
       "/reject",
       {
         category: rejectCategory,
         description: rejectDescription.trim() || null,
         evidenceUrls: rejectEvidenceUrl.trim() ? [rejectEvidenceUrl.trim()] : [],
       },
-      "Delivery proof rejected. This order is now under dispute review."
+      {
+        successMessage: "Delivery proof rejected. This order is now under dispute review.",
+        fundPosition: "Funds are still held in escrow, exactly as before — nothing froze or moved.",
+        setError: setRejectError,
+      }
     );
     setShowRejectConfirm(false);
     if (ok) {
@@ -582,10 +652,183 @@ export default function OrderDetailsModal({
   const codeConfirmed = Boolean(order.call_code_confirmed_at);
   const inFlightProgress = getInFlightProgress(order.status);
   const needsTypedConfirm = order.amount_minor >= TYPED_CONFIRMATION_THRESHOLD_MINOR;
+
+  // Shared by the supplier's plain call panel and the buyer's step 1
+  // below (components/ui/Stepper.tsx) — one call room, two different
+  // wrappers around it, not two different widgets.
+  // Composite live counter: confirmed total + whatever the current
+  // segment has racked up so far, capped for display only at 5:00 once
+  // the requirement is visibly met (the confirmed total is what actually
+  // gates the next step, this is display-only so it never falsely
+  // unlocks anything early).
+  const displaySeconds = verificationCallSeconds + (showCall ? liveSegmentSeconds : 0);
+
+  const callWidget = (
+    <div>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        {!showCall && (
+          <Button variant="secondary" onClick={() => setShowCall(true)} disabled={!online}>
+            <Video size={15} /> {verificationCallSeconds > 0 ? "Continue" : "Start"} live verification call
+          </Button>
+        )}
+        <span className={`text-xs font-semibold ${callRequirementMet ? "text-success-text" : "text-text-secondary"}`}>
+          {callRequirementMet
+            ? `✓ ${formatCallDuration(verificationCallSeconds)} verified, requirement met`
+            : `${formatCallDuration(displaySeconds)} / 5:00 verified`}
+        </span>
+      </div>
+      {!showCall && !online && (
+        <p className="mb-2 text-xs text-text-tertiary">You're offline. Reconnect to start the call.</p>
+      )}
+      {isSupplier && !callRequirementMet && (
+        <p className="mb-2 text-xs text-text-tertiary">
+          Once the call requirement is met, show order code {order.order_code} on camera so your buyer can confirm it matched.
+        </p>
+      )}
+      {callSegmentError && (
+        <div className="mb-2">
+          <ErrorPanel
+            title={callSegmentError.title}
+            detail={callSegmentError.detail}
+            fundPosition={callSegmentError.fundPosition}
+            onRetry={() => reportCallSegment(callSegmentError.seconds)}
+            onDismiss={() => setCallSegmentError(null)}
+          />
+        </div>
+      )}
+      {showCall && (
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
+              Live call: share this order with your {isBuyer ? "supplier" : "buyer"} to meet here
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowCall(false)}
+              className="text-xs font-semibold text-text-secondary underline hover:text-text-primary"
+            >
+              Hide
+            </button>
+          </div>
+          {order.verification_call_room_id ? (
+            <JitsiMeetRoom
+              roomId={order.verification_call_room_id}
+              displayLabel={order.order_code}
+              displayName={isBuyer ? "SourceFi Buyer" : "SourceFi Supplier"}
+              onSegmentComplete={reportCallSegment}
+              onJoined={() => reportCallPresence(true)}
+              onLeft={() => reportCallPresence(false)}
+              onLiveTick={setLiveSegmentSeconds}
+              callConfig={detail.callConfig}
+            />
+          ) : (
+            <div className="mt-3 flex h-[320px] w-full items-center justify-center rounded-xl border border-border bg-black text-sm text-white/70">
+              Setting up your private call room…
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  // Buyer's delivery-verification stepper (components/ui/Stepper.tsx):
+  // exactly one step is ever "current" — the actual next actionable one
+  // — everything after it is "upcoming" and locked, everything before
+  // it is "complete". The underlying gate is unchanged and still
+  // server-enforced (approveOrder, lib/orderService.ts), this only
+  // decides what to SHOW.
+  const callDone = callRequirementMet;
+  const codeDone = callDone && codeConfirmed;
+  const acceptReady = codeDone && order.status === "proof_submitted";
+  const deliveryVerificationSteps: StepperStep[] = [
+    {
+      key: "call",
+      title: "Complete a 5-minute live verification call",
+      status: callDone ? "complete" : "current",
+      content: callWidget,
+    },
+    {
+      key: "code",
+      title: "Confirm your supplier's order code on camera",
+      status: !callDone ? "upcoming" : codeDone ? "complete" : "current",
+      summary: !callDone ? "Unlocks once the call requirement above is met." : undefined,
+      content:
+        callDone && !codeConfirmed ? (
+          <div>
+            {codeConfirmError && (
+              <div className="mb-2">
+                <ErrorPanel
+                  title={codeConfirmError.title}
+                  detail={codeConfirmError.detail}
+                  fundPosition={codeConfirmError.fundPosition}
+                  onRetry={confirmCallCodeMatch}
+                  retrying={confirmingCode}
+                  onDismiss={() => setCodeConfirmError(null)}
+                />
+              </div>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2 text-xs text-warning-text">
+              <span>Ask your supplier to show order code {order.order_code} on camera, then confirm it matched.</span>
+              <Button size="sm" onClick={confirmCallCodeMatch} disabled={confirmingCode}>
+                {confirmingCode ? "Confirming…" : "Confirm code match"}
+              </Button>
+            </div>
+          </div>
+        ) : codeDone ? (
+          <div className="rounded-lg border border-success bg-success-soft px-3 py-2 text-xs text-success-text">
+            ✓ Order code confirmed on camera.
+          </div>
+        ) : undefined,
+    },
+    {
+      key: "accept",
+      title: "Accept delivery",
+      status: acceptReady ? "current" : "upcoming",
+      summary: !codeDone
+        ? "Unlocks once verification above is complete."
+        : order.status !== "proof_submitted"
+        ? "Verification complete, waiting on your supplier to submit delivery proof."
+        : "Releases funds to your supplier, irreversible once confirmed.",
+      content: acceptReady ? (
+        <div>
+          {approveError && (
+            <div className="mb-3">
+              <ErrorPanel
+                title={approveError.title}
+                detail={approveError.detail}
+                fundPosition={approveError.fundPosition}
+                referenceCode={approveError.referenceCode}
+                retrying={acting}
+                onRetry={() =>
+                  runFinancialAction("/approve", undefined, {
+                    successMessage: "Order accepted. Releasing funds to your supplier.",
+                    fundPosition: "Your funds are still held in escrow, nothing has been released.",
+                    setError: setApproveError,
+                  })
+                }
+                onDismiss={() => setApproveError(null)}
+              />
+            </div>
+          )}
+          {!online && (
+            <div className="mb-3 flex items-center gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2 text-xs text-warning-text">
+              <AlertTriangle size={14} /> You&rsquo;re offline. Releasing funds needs a connection. Reconnect and try again.
+            </div>
+          )}
+          <Button fullWidth disabled={!online} onClick={() => setShowApproveConfirm(true)}>
+            <CheckCircle2 size={15} /> Accept delivery
+          </Button>
+        </div>
+      ) : undefined,
+    },
+  ];
   const formattedAmount = formatMoney(order.amount_minor, "NGN");
 
+  // Modal's own base now defaults to max-h-[90dvh] overflow-y-auto
+  // (components/ui/Modal.tsx) — this used to need its own explicit 90vh
+  // override before that default existed.
   return (
-    <Modal open onClose={onClose} size="lg" className="max-h-[90vh] overflow-y-auto" dismissible={!acting}>
+    <Modal open onClose={onClose} size="lg" dismissible={!acting}>
       <div className="mb-1 flex items-start justify-between gap-3">
         <div>
           <div className="font-mono text-xs tracking-wide text-accent-text">{order.order_code}</div>
@@ -670,19 +913,6 @@ export default function OrderDetailsModal({
               </Button>
             </div>
           )}
-          {/* Real Yellow Card bank-transfer funding: the buyer has to
-              actually pay into this account for the order to fund, this
-              isn't optional context, it's the instructions. */}
-          {fundPaymentInstructions && order.status === "payment_processing" && (
-            <div className="rounded-md border border-accent-strong bg-surface px-3 py-2.5 text-text-primary">
-              <div className="font-semibold">Pay {formattedAmount} into this account to complete funding:</div>
-              <div className="mt-1.5 font-mono">
-                {fundPaymentInstructions.bankName} · {fundPaymentInstructions.accountNumber}
-                <br />
-                {fundPaymentInstructions.accountName}
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -709,7 +939,7 @@ export default function OrderDetailsModal({
                     successMessage: "Payment started.",
                     fundPosition: "No money has left your account.",
                     setError: setFundError,
-                    onKycRequired: () => setShowKycModal(true),
+                    onInsufficientBalance,
                   })
                 }
                 onDismiss={() => setFundError(null)}
@@ -751,29 +981,15 @@ export default function OrderDetailsModal({
                 successMessage: "Payment started.",
                 fundPosition: "No money has left your account.",
                 setError: setFundError,
-                onKycRequired: () => setShowKycModal(true),
+                onInsufficientBalance,
               });
               setShowFundConfirm(false);
-              if (ok) onFunded?.();
+              if (ok) {
+                onFunded?.();
+                setReceiptLeg("funding");
+              }
             }}
             onCancel={() => setShowFundConfirm(false)}
-          />
-
-          <BuyerKycModal
-            open={showKycModal}
-            onClose={() => setShowKycModal(false)}
-            onSubmitted={async () => {
-              setShowKycModal(false);
-              // Re-run the same fund attempt now that KYC is on file,
-              // same "Retry lands after the thing that blocked it is
-              // fixed" posture as every other retry path in this app.
-              const ok = await runFinancialAction("/fund", undefined, {
-                successMessage: "Payment started.",
-                fundPosition: "No money has left your account.",
-                setError: setFundError,
-              });
-              if (ok) onFunded?.();
-            }}
           />
 
           {/* Flow 1: cancel before funding, free, no dispute. */}
@@ -909,6 +1125,7 @@ export default function OrderDetailsModal({
             }
             confirmLabel="Yes, cancel order"
             loading={acting}
+            requireTypedConfirmation={needsTypedConfirm ? formattedAmount : undefined}
             onConfirm={runAbandon}
             onCancel={() => setShowAbandonConfirm(false)}
           />
@@ -1070,7 +1287,11 @@ export default function OrderDetailsModal({
 
       {/* Live verification call, buyer and supplier can join the same
           room before the buyer approves. Not embedded by default,
-          metered mobile data is a real constraint, loads on request. */}
+          metered mobile data is a real constraint, loads on request.
+          Buyer sees this as an explicit step-by-step process
+          (components/ui/Stepper.tsx) toward accepting delivery;
+          supplier just sees the plain call panel, accepting isn't their
+          action. Same underlying call room and gates either way. */}
       {(isBuyer || isSupplier) && LIVE_CALL_ELIGIBLE_STATUSES.has(order.status) && (
         <div className="mt-5">
           {awaitingAnswer && !showCall && (
@@ -1095,166 +1316,31 @@ export default function OrderDetailsModal({
               </div>
             </div>
           )}
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            {!showCall && (
-              <Button variant="secondary" onClick={() => setShowCall(true)}>
-                <Video size={15} /> {verificationCallSeconds > 0 ? "Continue" : "Start"} live verification call
-              </Button>
-            )}
-            <span className={`text-xs font-semibold ${callRequirementMet ? "text-success-text" : "text-text-secondary"}`}>
-              {callRequirementMet
-                ? `✓ ${Math.floor(verificationCallSeconds / 60)}:${(verificationCallSeconds % 60).toString().padStart(2, "0")} verified, requirement met`
-                : `${Math.floor(verificationCallSeconds / 60)}:${(verificationCallSeconds % 60).toString().padStart(2, "0")} / 5:00 verified`}
-            </span>
-          </div>
-          {showCall && (
-            <div>
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
-                  Live call: share this order with your {isBuyer ? "supplier" : "buyer"} to meet here
-                </span>
-                <button type="button" onClick={() => setShowCall(false)} className="text-xs font-semibold text-text-secondary underline hover:text-text-primary">
-                  Hide
-                </button>
-              </div>
-              {order.verification_call_room_id ? (
-                <JitsiMeetRoom
-                  roomId={order.verification_call_room_id}
-                  displayLabel={order.order_code}
-                  displayName={isBuyer ? "SourceFi Buyer" : "SourceFi Supplier"}
-                  onSegmentComplete={reportCallSegment}
-                  onJoined={() => reportCallPresence(true)}
-                  onLeft={() => reportCallPresence(false)}
-                  callConfig={detail.callConfig}
-                />
-              ) : (
-                <div className="mt-3 flex h-[320px] w-full items-center justify-center rounded-xl border border-border bg-black text-sm text-white/70">
-                  Setting up your private call room…
-                </div>
-              )}
-              {/* Buyer-only liveness check: a long-enough call and a
-                  call that actually proved something aren't the same
-                  claim, see lib/orderService.ts's confirmCallCode. */}
-              {isBuyer && (
-                <div
-                  className={`mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs ${
-                    codeConfirmed ? "border-success bg-success-soft text-success-text" : "border-warning bg-warning-soft text-warning-text"
-                  }`}
-                >
-                  <span>
-                    {codeConfirmed
-                      ? "✓ Order code confirmed on camera."
-                      : `Ask your supplier to show order code ${order.order_code} on camera, then confirm it matched.`}
-                  </span>
-                  {!codeConfirmed && (
-                    <Button size="sm" onClick={confirmCallCodeMatch} disabled={confirmingCode}>
-                      {confirmingCode ? "Confirming…" : "Confirm code match"}
-                    </Button>
-                  )}
-                </div>
-              )}
-            </div>
+
+          {isSupplier && callWidget}
+
+          {isBuyer && (
+            <>
+              <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-accent-text">Delivery verification</div>
+              <Stepper steps={deliveryVerificationSteps} />
+            </>
           )}
         </div>
       )}
 
-      {/* Buyer: accept or reject delivery. Accept stays disabled until the
-          verification call requirement is met (enforced server-side in
-          orderService.ts's approveOrder). Releasing funds is irreversible,
-          so it also needs an explicit confirm step. */}
+      {/* Buyer: reject delivery, a separate escape hatch from the
+          verification steps above, deliberately not gated on them —
+          rejecting freezes funds for admin review, it doesn't release
+          anything, so it doesn't need the same safety gate accepting
+          does. */}
       {isBuyer && order.status === "proof_submitted" && (
         <div className="mt-5">
-          {!callRequirementMet && (
-            <div className="mb-3 flex items-start gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2.5 text-xs text-warning-text">
-              <Video size={14} className="mt-0.5 shrink-0" />
-              <span>
-                Accepting delivery is suspended until you complete a live verification call of at least 5 minutes with your
-                supplier:{" "}
-                <strong>
-                  {Math.floor(verificationCallSeconds / 60)}:{(verificationCallSeconds % 60).toString().padStart(2, "0")} / 5:00
-                </strong>{" "}
-                so far.
-              </span>
-            </div>
-          )}
-          {callRequirementMet && !codeConfirmed && (
-            <div className="mb-3 flex items-start gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2.5 text-xs text-warning-text">
-              <Video size={14} className="mt-0.5 shrink-0" />
-              <span>
-                Accepting delivery is suspended until you confirm your supplier showed the order code on camera during the call
-                (see the call panel above).
-              </span>
-            </div>
-          )}
-          {approveError && (
-            <div className="mb-3">
-              <ErrorPanel
-                title={approveError.title}
-                detail={approveError.detail}
-                fundPosition={approveError.fundPosition}
-                referenceCode={approveError.referenceCode}
-                retrying={acting}
-                onRetry={() =>
-                  runFinancialAction("/approve", undefined, {
-                    successMessage: "Order accepted. Releasing funds to your supplier.",
-                    fundPosition: "Your funds are still held in escrow, nothing has been released.",
-                    setError: setApproveError,
-                  })
-                }
-                onDismiss={() => setApproveError(null)}
-              />
-            </div>
-          )}
-          {!online && (
-            <div className="mb-3 flex items-center gap-2 rounded-lg border border-warning bg-warning-soft px-3 py-2 text-xs text-warning-text">
-              <AlertTriangle size={14} /> You&rsquo;re offline. Releasing funds needs a connection. Reconnect and try again.
-            </div>
-          )}
-          <span
-            title={
-              !callRequirementMet
-                ? "Complete the 5-minute verification call above first."
-                : !codeConfirmed
-                  ? "Confirm the order code match in the call panel above first."
-                  : undefined
-            }
-          >
-            <Button fullWidth disabled={!callRequirementMet || !codeConfirmed || !online} onClick={() => setShowApproveConfirm(true)}>
-              <CheckCircle2 size={15} /> Accept delivery
-            </Button>
-          </span>
-          <ConfirmDialog
-            open={showApproveConfirm}
-            tone="danger"
-            title="Confirm release"
-            body={
-              <>
-                You&rsquo;re about to release <strong>{formattedAmount}</strong> to{" "}
-                <strong>{order.supplier_business_name || "this supplier"}</strong>. This can&rsquo;t be undone once the
-                transfer confirms. Only continue if you&rsquo;ve reviewed the delivery proof above and you&rsquo;re
-                satisfied.
-              </>
-            }
-            confirmLabel={`Yes, release ${formattedAmount}`}
-            loading={acting}
-            requireTypedConfirmation={needsTypedConfirm ? formattedAmount : undefined}
-            onConfirm={async () => {
-              await runFinancialAction("/approve", undefined, {
-                successMessage: "Order accepted. Releasing funds to your supplier.",
-                fundPosition: "Your funds are still held in escrow, nothing has been released.",
-                setError: setApproveError,
-              });
-              setShowApproveConfirm(false);
-            }}
-            onCancel={() => setShowApproveConfirm(false)}
-          />
-
           {!showRejectForm ? (
-            <button type="button" onClick={() => setShowRejectForm(true)} className="mt-3 text-xs font-semibold text-danger-text underline">
+            <button type="button" onClick={() => setShowRejectForm(true)} className="text-xs font-semibold text-danger-text underline">
               Something's wrong with this delivery
             </button>
           ) : (
-            <div className="mt-3 flex flex-col gap-3 rounded-xl border border-danger bg-danger-soft p-4">
+            <div className="flex flex-col gap-3 rounded-xl border border-danger bg-danger-soft p-4">
               <div className="text-xs font-semibold uppercase tracking-wide text-danger-text">Reject delivery</div>
               <p className="text-xs leading-relaxed text-danger-text">
                 This freezes the funds and opens a dispute. Nothing releases to your supplier until an admin reviews it.
@@ -1281,6 +1367,17 @@ export default function OrderDetailsModal({
               </div>
             </div>
           )}
+          {rejectError && (
+            <ErrorPanel
+              title={rejectError.title}
+              detail={rejectError.detail}
+              fundPosition={rejectError.fundPosition}
+              referenceCode={rejectError.referenceCode}
+              retrying={acting}
+              onRetry={runReject}
+              onDismiss={() => setRejectError(null)}
+            />
+          )}
           <ConfirmDialog
             open={showRejectConfirm}
             tone="danger"
@@ -1293,10 +1390,41 @@ export default function OrderDetailsModal({
             }
             confirmLabel="Yes, reject delivery"
             loading={acting}
+            requireTypedConfirmation={needsTypedConfirm ? formattedAmount : undefined}
             onConfirm={runReject}
             onCancel={() => setShowRejectConfirm(false)}
           />
         </div>
+      )}
+
+      {/* The actual accept-delivery confirmation, triggered from step 3
+          of the stepper above. */}
+      {isBuyer && order.status === "proof_submitted" && (
+        <ConfirmDialog
+          open={showApproveConfirm}
+          tone="danger"
+          title="Confirm release"
+          body={
+            <>
+              You&rsquo;re about to release <strong>{formattedAmount}</strong> to{" "}
+              <strong>{order.supplier_business_name || "this supplier"}</strong>. This can&rsquo;t be undone once the
+              transfer confirms. Only continue if you&rsquo;ve reviewed the delivery proof above and you&rsquo;re
+              satisfied.
+            </>
+          }
+          confirmLabel={`Yes, release ${formattedAmount}`}
+          loading={acting}
+          requireTypedConfirmation={needsTypedConfirm ? formattedAmount : undefined}
+          onConfirm={async () => {
+            await runFinancialAction("/approve", undefined, {
+              successMessage: "Order accepted. Releasing funds to your supplier.",
+              fundPosition: "Your funds are still held in escrow, nothing has been released.",
+              setError: setApproveError,
+            });
+            setShowApproveConfirm(false);
+          }}
+          onCancel={() => setShowApproveConfirm(false)}
+        />
       )}
 
       {/* Dispute status, visible to whoever's involved */}
@@ -1328,18 +1456,25 @@ export default function OrderDetailsModal({
       )}
       {/* Rating + report-issue: available once settlement_processing, not
           only settled, same "already done in every way that matters"
-          reasoning as the banner above — settled would never arrive
-          under a real Circle release with no real settlement leg built
-          yet (docs/payment-integration.md), which made both of these
-          permanently unreachable. The "order complete" banner itself
-          only repeats for a literal settled (the settlement_processing
-          case already got its own confirmation from the banner above,
-          showing both here would just duplicate it). */}
+          reasoning as the banner above. The "order complete" banner
+          itself only repeats for a literal settled (the
+          settlement_processing case already got its own confirmation
+          from the banner above, showing both here would just duplicate
+          it). */}
       {(order.status === "settled" || order.status === "settlement_processing") && (
         <div className="mt-5 flex flex-col gap-4">
           {order.status === "settled" && (
-            <div className="flex items-center gap-2 rounded-lg border border-success bg-success-soft px-4 py-3 text-sm text-success-text">
-              <CheckCircle2 size={15} /> Order complete, supplier has been paid.
+            <div className="flex flex-col gap-2 rounded-lg border border-success bg-success-soft px-4 py-3 text-sm text-success-text">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 size={15} /> Order complete, supplier has been paid.
+              </div>
+              <button
+                type="button"
+                onClick={() => setReceiptLeg("settlement")}
+                className="self-start text-xs font-semibold underline underline-offset-2"
+              >
+                View receipt
+              </button>
             </div>
           )}
 
@@ -1457,6 +1592,12 @@ export default function OrderDetailsModal({
           </div>
         )}
       </div>
+
+      <ReceiptModal
+        open={receiptLeg !== null}
+        onClose={() => setReceiptLeg(null)}
+        endpoint={`/api/orders/${order.id}/receipt?leg=${receiptLeg ?? "funding"}`}
+      />
     </Modal>
   );
 }

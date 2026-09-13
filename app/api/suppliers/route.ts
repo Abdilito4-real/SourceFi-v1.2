@@ -13,7 +13,7 @@
 import { getSupabaseServerClient } from "../../../lib/supabaseServer";
 import { requireSession } from "../../../lib/authz";
 import { dbErrorResponse } from "../../../lib/dbErrorResponse";
-import { computeSupplierTier, getCompletedOrderCounts, getSupplierRatingAggregates } from "../../../lib/supplierTrust";
+import { computeSupplierTier, getCompletedOrderCounts, getSupplierProfilePictures, getSupplierRatingAggregates } from "../../../lib/supplierTrust";
 
 export async function GET(request: Request) {
   const auth = await requireSession();
@@ -28,7 +28,7 @@ export async function GET(request: Request) {
   const supabase = getSupabaseServerClient();
   let query = supabase
     .from("supplier_profiles")
-    .select("id, business_name, business_location, what_they_sell, verification_status, verified_at, verification_expires_at, orders_since_verification")
+    .select("id, user_id, business_name, business_location, what_they_sell, verification_status, verified_at, verification_expires_at, orders_since_verification")
     .eq("verification_status", "verified")
     .gt("verification_expires_at", new Date().toISOString())
     .lt("orders_since_verification", 20)
@@ -58,16 +58,22 @@ export async function GET(request: Request) {
   // Aggregate rating (CONFIRMED-on-chain only, design doc Section C.8)
   // and completed-order count, both bulk queries, not N+1.
   const supplierIds = (data || []).map((s) => s.id);
-  const [ratingAggregates, completedOrderCounts] = await Promise.all([
+  const [ratingAggregates, completedOrderCounts, profilePictures] = await Promise.all([
     getSupplierRatingAggregates(supabase, supplierIds),
     getCompletedOrderCounts(supabase, supplierIds),
+    getSupplierProfilePictures(supabase, data || []),
   ]);
 
   const suppliers = (data || []).map((s) => {
     const rating = ratingAggregates.get(s.id) ?? { average: null, count: 0 };
     const completedOrderCount = completedOrderCounts.get(s.id) ?? 0;
+    // user_id was only needed to look up the photo above, not part of
+    // the public shape (a buyer has no business knowing the underlying
+    // users.id).
+    const { user_id: _userId, ...rest } = s;
     return {
-      ...s,
+      ...rest,
+      profile_picture_url: profilePictures.get(s.id) ?? null,
       rating_average: rating.average,
       rating_count: rating.count,
       completed_order_count: completedOrderCount,

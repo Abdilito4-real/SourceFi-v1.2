@@ -3,7 +3,7 @@
 // The in-app notification centre's read path, this is what stays
 // correct regardless of whether push ever arrived (feedback-layer rule).
 // Always scoped to the caller's own user_id, never a client-supplied one.
-import { getSupabaseServerClient } from "../../../lib/supabaseServer";
+import { getUserScopedOrFallbackClient } from "../../../lib/supabaseUserClient";
 import { requireRole } from "../../../lib/authz";
 
 const PAGE_SIZE = 30;
@@ -12,7 +12,11 @@ export async function GET(request: Request) {
   const auth = await requireRole(["buyer", "supplier", "admin"]);
   if (auth instanceof Response) return auth;
 
-  const supabase = getSupabaseServerClient();
+  // RLS pilot expansion (0021_rls_expand_pilot.sql): self-only, backed
+  // by notifications_select_own. This is admin's own inbox here, not
+  // oversight of anyone else's, so admin goes through the user-scoped
+  // client too — unlike the orders route's admin branch.
+  const supabase = await getUserScopedOrFallbackClient(auth.user.id);
   const { searchParams } = new URL(request.url);
   const before = searchParams.get("before"); // ISO timestamp cursor, for "load more"
 

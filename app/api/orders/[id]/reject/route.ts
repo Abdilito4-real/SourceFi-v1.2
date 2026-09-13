@@ -11,6 +11,7 @@ import { InvalidOrderTransitionError } from "../../../../../lib/orderStateMachin
 import { filterSafeHttpUrls } from "../../../../../lib/safeUrl";
 import { checkDualQuota } from "../../../../../lib/rateLimit";
 import { getClientIp } from "../../../../../lib/authz";
+import { dbErrorResponse } from "../../../../../lib/dbErrorResponse";
 import type { DisputeCategory } from "../../../../../lib/types";
 
 const VALID_CATEGORIES: DisputeCategory[] = [
@@ -56,6 +57,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (err instanceof OrderNotFoundError) return Response.json({ error: err.message }, { status: 404 });
     if (err instanceof NotOrderOwnerError) return Response.json({ error: err.message }, { status: 403 });
     if (err instanceof InvalidOrderTransitionError) return Response.json({ error: err.message }, { status: 409 });
-    return Response.json({ error: err instanceof Error ? err.message : "Failed to reject delivery proof." }, { status: 500 });
+    return dbErrorResponse(`reject proof, order ${orderId}`, err instanceof Error ? err : new Error(String(err)));
   }
 }

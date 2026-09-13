@@ -18,7 +18,7 @@ export function Table({ className = "", children, ...props }: React.TableHTMLAtt
 }
 
 export function Thead({ className = "", ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return <thead className={cn("bg-surface-sunken", className)} {...props} />;
+  return <thead className={cn("border-b border-border bg-surface-sunken", className)} {...props} />;
 }
 
 export function Tbody({ className = "", ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {

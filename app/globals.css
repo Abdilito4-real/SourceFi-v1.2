@@ -134,6 +134,13 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Applied by components/ui/useBodyScrollLock.ts while a Modal or the
+ * mobile nav drawer is open, so touch-dragging the fixed backdrop/drawer
+ * on mobile can't scroll the page sitting behind it. */
+body.scroll-locked {
+  overflow: hidden;
+}
+
 /* Visible keyboard focus everywhere, independent of mouse hover styles. */
 :focus-visible {
   outline: 2px solid var(--color-focus-ring);
